@@ -509,6 +509,11 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // Phase 5d: Reposition cross-domain derivations below their parent domain.
     reposition_cross_domain_derivations(&mut deriv_layouts, &domain_layouts, graph);
 
+    // Phase 5e: Normalize — shift all elements so that the minimum x and y are >= 0.
+    // This must happen before edge routing so that SVG path coordinates match the
+    // final node/domain positions.
+    normalize_positions(&mut node_layouts, &mut deriv_layouts, &mut domain_layouts);
+
     // Phase 6a: Port side assignment
     let port_sides = routing::assign_port_sides(graph, &node_layouts, &deriv_layouts);
 
@@ -580,9 +585,6 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
             }
         }
     }
-
-    // Normalize: shift all elements so that the minimum x and y are >= 0.
-    normalize_positions(&mut node_layouts, &mut deriv_layouts, &mut domain_layouts);
 
     // Compute overall dimensions
     let (width, height) = compute_dimensions(&node_layouts, &deriv_layouts, &domain_layouts);
