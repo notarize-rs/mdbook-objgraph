@@ -3,7 +3,7 @@
 //! For each domain, computes the axis-aligned bounding box that encloses
 //! all member nodes, expanded by DOMAIN_PADDING on every side.
 
-use crate::model::types::Graph;
+use crate::model::types::{Edge, Graph};
 
 use super::{DomainLayout, NodeLayout, CORRIDOR_PAD, DOMAIN_PADDING};
 
@@ -134,6 +134,77 @@ pub fn separate_domains(
         }
 
         if !any_overlap {
+            break;
+        }
+    }
+}
+
+/// Vertical separation pass for cross-domain anchor hierarchy.
+///
+/// When a node in domain A anchors a node in domain B, domain B must appear
+/// below domain A. This pass detects such relationships and shifts child
+/// domains (and their member nodes) downward until the required vertical gap
+/// is achieved.
+///
+/// Must be called after `separate_domains` (horizontal) so that domain boxes
+/// are already horizontally separated.
+pub fn separate_domains_vertically(
+    node_layouts: &mut [NodeLayout],
+    domain_layouts: &mut [DomainLayout],
+    graph: &Graph,
+) {
+    // Build cross-domain anchor relationships: (above_idx, below_idx) in domain_layouts.
+    let mut domain_order: Vec<(usize, usize)> = Vec::new();
+
+    for edge in &graph.edges {
+        if let Edge::Anchor { parent, child, .. } = edge {
+            let parent_domain = graph.nodes[parent.index()].domain;
+            let child_domain = graph.nodes[child.index()].domain;
+            if let (Some(pd), Some(cd)) = (parent_domain, child_domain) {
+                if pd != cd {
+                    let pi = domain_layouts.iter().position(|d| d.id == pd);
+                    let ci = domain_layouts.iter().position(|d| d.id == cd);
+                    if let (Some(pi), Some(ci)) = (pi, ci) {
+                        if !domain_order.contains(&(pi, ci)) {
+                            domain_order.push((pi, ci));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if domain_order.is_empty() {
+        return;
+    }
+
+    const MAX_ITERS: usize = 100;
+    for _ in 0..MAX_ITERS {
+        let mut any_shift = false;
+
+        for &(above_idx, below_idx) in &domain_order {
+            let above_bottom = domain_layouts[above_idx].y + domain_layouts[above_idx].height;
+            let below_top = domain_layouts[below_idx].y;
+
+            let required_gap = CORRIDOR_PAD * 2.0;
+            if below_top < above_bottom + required_gap {
+                let shift = (above_bottom + required_gap) - below_top;
+
+                // Move member nodes.
+                let domain_id = domain_layouts[below_idx].id;
+                if let Some(domain) = graph.domains.iter().find(|d| d.id == domain_id) {
+                    for &nid in &domain.members {
+                        node_layouts[nid.index()].y += shift;
+                    }
+                }
+
+                // Move the domain box itself.
+                domain_layouts[below_idx].y += shift;
+                any_shift = true;
+            }
+        }
+
+        if !any_shift {
             break;
         }
     }

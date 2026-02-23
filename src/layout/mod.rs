@@ -441,6 +441,9 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // Phase 5b: Separate overlapping domain boxes (and shift their nodes with them).
     domain::separate_domains(&mut node_layouts, &mut domain_layouts, graph);
 
+    // Phase 5c: Enforce vertical ordering for cross-domain anchor hierarchy.
+    domain::separate_domains_vertically(&mut node_layouts, &mut domain_layouts, graph);
+
     // Phase 6a: Port side assignment
     let port_sides = routing::assign_port_sides(graph, &node_layouts, &deriv_layouts);
 
