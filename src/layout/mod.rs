@@ -13,24 +13,66 @@ use crate::model::types::{
 use long_edge::{LayerEntry, LayerItem};
 
 // ---------------------------------------------------------------------------
-// Sizing constants (DESIGN.md §4.2.4)
+// Sizing constants (LAYOUT.md §4.2.4)
 // ---------------------------------------------------------------------------
 
+/// Grid base unit; all spacing values are multiples of this.
+pub const BASE_UNIT: f64 = 4.0;
+/// Node header height (pad 12 + cap-height 8 + pad 12).
 pub const HEADER_HEIGHT: f64 = 32.0;
+/// Each property row height.
 pub const ROW_HEIGHT: f64 = 20.0;
+/// Horizontal padding inside nodes (left/right).
 pub const CONTENT_PAD: f64 = 12.0;
+/// Problem indicator dot radius.
+pub const DOT_RADIUS: f64 = 2.0;
 pub const PORT_RADIUS: f64 = 4.0;
+/// Vertical gap between nodes in the same column.
+pub const INTER_NODE_GAP: f64 = 28.0;
+/// Minimum horizontal gap between nodes in the same layer.
 pub const NODE_H_SPACING: f64 = 40.0;
+/// Vertical gap between node layers.
 pub const LAYER_V_SPACING: f64 = 48.0;
+/// Vertical gap for derivation layers.
 pub const DERIV_V_SPACING: f64 = 24.0;
+/// Domain title area height (pad 12 + cap-height 8 + pad 12).
+pub const DOMAIN_TITLE_HEIGHT: f64 = 32.0;
 pub const DOMAIN_PADDING: f64 = 10.0;
+/// Padding from corridor edge to channel center.
 pub const CORRIDOR_PAD: f64 = 8.0;
-pub const STUB_LENGTH: f64 = 20.0;
-pub const CHAR_WIDTH: f64 = 5.5;
-pub const GLOBAL_MARGIN: f64 = 12.0;
-pub const PILL_HEIGHT: f64 = 20.0;
-pub const PILL_CONTENT_PAD: f64 = 12.0;
+/// Padding between adjacent channels in a corridor.
 pub const CHANNEL_GAP: f64 = 4.0;
+/// Parallel edge offset in shared channels.
+pub const EDGE_SPACING: f64 = 8.0;
+/// Cross-domain constraint stub arrow length.
+pub const STUB_LENGTH: f64 = 20.0;
+/// All arrowheads are 6×6; path endpoint offset by this amount.
+pub const ARROWHEAD_SIZE: f64 = 6.0;
+/// Derivation pill height (matches row height).
+pub const PILL_HEIGHT: f64 = 20.0;
+/// Horizontal padding inside derivation pill (left/right).
+pub const PILL_CONTENT_PAD: f64 = 12.0;
+/// Character width estimate for monospace text.
+pub const CHAR_WIDTH: f64 = 5.5;
+/// Global margin around the entire SVG.
+pub const GLOBAL_MARGIN: f64 = 20.0;
+
+// ---------------------------------------------------------------------------
+// Font-size constants (LAYOUT.md §4.2.4)
+// ---------------------------------------------------------------------------
+
+/// Node title text.
+pub const TITLE_FONT_SIZE: f64 = 12.0;
+/// Property name text (monospace).
+pub const PROP_FONT_SIZE: f64 = 10.0;
+/// Domain label text.
+pub const DOMAIN_FONT_SIZE: f64 = 10.0;
+/// Anchor edge label text.
+pub const ANCHOR_LABEL_SIZE: f64 = 8.0;
+/// Constraint edge label text.
+pub const CONSTRAINT_LABEL_SIZE: f64 = 6.0;
+/// Derivation pill label text (monospace).
+pub const PILL_FONT_SIZE: f64 = 8.0;
 
 // ---------------------------------------------------------------------------
 // Layout result types (DESIGN.md §5.5)

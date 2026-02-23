@@ -46,7 +46,7 @@ fn pki_example_full_pipeline() {
     assert!(svg.contains("obgraph-container"), "Output should contain SVG container");
     assert!(svg.contains("Certificate Authority"), "Output should contain CA label");
     assert!(svg.contains("Revocation List"), "Output should contain revocation label");
-    assert!(svg.contains("obgraph-link"), "Output should contain link edges");
+    assert!(svg.contains("obgraph-anchor"), "Output should contain anchor edges");
 }
 
 #[test]

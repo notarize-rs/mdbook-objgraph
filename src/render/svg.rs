@@ -2,10 +2,9 @@
 
 use std::fmt::Write;
 
-use crate::layout::{LayoutResult, HEADER_HEIGHT, PILL_HEIGHT, ROW_HEIGHT};
+use crate::layout::{LayoutResult, DOT_RADIUS, HEADER_HEIGHT, PILL_HEIGHT, ROW_HEIGHT};
 use crate::model::state::StateResult;
-use crate::model::types::Graph;
-use crate::model::types::NodeId;
+use crate::model::types::{Edge, EdgeId, Graph, NodeId};
 
 use super::interactivity;
 use super::style;
@@ -44,20 +43,20 @@ pub fn generate_svg(graph: &Graph, layout: &LayoutResult, state: &StateResult) -
     // Embedded CSS
     writeln!(out, r#"    <style>{}</style>"#, style::css()).unwrap();
 
+    // Reusable definitions (markers, filters)
+    write_defs(&mut out);
+
     // Layer 0: domain backgrounds
     write_domains(&mut out, layout);
 
     // Layer 1: edges
-    write_edges(&mut out, graph, layout);
+    write_edges(&mut out, graph, layout, state);
 
     // Layer 2: derivation nodes
     write_derivations(&mut out, graph, layout);
 
     // Layer 3: nodes
     write_nodes(&mut out, graph, layout, state);
-
-    // Arrow marker defs
-    write_defs(&mut out);
 
     // Embedded JS
     writeln!(out, r#"    <script>{}</script>"#, interactivity::js()).unwrap();
@@ -115,23 +114,57 @@ fn write_domains(out: &mut String, layout: &LayoutResult) {
 // Layer 1: edges
 // ---------------------------------------------------------------------------
 
-fn write_edges(out: &mut String, _graph: &Graph, layout: &LayoutResult) {
+/// Determine whether an edge is valid based on state propagation results.
+///
+/// - Anchor: valid if parent is anchored+verified.
+/// - Constraint: valid if source node is anchored+verified and source prop is constrained.
+/// - DerivInput: valid if source node is anchored+verified and source prop is constrained.
+fn is_edge_valid(edge_id: EdgeId, graph: &Graph, state: &StateResult) -> bool {
+    let edge = &graph.edges[edge_id.index()];
+    match edge {
+        Edge::Anchor { parent, .. } => {
+            state.is_node_anchored(*parent) && state.is_node_verified(graph, *parent)
+        }
+        Edge::Constraint { source_prop, .. } => {
+            let src_node_id = graph.properties[source_prop.index()].node;
+            state.is_node_anchored(src_node_id)
+                && state.is_node_verified(graph, src_node_id)
+                && state.is_prop_constrained(*source_prop)
+        }
+        Edge::DerivInput { source_prop, .. } => {
+            let src_node_id = graph.properties[source_prop.index()].node;
+            state.is_node_anchored(src_node_id)
+                && state.is_node_verified(graph, src_node_id)
+                && state.is_prop_constrained(*source_prop)
+        }
+    }
+}
+
+fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &StateResult) {
     writeln!(out, r#"    <g class="obgraph-edges">"#).unwrap();
 
     // --- Anchor paths ---
-    writeln!(out, r#"      <g class="obgraph-links">"#).unwrap();
+    writeln!(out, r#"      <g class="obgraph-anchors">"#).unwrap();
     for ep in &layout.anchors {
+        let valid = is_edge_valid(ep.edge_id, graph, state);
+        let (class, marker) = if valid {
+            ("obgraph-anchor", "arrow-anchor-valid")
+        } else {
+            ("obgraph-anchor-invalid", "arrow-anchor-invalid")
+        };
         writeln!(
             out,
-            r#"        <path class="obgraph-link" d="{d}" data-edge="{id}" marker-end="url(#arrow-link)"/>"#,
+            r#"        <path class="{class}" d="{d}" data-edge="{id}" marker-end="url(#{marker})"/>"#,
+            class = class,
             d = ep.svg_path,
-            id = ep.edge_id.0
+            id = ep.edge_id.0,
+            marker = marker,
         )
         .unwrap();
         if let Some(lbl) = &ep.label {
             writeln!(
                 out,
-                r#"        <text class="obgraph-link-label" x="{x}" y="{y}" text-anchor="{anchor}">{text}</text>"#,
+                r#"        <text class="obgraph-anchor-label" x="{x}" y="{y}" text-anchor="{anchor}">{text}</text>"#,
                 x = lbl.x, y = lbl.y, anchor = lbl.anchor, text = escape_xml(&lbl.text)
             ).unwrap();
         }
@@ -141,11 +174,19 @@ fn write_edges(out: &mut String, _graph: &Graph, layout: &LayoutResult) {
     // --- Intra-domain constraint and derivation input paths ---
     writeln!(out, r#"      <g class="obgraph-constraints-intra">"#).unwrap();
     for ep in &layout.intra_domain_constraints {
+        let valid = is_edge_valid(ep.edge_id, graph, state);
+        let (class, marker) = if valid {
+            ("obgraph-constraint", "arrow-constraint-valid")
+        } else {
+            ("obgraph-constraint-invalid", "arrow-constraint-invalid")
+        };
         writeln!(
             out,
-            r#"        <path class="obgraph-constraint" d="{d}" data-edge="{id}" marker-end="url(#arrow-constraint)"/>"#,
+            r#"        <path class="{class}" d="{d}" data-edge="{id}" marker-end="url(#{marker})"/>"#,
+            class = class,
             d = ep.svg_path,
-            id = ep.edge_id.0
+            id = ep.edge_id.0,
+            marker = marker,
         )
         .unwrap();
         if let Some(lbl) = &ep.label {
@@ -163,12 +204,20 @@ fn write_edges(out: &mut String, _graph: &Graph, layout: &LayoutResult) {
     for cross in &layout.cross_domain_constraints {
         let ep = &cross.full_path;
         let participants_str = participants_attr(&cross.participants);
+        let valid = is_edge_valid(ep.edge_id, graph, state);
+        let (class, marker) = if valid {
+            ("obgraph-constraint-full", "arrow-constraint-valid")
+        } else {
+            ("obgraph-constraint-full obgraph-constraint-invalid", "arrow-constraint-invalid")
+        };
         writeln!(
             out,
-            r#"        <path class="obgraph-constraint-full" d="{d}" data-edge="{id}" data-participants="{p}" marker-end="url(#arrow-constraint-cross)"/>"#,
+            r#"        <path class="{class}" d="{d}" data-edge="{id}" data-participants="{p}" marker-end="url(#{marker})"/>"#,
+            class = class,
             d = ep.svg_path,
             id = ep.edge_id.0,
             p = participants_str,
+            marker = marker,
         )
         .unwrap();
     }
@@ -178,13 +227,20 @@ fn write_edges(out: &mut String, _graph: &Graph, layout: &LayoutResult) {
     writeln!(out, r#"      <g class="obgraph-constraint-stubs">"#).unwrap();
     for cross in &layout.cross_domain_constraints {
         let participants_str = participants_attr(&cross.participants);
+        let valid = is_edge_valid(cross.full_path.edge_id, graph, state);
+        let marker = if valid {
+            "arrow-constraint-valid"
+        } else {
+            "arrow-constraint-invalid"
+        };
         for ep in &cross.stub_paths {
             writeln!(
                 out,
-                r#"        <path class="obgraph-constraint-stub" d="{d}" data-edge="{id}" data-participants="{p}" marker-end="url(#arrow-constraint-cross)"/>"#,
+                r#"        <path class="obgraph-constraint-stub" d="{d}" data-edge="{id}" data-participants="{p}" marker-end="url(#{marker})"/>"#,
                 d = ep.svg_path,
                 id = ep.edge_id.0,
                 p = participants_str,
+                marker = marker,
             )
             .unwrap();
         }
@@ -192,7 +248,9 @@ fn write_edges(out: &mut String, _graph: &Graph, layout: &LayoutResult) {
     writeln!(out, r#"      </g>"#).unwrap();
 
     // --- Cross-domain derivation chains ---
+    writeln!(out, r#"      <g class="obgraph-deriv-chains">"#).unwrap();
     write_deriv_chains(out, layout);
+    writeln!(out, r#"      </g>"#).unwrap();
 
     writeln!(out, r#"    </g>"#).unwrap();
 }
@@ -269,7 +327,7 @@ fn write_derivations(out: &mut String, graph: &Graph, layout: &LayoutResult) {
         .unwrap();
         writeln!(
             out,
-            r#"        <rect class="obgraph-deriv-shape" x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}"/>"#,
+            r#"        <rect class="obgraph-pill" x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}"/>"#,
             x = dl.x,
             y = dl.y,
             w = dl.width,
@@ -279,7 +337,7 @@ fn write_derivations(out: &mut String, graph: &Graph, layout: &LayoutResult) {
         .unwrap();
         writeln!(
             out,
-            r#"        <text class="obgraph-deriv-label" x="{x}" y="{y}" text-anchor="middle" dominant-baseline="central">{op}</text>"#,
+            r#"        <text class="obgraph-pill-label" x="{x}" y="{y}" text-anchor="middle" dominant-baseline="central">{op}</text>"#,
             x = cx,
             y = cy,
             op = escape_xml(&deriv.operation)
@@ -316,7 +374,7 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         // Background rect — full node height
         writeln!(
             out,
-            r#"        <rect class="obgraph-node-bg" x="{x}" y="{y}" width="{w}" height="{h}" rx="3"/>"#,
+            r#"        <rect class="obgraph-node-bg" x="{x}" y="{y}" width="{w}" height="{h}" rx="8"/>"#,
             x = nl.x,
             y = nl.y,
             w = nl.width,
@@ -324,14 +382,24 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         )
         .unwrap();
 
-        // Header background rect
+        // Header background: two overlapping rects for rounded-top / square-bottom.
+        // First rect covers full header height with rx="8" (rounded top corners).
         writeln!(
             out,
-            r#"        <rect class="obgraph-node-header" x="{x}" y="{y}" width="{w}" height="{h}" rx="3"/>"#,
+            r#"        <rect class="obgraph-node-header" x="{x}" y="{y}" width="{w}" height="{h}" rx="8"/>"#,
             x = nl.x,
             y = nl.y,
             w = nl.width,
             h = HEADER_HEIGHT
+        )
+        .unwrap();
+        // Second rect covers bottom half to square off bottom corners where header meets properties.
+        writeln!(
+            out,
+            r#"        <rect class="obgraph-node-header-fill" x="{x}" y="{y}" width="{w}" height="16"/>"#,
+            x = nl.x,
+            y = nl.y + 16.0,
+            w = nl.width,
         )
         .unwrap();
 
@@ -354,9 +422,10 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
             let dot_y = nl.y + HEADER_HEIGHT / 2.0;
             writeln!(
                 out,
-                r#"        <circle class="obgraph-node-dot" cx="{x}" cy="{y}" r="3"/>"#,
+                r#"        <circle class="obgraph-node-dot" cx="{x}" cy="{y}" r="{r}"/>"#,
                 x = dot_x,
-                y = dot_y
+                y = dot_y,
+                r = DOT_RADIUS
             )
             .unwrap();
         }
@@ -429,9 +498,10 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
                 let dot_y = port_y;
                 writeln!(
                     out,
-                    r#"          <circle class="obgraph-prop-dot" cx="{x}" cy="{y}" r="3"/>"#,
+                    r#"          <circle class="obgraph-prop-dot" cx="{x}" cy="{y}" r="{r}"/>"#,
                     x = dot_x,
-                    y = dot_y
+                    y = dot_y,
+                    r = DOT_RADIUS
                 )
                 .unwrap();
             }
@@ -451,6 +521,17 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
                 .unwrap();
             }
         }
+
+        // Border rect: 1px default, 2px dark when selected (via CSS)
+        writeln!(
+            out,
+            r#"        <rect class="obgraph-node-border" x="{x}" y="{y}" width="{w}" height="{h}" rx="8" fill="none"/>"#,
+            x = nl.x,
+            y = nl.y,
+            w = nl.width,
+            h = nl.height
+        )
+        .unwrap();
 
         writeln!(out, r#"      </g>"#).unwrap();
     }
@@ -472,10 +553,10 @@ fn write_defs(out: &mut String) {
     )
     .unwrap();
 
-    // Anchor/link arrow — 6×6px, refX=0 (path endpoint offset by 6px), green
+    // Anchor arrowhead: 6×6, valid (green)
     writeln!(
         out,
-        r#"      <marker id="arrow-link" viewBox="0 0 6 6" refX="0" refY="3""#
+        r#"      <marker id="arrow-anchor-valid" viewBox="0 0 6 6" refX="0" refY="3""#
     )
     .unwrap();
     writeln!(
@@ -485,15 +566,15 @@ fn write_defs(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        r#"        <path d="M0,0 L6,3 L0,6 Z" class="obgraph-arrow-link"/>"#
+        r##"        <path d="M0,0 L6,3 L0,6 Z" fill="#22c55e"/>"##
     )
     .unwrap();
     writeln!(out, r#"      </marker>"#).unwrap();
 
-    // Intra-domain constraint arrow — 6×6px, refX=0, blue
+    // Anchor arrowhead: 6×6, invalid (red)
     writeln!(
         out,
-        r#"      <marker id="arrow-constraint" viewBox="0 0 6 6" refX="0" refY="3""#
+        r#"      <marker id="arrow-anchor-invalid" viewBox="0 0 6 6" refX="0" refY="3""#
     )
     .unwrap();
     writeln!(
@@ -503,15 +584,15 @@ fn write_defs(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        r#"        <path d="M0,0 L6,3 L0,6 Z" class="obgraph-arrow-constraint"/>"#
+        r##"        <path d="M0,0 L6,3 L0,6 Z" fill="#ef4444"/>"##
     )
     .unwrap();
     writeln!(out, r#"      </marker>"#).unwrap();
 
-    // Cross-domain constraint arrow — 6×6px, refX=0, blue
+    // Constraint/derivation arrowhead: 6×6, valid (blue)
     writeln!(
         out,
-        r#"      <marker id="arrow-constraint-cross" viewBox="0 0 6 6" refX="0" refY="3""#
+        r#"      <marker id="arrow-constraint-valid" viewBox="0 0 6 6" refX="0" refY="3""#
     )
     .unwrap();
     writeln!(
@@ -521,7 +602,25 @@ fn write_defs(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        r#"        <path d="M0,0 L6,3 L0,6 Z" class="obgraph-arrow-constraint-cross"/>"#
+        r##"        <path d="M0,0 L6,3 L0,6 Z" fill="#60a5fa"/>"##
+    )
+    .unwrap();
+    writeln!(out, r#"      </marker>"#).unwrap();
+
+    // Constraint/derivation arrowhead: 6×6, invalid (red)
+    writeln!(
+        out,
+        r#"      <marker id="arrow-constraint-invalid" viewBox="0 0 6 6" refX="0" refY="3""#
+    )
+    .unwrap();
+    writeln!(
+        out,
+        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto">"#
+    )
+    .unwrap();
+    writeln!(
+        out,
+        r##"        <path d="M0,0 L6,3 L0,6 Z" fill="#ef4444"/>"##
     )
     .unwrap();
     writeln!(out, r#"      </marker>"#).unwrap();
@@ -682,8 +781,8 @@ mod tests {
         assert!(svg.contains(r#"class="obgraph-edges""#), "missing edges layer");
         assert!(svg.contains(r#"class="obgraph-derivations""#), "missing derivations layer");
         assert!(svg.contains(r#"class="obgraph-domains""#), "missing domains layer");
-        assert!(svg.contains(r#"id="arrow-link""#), "missing arrow-link marker");
-        assert!(svg.contains(r#"id="arrow-constraint""#), "missing arrow-constraint marker");
+        assert!(svg.contains(r#"id="arrow-anchor-valid""#), "missing arrow-anchor-valid marker");
+        assert!(svg.contains(r#"id="arrow-constraint-valid""#), "missing arrow-constraint-valid marker");
     }
 
     // -----------------------------------------------------------------------
@@ -1015,6 +1114,362 @@ mod tests {
         assert!(
             svg.contains(r#"viewBox="0 0 200 100""#),
             "viewBox must match layout width=200 height=100"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 7: XML escaping for special characters in labels
+    // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Test 8: Two-overlapping-rect header structure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node_header_two_rect_structure() {
+        let (graph, layout, trust) = minimal_graph_and_layout();
+        let svg = generate_svg(&graph, &layout, &trust);
+
+        assert!(
+            svg.contains(r#"class="obgraph-node-header""#),
+            "missing obgraph-node-header rect"
+        );
+        assert!(
+            svg.contains(r#"class="obgraph-node-header-fill""#),
+            "missing obgraph-node-header-fill rect (square-bottom fill)"
+        );
+        // The header rect must have rx="8" for rounded top corners
+        let header_line = svg
+            .lines()
+            .find(|l| l.contains(r#"class="obgraph-node-header""#))
+            .expect("no header rect line found");
+        assert!(
+            header_line.contains(r#"rx="8""#),
+            "header rect must have rx=8 for rounded top corners"
+        );
+        // The header-fill rect must NOT have rx (square bottom)
+        let fill_line = svg
+            .lines()
+            .find(|l| l.contains(r#"class="obgraph-node-header-fill""#))
+            .expect("no header-fill rect line found");
+        assert!(
+            !fill_line.contains("rx="),
+            "header-fill rect must not have rx (square bottom corners)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: Node border rect present with rx="8"
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node_border_rect_present() {
+        let (graph, layout, trust) = minimal_graph_and_layout();
+        let svg = generate_svg(&graph, &layout, &trust);
+
+        assert!(
+            svg.contains(r#"class="obgraph-node-border""#),
+            "missing obgraph-node-border rect"
+        );
+        let border_line = svg
+            .lines()
+            .find(|l| l.contains(r#"class="obgraph-node-border""#))
+            .expect("no border rect line found");
+        assert!(
+            border_line.contains(r#"rx="8""#),
+            "border rect must have rx=8"
+        );
+        assert!(
+            border_line.contains(r#"fill="none""#),
+            "border rect must have fill=none"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: Dot radius uses DOT_RADIUS constant (value 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dot_radius_matches_constant() {
+        // Build a non-root node without anchor — it gets a header problem dot.
+        let nodes = vec![Node {
+            id: NodeId(0),
+            ident: "orphan".to_string(),
+            display_name: None,
+            properties: vec![],
+            domain: None,
+            is_root: false,
+            is_selected: false,
+        }];
+        let graph = make_graph(nodes, vec![], vec![], vec![]);
+        let trust_state = state::propagate(&graph);
+
+        let layout = LayoutResult {
+            nodes: vec![NodeLayout {
+                id: NodeId(0),
+                x: 20.0,
+                y: 20.0,
+                width: 120.0,
+                height: 28.0,
+            }],
+            derivations: vec![],
+            domains: vec![],
+            anchors: vec![],
+            cross_domain_deriv_chains: vec![],
+            intra_domain_constraints: vec![],
+            cross_domain_constraints: vec![],
+            width: 200.0,
+            height: 100.0,
+        };
+
+        let svg = generate_svg(&graph, &layout, &trust_state);
+
+        // The node-dot should use DOT_RADIUS = 2
+        let dot_line = svg
+            .lines()
+            .find(|l| l.contains(r#"class="obgraph-node-dot""#))
+            .expect("non-root unanchored node should have a problem dot");
+        assert!(
+            dot_line.contains(r#"r="2""#),
+            "dot radius must be 2 (DOT_RADIUS), got: {}",
+            dot_line.trim()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: Invalid marker definitions present
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn invalid_markers_defined() {
+        let (graph, layout, trust) = minimal_graph_and_layout();
+        let svg = generate_svg(&graph, &layout, &trust);
+
+        assert!(
+            svg.contains(r#"id="arrow-anchor-invalid""#),
+            "missing arrow-anchor-invalid marker"
+        );
+        assert!(
+            svg.contains(r#"id="arrow-constraint-invalid""#),
+            "missing arrow-constraint-invalid marker"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: Defs block appears before Layer 0 (domains)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn defs_before_domains() {
+        let (graph, layout, trust) = minimal_graph_and_layout();
+        let svg = generate_svg(&graph, &layout, &trust);
+
+        let defs_pos = svg.find("<defs>").expect("missing <defs>");
+        let domains_pos = svg
+            .find(r#"class="obgraph-domains""#)
+            .expect("missing domains layer");
+        assert!(
+            defs_pos < domains_pos,
+            "<defs> must appear before domains layer"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13: obgraph-deriv-chains wrapper group present
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn deriv_chains_wrapper_present() {
+        let (graph, layout, trust) = minimal_graph_and_layout();
+        let svg = generate_svg(&graph, &layout, &trust);
+
+        assert!(
+            svg.contains(r#"class="obgraph-deriv-chains""#),
+            "missing obgraph-deriv-chains wrapper group"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14: Edge validity — valid anchor gets obgraph-anchor class
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn valid_anchor_edge_class() {
+        // Root → child with constrained property → anchor is valid
+        let nodes = vec![
+            Node {
+                id: NodeId(0),
+                ident: "root".to_string(),
+                display_name: None,
+                properties: vec![],
+                domain: None,
+                is_root: true,
+                is_selected: false,
+            },
+            Node {
+                id: NodeId(1),
+                ident: "child".to_string(),
+                display_name: None,
+                properties: vec![],
+                domain: None,
+                is_root: false,
+                is_selected: false,
+            },
+        ];
+        let edges = vec![Edge::Anchor {
+            parent: NodeId(0),
+            child: NodeId(1),
+            operation: None,
+        }];
+        let graph = make_graph(nodes, vec![], edges, vec![]);
+        let trust_state = state::propagate(&graph);
+
+        // Root is anchored+verified, so anchor from root→child is valid
+        assert!(trust_state.is_node_anchored(NodeId(0)));
+
+        let layout = LayoutResult {
+            nodes: vec![
+                NodeLayout { id: NodeId(0), x: 20.0, y: 20.0, width: 100.0, height: 28.0 },
+                NodeLayout { id: NodeId(1), x: 20.0, y: 100.0, width: 100.0, height: 28.0 },
+            ],
+            derivations: vec![],
+            domains: vec![],
+            anchors: vec![EdgePath {
+                edge_id: EdgeId(0),
+                svg_path: "M 70,48 L 70,100".to_string(),
+                label: None,
+            }],
+            cross_domain_deriv_chains: vec![],
+            intra_domain_constraints: vec![],
+            cross_domain_constraints: vec![],
+            width: 200.0,
+            height: 200.0,
+        };
+
+        let svg = generate_svg(&graph, &layout, &trust_state);
+
+        let anchor_line = svg
+            .lines()
+            .find(|l| l.contains(r#"data-edge="0""#) && l.contains("obgraph-anchor"))
+            .expect("anchor edge line not found");
+        assert!(
+            anchor_line.contains(r#"class="obgraph-anchor""#),
+            "valid anchor should use obgraph-anchor class, got: {}",
+            anchor_line.trim()
+        );
+        assert!(
+            anchor_line.contains("arrow-anchor-valid"),
+            "valid anchor should use arrow-anchor-valid marker"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15: Edge validity — invalid constraint gets invalid class/marker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn invalid_constraint_edge_class() {
+        // Non-root node with critical property, no parent anchor → constraint is invalid
+        let nodes = vec![
+            Node {
+                id: NodeId(0),
+                ident: "src".to_string(),
+                display_name: None,
+                properties: vec![PropId(0)],
+                domain: None,
+                is_root: false, // not root, not anchored
+                is_selected: false,
+            },
+            Node {
+                id: NodeId(1),
+                ident: "dst".to_string(),
+                display_name: None,
+                properties: vec![PropId(1)],
+                domain: None,
+                is_root: false,
+                is_selected: false,
+            },
+        ];
+        let properties = vec![
+            Property {
+                id: PropId(0),
+                node: NodeId(0),
+                name: "src_val".to_string(),
+                critical: false,
+                constrained: true,
+            },
+            Property {
+                id: PropId(1),
+                node: NodeId(1),
+                name: "dst_val".to_string(),
+                critical: true,
+                constrained: false,
+            },
+        ];
+        let edges = vec![Edge::Constraint {
+            source_prop: PropId(0),
+            dest_prop: PropId(1),
+            operation: None,
+        }];
+        let graph = make_graph(nodes, properties, edges, vec![]);
+        let trust_state = state::propagate(&graph);
+
+        // Source node is not anchored, so constraint is invalid
+        assert!(!trust_state.is_node_anchored(NodeId(0)));
+
+        let layout = LayoutResult {
+            nodes: vec![
+                NodeLayout { id: NodeId(0), x: 20.0, y: 20.0, width: 100.0, height: 52.0 },
+                NodeLayout { id: NodeId(1), x: 200.0, y: 20.0, width: 100.0, height: 52.0 },
+            ],
+            derivations: vec![],
+            domains: vec![],
+            anchors: vec![],
+            cross_domain_deriv_chains: vec![],
+            intra_domain_constraints: vec![EdgePath {
+                edge_id: EdgeId(0),
+                svg_path: "M 120,46 L 200,46".to_string(),
+                label: None,
+            }],
+            cross_domain_constraints: vec![],
+            width: 400.0,
+            height: 200.0,
+        };
+
+        let svg = generate_svg(&graph, &layout, &trust_state);
+
+        let constraint_line = svg
+            .lines()
+            .find(|l| l.contains(r#"data-edge="0""#) && l.contains("obgraph-constraint"))
+            .expect("constraint edge line not found");
+        assert!(
+            constraint_line.contains(r#"class="obgraph-constraint-invalid""#),
+            "invalid constraint should use obgraph-constraint-invalid class, got: {}",
+            constraint_line.trim()
+        );
+        assert!(
+            constraint_line.contains("arrow-constraint-invalid"),
+            "invalid constraint should use arrow-constraint-invalid marker"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16: Node background has rx="8"
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn node_bg_rx_8() {
+        let (graph, layout, trust) = minimal_graph_and_layout();
+        let svg = generate_svg(&graph, &layout, &trust);
+
+        let bg_line = svg
+            .lines()
+            .find(|l| l.contains(r#"class="obgraph-node-bg""#))
+            .expect("no node-bg rect line found");
+        assert!(
+            bg_line.contains(r#"rx="8""#),
+            "node-bg rect must have rx=8, got: {}",
+            bg_line.trim()
         );
     }
 

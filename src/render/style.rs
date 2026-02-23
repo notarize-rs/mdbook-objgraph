@@ -4,22 +4,36 @@
 pub fn css() -> &'static str {
     r#"
 .obgraph {
+  /* Base */
   --obg-bg: #f8fafc;
   --obg-text: #334155;
   --obg-text-muted: #64748b;
   --obg-border: #e2e8f0;
+  --obg-border-strong: #cbd5e1;
+
+  /* Node */
   --obg-node-bg: white;
   --obg-header-bg: #f1f5f9;
+  --obg-header-text: #334155;
+
+  /* State indicators (problems-only) */
   --obg-anchor-valid: #22c55e;
-  --obg-anchor-invalid: #ef4444;
   --obg-constraint-valid: #60a5fa;
-  --obg-constraint-invalid: #ef4444;
   --obg-problem: #ef4444;
+
+  /* Selection */
   --obg-select-ring: #475569;
+
+  /* Domains */
   --obg-domain-bg: white;
   --obg-domain-border: #cbd5e1;
+  --obg-domain-label: #64748b;
+
+  /* Derivation pills */
   --obg-pill-bg: #f8fafc;
   --obg-pill-border: #cbd5e1;
+  --obg-pill-text: #64748b;
+
   background: #ffffff;
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 10px;
@@ -31,20 +45,32 @@ pub fn css() -> &'static str {
 .obgraph-domain-bg {
   fill: var(--obg-domain-bg);
   stroke: var(--obg-domain-border);
-  stroke-width: 1px;
+  stroke-width: 2px;
 }
 
 .obgraph-domain-label {
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 10px;
   font-weight: 600;
-  fill: var(--obg-text-muted);
+  fill: var(--obg-domain-label);
+  paint-order: stroke;
+  stroke: white;
+  stroke-width: 3px;
+  stroke-linejoin: round;
 }
 
-/* Anchor edges — green, 2px */
-.obgraph-link, .obgraph-anchor {
+/* Anchor edges — green, 2px, solid when valid */
+.obgraph-anchor {
   fill: none;
   stroke: var(--obg-anchor-valid);
+  stroke-width: 2px;
+}
+
+/* Invalid anchor edges — red dashed, 2px */
+.obgraph-anchor-invalid {
+  fill: none;
+  stroke: var(--obg-problem);
+  stroke-dasharray: 4 2;
   stroke-width: 2px;
 }
 
@@ -62,7 +88,15 @@ pub fn css() -> &'static str {
   stroke-width: 1px;
 }
 
-/* Cross-domain constraint full path — blue, hidden by default */
+/* Invalid constraint/derivation edges — red dashed, 1px */
+.obgraph-constraint-invalid {
+  fill: none;
+  stroke: var(--obg-problem);
+  stroke-dasharray: 4 2;
+  stroke-width: 1px;
+}
+
+/* Cross-domain constraint full path — hidden by default */
 .obgraph-constraint-full {
   fill: none;
   stroke: var(--obg-constraint-valid);
@@ -77,7 +111,7 @@ pub fn css() -> &'static str {
   pointer-events: auto;
 }
 
-/* Cross-domain constraint stub — blue */
+/* Cross-domain constraint stub */
 .obgraph-constraint-stub {
   fill: none;
   stroke: var(--obg-constraint-valid);
@@ -91,37 +125,32 @@ pub fn css() -> &'static str {
   pointer-events: none;
 }
 
-/* Invalid edges — red dashed */
-.obgraph-link-invalid, .obgraph-anchor-invalid {
-  fill: none;
-  stroke: var(--obg-problem);
-  stroke-dasharray: 4 2;
-  stroke-width: 2px;
-}
-
-.obgraph-constraint-invalid {
-  fill: none;
-  stroke: var(--obg-problem);
-  stroke-dasharray: 4 2;
-  stroke-width: 1px;
-}
-
-/* Link-source property highlight */
-.obgraph-link-source {
-  fill: #dcfce7;
-}
-
-/* Node background rect — white with light border */
+/* Node background rect — white with light border and shadow */
 .obgraph-node-bg {
   fill: var(--obg-node-bg);
-  stroke: var(--obg-border);
-  stroke-width: 1px;
+  stroke: none;
   filter: url(#shadow);
 }
 
-/* Node header background */
+/* Node header background (rounded-top rect) */
 .obgraph-node-header {
   fill: var(--obg-header-bg);
+}
+
+/* Node header fill (square-bottom rect overlapping lower half of header) */
+.obgraph-node-header-fill {
+  fill: var(--obg-header-bg);
+}
+
+/* Node border: 1px default, 2px dark when selected */
+.obgraph-node-border {
+  stroke: var(--obg-border);
+  stroke-width: 1px;
+}
+
+.obgraph-node[data-selected="true"] .obgraph-node-border {
+  stroke: var(--obg-select-ring);
+  stroke-width: 2px;
 }
 
 /* Node title text */
@@ -129,7 +158,7 @@ pub fn css() -> &'static str {
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 12px;
   font-weight: 600;
-  fill: var(--obg-text);
+  fill: var(--obg-header-text);
 }
 
 /* Separator line between title and properties */
@@ -143,11 +172,11 @@ pub fn css() -> &'static str {
   fill: transparent;
 }
 
-/* Property name text */
+/* Property name text — monospace */
 .obgraph-prop-name {
   fill: var(--obg-text-muted);
   font-size: 10px;
-  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: Menlo, Consolas, monospace;
 }
 
 /* Trusted property name */
@@ -162,7 +191,6 @@ pub fn css() -> &'static str {
 }
 
 /* Critical property — bold */
-.obgraph-prop[data-trust="critical"] .obgraph-prop-name,
 .obgraph-prop[data-critical="true"] .obgraph-prop-name {
   font-weight: 700;
 }
@@ -179,37 +207,27 @@ pub fn css() -> &'static str {
 }
 
 /* Derivation pill shape */
-.obgraph-deriv-shape {
+.obgraph-pill {
   fill: var(--obg-pill-bg);
   stroke: var(--obg-pill-border);
   stroke-width: 1px;
 }
 
-/* Derivation label */
-.obgraph-deriv-label {
-  fill: var(--obg-text-muted);
-  font-size: 10px;
+/* Derivation pill label — monospace */
+.obgraph-pill-label {
+  fill: var(--obg-pill-text);
+  font-size: 8px;
   text-anchor: middle;
-  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-family: Menlo, Consolas, monospace;
 }
 
-/* Arrowhead markers — use direct fill, not CSS vars (SVG marker limitation) */
-.obgraph-arrow-link, .obgraph-arrow-anchor {
-  fill: #22c55e;
-}
-
-.obgraph-arrow-constraint {
-  fill: #60a5fa;
-}
-
-.obgraph-arrow-constraint-cross {
-  fill: #60a5fa;
-}
+/* Arrowhead fills are set directly on marker <path> elements via fill attr.
+   CSS vars inside <marker> have spotty cross-browser support. */
 
 /* Edge operation labels */
-.obgraph-link-label, .obgraph-anchor-label {
+.obgraph-anchor-label {
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
-  font-size: 10px;
+  font-size: 8px;
   fill: #16a34a;
   paint-order: stroke;
   stroke: white;
@@ -219,18 +237,12 @@ pub fn css() -> &'static str {
 
 .obgraph-constraint-label {
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
-  font-size: 10px;
+  font-size: 6px;
   fill: #2563eb;
   paint-order: stroke;
   stroke: white;
   stroke-width: 3px;
   stroke-linejoin: round;
-}
-
-/* Selected node highlight — 2px dark inset ring */
-.obgraph-node[data-selected="true"] .obgraph-node-bg {
-  stroke: var(--obg-select-ring);
-  stroke-width: 2px;
 }
 "#
 }
