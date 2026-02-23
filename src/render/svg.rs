@@ -35,7 +35,9 @@ pub fn generate_svg(graph: &Graph, layout: &LayoutResult, state: &StateResult) -
     .unwrap();
     writeln!(
         out,
-        r#"       width="100%" preserveAspectRatio="xMidYMin meet""#
+        r#"       width="{width}" height="{height}""#,
+        width = layout.width,
+        height = layout.height
     )
     .unwrap();
     writeln!(out, r#"       class="obgraph">"#).unwrap();
@@ -45,6 +47,14 @@ pub fn generate_svg(graph: &Graph, layout: &LayoutResult, state: &StateResult) -
 
     // Reusable definitions (markers, filters)
     write_defs(&mut out);
+
+    // Global margin: translate all content inward
+    writeln!(
+        out,
+        r#"    <g transform="translate({m}, {m})">"#,
+        m = crate::layout::GLOBAL_MARGIN
+    )
+    .unwrap();
 
     // Layer 0: domain backgrounds
     write_domains(&mut out, layout);
@@ -57,6 +67,9 @@ pub fn generate_svg(graph: &Graph, layout: &LayoutResult, state: &StateResult) -
 
     // Layer 3: nodes
     write_nodes(&mut out, graph, layout, state);
+
+    // Close global margin group
+    writeln!(out, r#"    </g>"#).unwrap();
 
     // Embedded JS
     writeln!(out, r#"    <script>{}</script>"#, interactivity::js()).unwrap();
