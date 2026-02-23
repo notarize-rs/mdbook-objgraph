@@ -13,23 +13,47 @@ pub fn js() -> &'static str {
     return selected.has(id) || hovered.has(id);
   }
 
+  function hasActiveParticipant(el) {
+    var attr = el.getAttribute('data-participants');
+    if (!attr) return false;
+    var ids = attr.split(',');
+    for (var i = 0; i < ids.length; i++) {
+      if (isActive(ids[i])) return true;
+    }
+    return false;
+  }
+
   function updateEdges() {
     svg.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
-      var src = p.getAttribute('data-source-node');
-      var tgt = p.getAttribute('data-target-node');
-      if (isActive(src) || isActive(tgt)) {
+      if (hasActiveParticipant(p)) {
         p.classList.add('obgraph-active');
       } else {
         p.classList.remove('obgraph-active');
       }
     });
     svg.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
-      var src = p.getAttribute('data-source-node');
-      var tgt = p.getAttribute('data-target-node');
-      if (isActive(src) || isActive(tgt)) {
+      if (hasActiveParticipant(p)) {
         p.classList.add('obgraph-hidden');
       } else {
         p.classList.remove('obgraph-hidden');
+      }
+    });
+    // Derivation chain atomic toggling
+    svg.querySelectorAll('.obgraph-deriv-chain').forEach(function(g) {
+      if (hasActiveParticipant(g)) {
+        g.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
+          p.classList.add('obgraph-active');
+        });
+        g.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
+          p.classList.add('obgraph-hidden');
+        });
+      } else {
+        g.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
+          p.classList.remove('obgraph-active');
+        });
+        g.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
+          p.classList.remove('obgraph-hidden');
+        });
       }
     });
   }

@@ -2,9 +2,10 @@
 
 use std::fmt::Write;
 
-use crate::layout::{EdgePath, LayoutResult, HEADER_HEIGHT, ROW_HEIGHT};
+use crate::layout::{LayoutResult, HEADER_HEIGHT, PILL_HEIGHT, ROW_HEIGHT};
 use crate::model::state::StateResult;
 use crate::model::types::Graph;
+use crate::model::types::NodeId;
 
 use super::interactivity;
 use super::style;
@@ -114,7 +115,7 @@ fn write_domains(out: &mut String, layout: &LayoutResult) {
 // Layer 1: edges
 // ---------------------------------------------------------------------------
 
-fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult) {
+fn write_edges(out: &mut String, _graph: &Graph, layout: &LayoutResult) {
     writeln!(out, r#"    <g class="obgraph-edges">"#).unwrap();
 
     // --- Anchor paths ---
@@ -161,14 +162,13 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult) {
     writeln!(out, r#"      <g class="obgraph-constraints-cross">"#).unwrap();
     for cross in &layout.cross_domain_constraints {
         let ep = &cross.full_path;
-        let (src_node, dst_node) = constraint_node_ids(graph, ep);
+        let participants_str = participants_attr(&cross.participants);
         writeln!(
             out,
-            r#"        <path class="obgraph-constraint-full" d="{d}" data-edge="{id}" data-source-node="{src}" data-target-node="{dst}" marker-end="url(#arrow-constraint-cross)"/>"#,
+            r#"        <path class="obgraph-constraint-full" d="{d}" data-edge="{id}" data-participants="{p}" marker-end="url(#arrow-constraint-cross)"/>"#,
             d = ep.svg_path,
             id = ep.edge_id.0,
-            src = src_node,
-            dst = dst_node,
+            p = participants_str,
         )
         .unwrap();
     }
@@ -177,45 +177,72 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult) {
     // --- Cross-domain constraint: stub paths ---
     writeln!(out, r#"      <g class="obgraph-constraint-stubs">"#).unwrap();
     for cross in &layout.cross_domain_constraints {
+        let participants_str = participants_attr(&cross.participants);
         for ep in &cross.stub_paths {
-            let participants = &cross.participants;
-            let src_node = participants.first().map(|n| n.0).unwrap_or(0);
-            let dst_node = participants.last().map(|n| n.0).unwrap_or(0);
             writeln!(
                 out,
-                r#"        <path class="obgraph-constraint-stub" d="{d}" data-edge="{id}" data-source-node="{src}" data-target-node="{dst}" marker-end="url(#arrow-constraint-cross)"/>"#,
+                r#"        <path class="obgraph-constraint-stub" d="{d}" data-edge="{id}" data-participants="{p}" marker-end="url(#arrow-constraint-cross)"/>"#,
                 d = ep.svg_path,
                 id = ep.edge_id.0,
-                src = src_node,
-                dst = dst_node,
+                p = participants_str,
             )
             .unwrap();
         }
     }
     writeln!(out, r#"      </g>"#).unwrap();
 
+    // --- Cross-domain derivation chains ---
+    write_deriv_chains(out, layout);
+
     writeln!(out, r#"    </g>"#).unwrap();
 }
 
-/// For a cross-domain constraint edge, resolve the source-node and target-node IDs.
-///
-/// A `Constraint` edge runs between two `PropId`s; we look up the owning node of each.
-fn constraint_node_ids(graph: &Graph, ep: &EdgePath) -> (u32, u32) {
-    use crate::model::types::Edge;
+/// Format a list of participant NodeIds as a comma-separated string for data-participants.
+fn participants_attr(participants: &[NodeId]) -> String {
+    participants
+        .iter()
+        .map(|n| n.0.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
-    let edge = &graph.edges[ep.edge_id.index()];
-    match edge {
-        Edge::Constraint {
-            source_prop,
-            dest_prop,
-            ..
-        } => {
-            let src_node = graph.properties[source_prop.index()].node.0;
-            let dst_node = graph.properties[dest_prop.index()].node.0;
-            (src_node, dst_node)
+/// Write cross-domain derivation chain groups.
+fn write_deriv_chains(out: &mut String, layout: &LayoutResult) {
+    for chain in &layout.cross_domain_deriv_chains {
+        let participants_str = participants_attr(&chain.participants);
+        writeln!(
+            out,
+            r#"      <g class="obgraph-deriv-chain" data-deriv="{id}" data-participants="{p}">"#,
+            id = chain.deriv_id.0,
+            p = participants_str
+        )
+        .unwrap();
+
+        // Full paths (hidden by default, shown on hover/select)
+        for ep in &chain.full_paths {
+            writeln!(
+                out,
+                r#"        <path class="obgraph-constraint-full" d="{d}" data-edge="{id}" data-participants="{p}"/>"#,
+                d = ep.svg_path,
+                id = ep.edge_id.0,
+                p = participants_str,
+            )
+            .unwrap();
         }
-        // Only constraints appear in cross_domain_constraints; fall back to 0 for safety.
-        _ => (0, 0),
+
+        // Stub paths (shown by default, hidden on hover/select)
+        for ep in &chain.stub_paths {
+            writeln!(
+                out,
+                r#"        <path class="obgraph-constraint-stub" d="{d}" data-edge="{id}" data-participants="{p}"/>"#,
+                d = ep.svg_path,
+                id = ep.edge_id.0,
+                p = participants_str,
+            )
+            .unwrap();
+        }
+
+        writeln!(out, r#"      </g>"#).unwrap();
     }
 }
 
@@ -229,22 +256,10 @@ fn write_derivations(out: &mut String, graph: &Graph, layout: &LayoutResult) {
     for dl in &layout.derivations {
         let deriv = &graph.derivations[dl.id.index()];
 
-        // Diamond: 4 points — top, right, bottom, left — centered at (dl.x, dl.y)
-        let half_w = dl.width / 2.0;
-        let half_h = dl.height / 2.0;
-        let cx = dl.x + half_w;
-        let cy = dl.y + half_h;
-        let points = format!(
-            "{},{} {},{} {},{} {},{}",
-            cx,
-            dl.y,
-            dl.x + dl.width,
-            cy,
-            cx,
-            dl.y + dl.height,
-            dl.x,
-            cy
-        );
+        // Rounded pill shape
+        let cx = dl.x + dl.width / 2.0;
+        let cy = dl.y + dl.height / 2.0;
+        let rx = PILL_HEIGHT / 2.0;
 
         writeln!(
             out,
@@ -254,8 +269,12 @@ fn write_derivations(out: &mut String, graph: &Graph, layout: &LayoutResult) {
         .unwrap();
         writeln!(
             out,
-            r#"        <polygon class="obgraph-deriv-shape" points="{pts}"/>"#,
-            pts = points
+            r#"        <rect class="obgraph-deriv-shape" x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}"/>"#,
+            x = dl.x,
+            y = dl.y,
+            w = dl.width,
+            h = dl.height,
+            rx = rx
         )
         .unwrap();
         writeln!(
@@ -281,8 +300,9 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
 
     for nl in &layout.nodes {
         let node = &graph.nodes[nl.id.index()];
-        let node_trusted = state.is_node_verified(graph, nl.id);
-        let node_trust_attr = if node_trusted { "trusted" } else { "untrusted" };
+        let node_anchored = state.is_node_anchored(nl.id);
+        let node_verified = state.is_node_verified(graph, nl.id);
+        let node_trust_attr = if node_verified { "trusted" } else { "untrusted" };
         let selected_attr = node.is_selected;
 
         writeln!(
@@ -304,6 +324,17 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         )
         .unwrap();
 
+        // Header background rect
+        writeln!(
+            out,
+            r#"        <rect class="obgraph-node-header" x="{x}" y="{y}" width="{w}" height="{h}" rx="3"/>"#,
+            x = nl.x,
+            y = nl.y,
+            w = nl.width,
+            h = HEADER_HEIGHT
+        )
+        .unwrap();
+
         // Title text — centered in header area
         let title_x = nl.x + nl.width / 2.0;
         let title_y = nl.y + HEADER_HEIGHT / 2.0;
@@ -316,6 +347,19 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
             label = escape_xml(node.label())
         )
         .unwrap();
+
+        // Problem dot on header for unanchored nodes
+        if !node_anchored {
+            let dot_x = nl.x + nl.width - 8.0;
+            let dot_y = nl.y + HEADER_HEIGHT / 2.0;
+            writeln!(
+                out,
+                r#"        <circle class="obgraph-node-dot" cx="{x}" cy="{y}" r="3"/>"#,
+                x = dot_x,
+                y = dot_y
+            )
+            .unwrap();
+        }
 
         // Separator line between title and properties
         let sep_y = nl.y + HEADER_HEIGHT;
@@ -331,25 +375,28 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         // Property rows
         for (prop_idx, &pid) in node.properties.iter().enumerate() {
             let prop = &graph.properties[pid.index()];
-            let prop_trusted = state.is_prop_constrained(pid);
+            let prop_constrained = state.is_prop_constrained(pid);
 
-            // Trust attribute: "constrained" for @constrained props, else trusted/untrusted
+            // Trust attribute: "constrained" for @constrained annotation, else trusted/untrusted
             let trust_attr = if prop.constrained {
-                "always" // backwards-compat: @constrained maps to data-trust="always"
-            } else if prop_trusted {
+                "always"
+            } else if prop_constrained {
                 "trusted"
             } else {
                 "untrusted"
             };
+
+            let critical_attr = if prop.critical { "true" } else { "false" };
 
             let row_y = nl.y + HEADER_HEIGHT + prop_idx as f64 * ROW_HEIGHT;
             let port_y = row_y + ROW_HEIGHT / 2.0;
 
             writeln!(
                 out,
-                r#"        <g class="obgraph-prop" data-prop="{pid}" data-trust="{trust}">"#,
+                r#"        <g class="obgraph-prop" data-prop="{pid}" data-trust="{trust}" data-critical="{crit}">"#,
                 pid = pid.0,
-                trust = trust_attr
+                trust = trust_attr,
+                crit = critical_attr
             )
             .unwrap();
 
@@ -376,7 +423,33 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
             )
             .unwrap();
 
+            // Problem dot for critical + unconstrained properties
+            if prop.critical && !prop_constrained {
+                let dot_x = nl.x + nl.width - 8.0;
+                let dot_y = port_y;
+                writeln!(
+                    out,
+                    r#"          <circle class="obgraph-prop-dot" cx="{x}" cy="{y}" r="3"/>"#,
+                    x = dot_x,
+                    y = dot_y
+                )
+                .unwrap();
+            }
+
             writeln!(out, r#"        </g>"#).unwrap();
+
+            // Property divider line (after each property except the last)
+            if prop_idx < node.properties.len() - 1 {
+                let div_y = row_y + ROW_HEIGHT;
+                writeln!(
+                    out,
+                    r#"        <line class="obgraph-prop-divider" x1="{x1}" y1="{y}" x2="{x2}" y2="{y}"/>"#,
+                    x1 = nl.x,
+                    x2 = nl.x + nl.width,
+                    y = div_y
+                )
+                .unwrap();
+            }
         }
 
         writeln!(out, r#"      </g>"#).unwrap();
@@ -487,6 +560,7 @@ mod tests {
     use super::*;
     use crate::layout::{CrossDomainPaths, DomainLayout, EdgePath, NodeLayout};
     use crate::model::state;
+    #[allow(unused_imports)]
     use crate::model::types::{
         Domain, DomainId, Edge, EdgeId, Graph, Node, NodeId, Property, PropId,
     };
@@ -867,20 +941,14 @@ mod tests {
             "missing obgraph-constraint-stub class"
         );
 
-        // Stub path must carry both source and target node attributes.
-        // Note: search for the path element specifically (not the group, whose class is
-        // "obgraph-constraint-stubs" with a trailing 's').
+        // Stub path must carry participants attribute.
         let stub_line = svg
             .lines()
             .find(|l| l.contains(r#"class="obgraph-constraint-stub""#))
             .expect("no stub line found");
         assert!(
-            stub_line.contains("data-source-node="),
-            "stub path must carry data-source-node"
-        );
-        assert!(
-            stub_line.contains("data-target-node="),
-            "stub path must carry data-target-node"
+            stub_line.contains("data-participants="),
+            "stub path must carry data-participants"
         );
     }
 
