@@ -5,7 +5,7 @@
 
 use crate::model::types::Graph;
 
-use super::{DomainLayout, NodeLayout, DOMAIN_PADDING};
+use super::{DomainLayout, NodeLayout, CORRIDOR_PAD, DOMAIN_PADDING};
 
 /// Compute bounding boxes for all domains from final node positions.
 pub fn compute_domain_bounds(graph: &Graph, node_layouts: &[NodeLayout]) -> Vec<DomainLayout> {
@@ -41,12 +41,16 @@ pub fn compute_domain_bounds(graph: &Graph, node_layouts: &[NodeLayout]) -> Vec<
                 .map(|nl| nl.y + nl.height)
                 .fold(f64::NEG_INFINITY, f64::max);
 
+            // Left/right padding includes corridor space (CORRIDOR_PAD * 2 = 16px
+            // for a single-channel corridor) plus DOMAIN_PADDING.
+            // Top/bottom use DOMAIN_PADDING only.
+            let lr_pad = DOMAIN_PADDING + CORRIDOR_PAD * 2.0;
             Some(DomainLayout {
                 id: domain.id,
                 display_name: domain.display_name.clone(),
-                x: min_x - DOMAIN_PADDING,
+                x: min_x - lr_pad,
                 y: min_y - DOMAIN_PADDING,
-                width: (max_x - min_x) + 2.0 * DOMAIN_PADDING,
+                width: (max_x - min_x) + 2.0 * lr_pad,
                 height: (max_y - min_y) + 2.0 * DOMAIN_PADDING,
             })
         })
@@ -113,8 +117,8 @@ pub fn separate_domains(
                     continue;
                 }
 
-                // Add a small margin so boxes don't merely touch.
-                let shift = overlap_amount + 1.0;
+                // Gap must accommodate an inter-domain corridor (CORRIDOR_PAD * 2).
+                let shift = overlap_amount + CORRIDOR_PAD * 2.0;
                 let domain_id = domain_layouts[shift_idx].id;
 
                 // Move member nodes.
@@ -199,10 +203,11 @@ mod tests {
         let d = &domains[0];
         assert_eq!(d.display_name, "TestDomain");
 
+        let lr_pad = DOMAIN_PADDING + CORRIDOR_PAD * 2.0;
         let eps = 1e-6;
-        assert!((d.x - (100.0 - DOMAIN_PADDING)).abs() < eps);
+        assert!((d.x - (100.0 - lr_pad)).abs() < eps);
         assert!((d.y - (50.0 - DOMAIN_PADDING)).abs() < eps);
-        assert!((d.width - (80.0 + 2.0 * DOMAIN_PADDING)).abs() < eps);
+        assert!((d.width - (80.0 + 2.0 * lr_pad)).abs() < eps);
         assert!((d.height - (60.0 + 2.0 * DOMAIN_PADDING)).abs() < eps);
     }
 
@@ -224,10 +229,11 @@ mod tests {
         // min_x = 10, min_y = 20
         // max_x = max(10+50, 100+60, 50+70) = max(60, 160, 120) = 160
         // max_y = max(20+40, 30+50, 100+30) = max(60, 80, 130) = 130
+        let lr_pad = DOMAIN_PADDING + CORRIDOR_PAD * 2.0;
         let eps = 1e-6;
-        assert!((d.x - (10.0 - DOMAIN_PADDING)).abs() < eps);
+        assert!((d.x - (10.0 - lr_pad)).abs() < eps);
         assert!((d.y - (20.0 - DOMAIN_PADDING)).abs() < eps);
-        assert!((d.width - (150.0 + 2.0 * DOMAIN_PADDING)).abs() < eps);
+        assert!((d.width - (150.0 + 2.0 * lr_pad)).abs() < eps);
         assert!((d.height - (110.0 + 2.0 * DOMAIN_PADDING)).abs() < eps);
     }
 
@@ -247,11 +253,12 @@ mod tests {
         let d = &domains[0];
 
         // Node 1 at (500,500) should NOT affect the bounding box.
+        let lr_pad = DOMAIN_PADDING + CORRIDOR_PAD * 2.0;
         let eps = 1e-6;
-        assert!((d.x - (10.0 - DOMAIN_PADDING)).abs() < eps);
+        assert!((d.x - (10.0 - lr_pad)).abs() < eps);
         assert!((d.y - (20.0 - DOMAIN_PADDING)).abs() < eps);
-        // max_x = max(10+50, 50+70) = 120, so width = 120-10 + 2*padding
-        assert!((d.width - (110.0 + 2.0 * DOMAIN_PADDING)).abs() < eps);
+        // max_x = max(10+50, 50+70) = 120, so width = 120-10 + 2*lr_pad
+        assert!((d.width - (110.0 + 2.0 * lr_pad)).abs() < eps);
         // max_y = max(20+40, 100+30) = 130, so height = 130-20 + 2*padding
         assert!((d.height - (110.0 + 2.0 * DOMAIN_PADDING)).abs() < eps);
     }

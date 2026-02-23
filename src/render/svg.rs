@@ -522,14 +522,14 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
             }
         }
 
-        // Border rect: 1px default, 2px dark when selected (via CSS)
+        // Border rect: inset 1px so 2px selection stroke outer edge aligns with node boundary.
         writeln!(
             out,
-            r#"        <rect class="obgraph-node-border" x="{x}" y="{y}" width="{w}" height="{h}" rx="8" fill="none"/>"#,
-            x = nl.x,
-            y = nl.y,
-            w = nl.width,
-            h = nl.height
+            r#"        <rect class="obgraph-node-border" x="{x}" y="{y}" width="{w}" height="{h}" rx="7" fill="none"/>"#,
+            x = nl.x + 1.0,
+            y = nl.y + 1.0,
+            w = nl.width - 2.0,
+            h = nl.height - 2.0
         )
         .unwrap();
 
@@ -1176,8 +1176,8 @@ mod tests {
             .find(|l| l.contains(r#"class="obgraph-node-border""#))
             .expect("no border rect line found");
         assert!(
-            border_line.contains(r#"rx="8""#),
-            "border rect must have rx=8"
+            border_line.contains(r#"rx="7""#),
+            "border rect must have rx=7 (inset selection ring)"
         );
         assert!(
             border_line.contains(r#"fill="none""#),

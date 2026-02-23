@@ -111,9 +111,23 @@ impl NodeLayout {
         self.x + self.width
     }
 
-    /// Port y-coordinate for a property at the given index.
+    /// Port y-coordinate for a property at the given index (single connection).
     pub fn port_y(&self, prop_index: usize) -> f64 {
         self.y + HEADER_HEIGHT + prop_index as f64 * ROW_HEIGHT + ROW_HEIGHT / 2.0
+    }
+
+    /// Port y-coordinate with distributed placement when a property side has
+    /// multiple connections.  Divides the row into `total + 1` equal segments
+    /// and places the `index`-th port (0-based) at segment boundary `index + 1`.
+    /// The result is rounded to the nearest even pixel for grid alignment.
+    pub fn distributed_port_y(&self, prop_index: usize, index: usize, total: usize) -> f64 {
+        if total <= 1 {
+            return self.port_y(prop_index);
+        }
+        let base_y = self.y + HEADER_HEIGHT + prop_index as f64 * ROW_HEIGHT;
+        let segment = ROW_HEIGHT / (total as f64 + 1.0);
+        let y = base_y + segment * (index as f64 + 1.0);
+        (y / 2.0).round() * 2.0
     }
 
     /// Anchor port x-coordinate (center of node).
@@ -187,7 +201,7 @@ pub struct CrossDomainPaths {
 // Port side assignment
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PortSide {
     Left,
     Right,
@@ -215,20 +229,32 @@ fn single_node_content_width(graph: &Graph, node_id: NodeId) -> f64 {
     f64::max(label_width, max_prop_width) + CONTENT_PAD * 2.0
 }
 
-/// Compute the uniform node width: the minimum width needed for the widest node.
-/// All nodes use this same width for a consistent visual appearance.
-pub fn uniform_node_width(graph: &Graph) -> f64 {
+/// Compute the uniform width for all members of a domain.
+fn domain_node_width(graph: &Graph, domain_id: DomainId) -> f64 {
     graph
-        .nodes
+        .domains
         .iter()
-        .map(|n| single_node_content_width(graph, n.id))
-        .fold(0.0_f64, f64::max)
-        .max(CONTENT_PAD * 4.0)
+        .find(|d| d.id == domain_id)
+        .map(|d| {
+            d.members
+                .iter()
+                .map(|&nid| single_node_content_width(graph, nid))
+                .fold(0.0_f64, f64::max)
+                .max(CONTENT_PAD * 4.0)
+        })
+        .unwrap_or(CONTENT_PAD * 4.0)
 }
 
-/// Returns the display width for a node (uniform across all nodes).
-pub fn node_width(graph: &Graph, _node_id: NodeId) -> f64 {
-    uniform_node_width(graph)
+/// Returns the display width for a node.
+///
+/// Nodes within a domain share a uniform width (the max of all domain members).
+/// Top-level nodes (no domain) use their individual content-driven width.
+pub fn node_width(graph: &Graph, node_id: NodeId) -> f64 {
+    let node = &graph.nodes[node_id.index()];
+    match node.domain {
+        Some(did) => domain_node_width(graph, did),
+        None => single_node_content_width(graph, node_id).max(CONTENT_PAD * 4.0),
+    }
 }
 
 /// Compute the height of a node from the graph model.
@@ -301,8 +327,6 @@ fn tree_center_nodes(
     graph: &Graph,
     layers: &[LayerEntry],
 ) {
-    let w = uniform_node_width(graph);
-
     // Bottom-up pass: center each parent over its link-tree children.
     for layer in layers.iter().rev() {
         for item in &layer.items {
@@ -331,12 +355,16 @@ fn tree_center_nodes(
 
                 let mut centers: Vec<f64> = children
                     .iter()
-                    .map(|&cid| node_layouts[cid.index()].x + w / 2.0)
+                    .map(|&cid| {
+                        let cw = node_width(graph, cid);
+                        node_layouts[cid.index()].x + cw / 2.0
+                    })
                     .collect();
                 centers.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
                 let mean_center = (centers[0] + centers[centers.len() - 1]) / 2.0;
-                node_layouts[nid.index()].x = mean_center - w / 2.0;
+                let nw = node_width(graph, *nid);
+                node_layouts[nid.index()].x = mean_center - nw / 2.0;
             }
         }
     }
@@ -363,7 +391,8 @@ fn tree_center_nodes(
         });
 
         for i in 1..node_ids.len() {
-            let prev_right = node_layouts[node_ids[i - 1].index()].x + w;
+            let prev_w = node_width(graph, node_ids[i - 1]);
+            let prev_right = node_layouts[node_ids[i - 1].index()].x + prev_w;
             let needed = prev_right + NODE_H_SPACING;
             if node_layouts[node_ids[i].index()].x < needed {
                 node_layouts[node_ids[i].index()].x = needed;
@@ -415,8 +444,14 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // Phase 6a: Port side assignment
     let port_sides = routing::assign_port_sides(graph, &node_layouts, &deriv_layouts);
 
-    // Phase 6b: Edge routing
-    let routes = routing::route_all_edges(graph, &node_layouts, &deriv_layouts, &port_sides);
+    // Phase 6b: Edge routing (corridor-based)
+    let routes = routing::route_all_edges(
+        graph,
+        &node_layouts,
+        &deriv_layouts,
+        &domain_layouts,
+        &port_sides,
+    );
 
     // Classify edges into anchors, derivation edges, and constraints
     let mut anchors = Vec::new();
@@ -427,8 +462,8 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         let edge = &graph.edges[route.edge_id.index()];
         let label_text = edge_operation(edge);
         let label = label_text.map(|text| {
-            let (x, y) = routing::route_midpoint(route);
-            EdgeLabel { text, x, y: y - 2.0, anchor: "middle" }
+            let (x, y, anchor) = routing::route_label_position(route);
+            EdgeLabel { text, x, y, anchor }
         });
         let svg_path = routing::route_to_svg_path(route);
         let edge_path = EdgePath {

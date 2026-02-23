@@ -3,8 +3,8 @@
 use crate::model::types::{Edge, EdgeId, Graph, NodeId, PropId};
 
 use super::{
-    layout_endpoints, DerivLayout, EdgeLabel, EdgePath, EndpointRole, LayoutEndpoint, NodeLayout,
-    PortSide, CORRIDOR_PAD, STUB_LENGTH,
+    layout_endpoints, DerivLayout, DomainLayout, EdgeLabel, EdgePath, EndpointRole,
+    LayoutEndpoint, NodeLayout, PortSide, CORRIDOR_PAD, STUB_LENGTH,
 };
 
 // ---------------------------------------------------------------------------
@@ -96,6 +96,197 @@ impl Channel {
 
 /// The port side assignments for all edge endpoints.
 pub type PortSideAssignment = std::collections::HashMap<(EdgeId, EndpointRole), PortSide>;
+
+// ---------------------------------------------------------------------------
+// Corridor model (LAYOUT.md §4.2.6)
+// ---------------------------------------------------------------------------
+
+/// A vertical channel within a corridor, tracking occupant vertical extents
+/// so that edges sharing a channel don't overlap vertically.
+#[derive(Debug, Clone)]
+pub struct CorridorChannel {
+    pub x: f64,
+    pub occupants: Vec<(EdgeId, f64, f64)>, // (edge, y_start, y_end)
+}
+
+impl CorridorChannel {
+    /// Check whether a new vertical extent overlaps any existing occupant.
+    fn overlaps(&self, y_start: f64, y_end: f64) -> bool {
+        let (lo, hi) = if y_start <= y_end {
+            (y_start, y_end)
+        } else {
+            (y_end, y_start)
+        };
+        self.occupants.iter().any(|&(_, os, oe)| {
+            let (olo, ohi) = if os <= oe { (os, oe) } else { (oe, os) };
+            !(hi < olo || lo > ohi)
+        })
+    }
+
+    /// Reserve this channel for an edge and return the channel x.
+    fn reserve(&mut self, edge_id: EdgeId, y_start: f64, y_end: f64) -> f64 {
+        self.occupants.push((edge_id, y_start, y_end));
+        self.x
+    }
+}
+
+/// A corridor — a fixed-width zone between node edges and domain boundaries.
+#[derive(Debug, Clone)]
+pub struct Corridor {
+    pub x_start: f64,
+    pub x_end: f64,
+    pub channels: Vec<CorridorChannel>,
+}
+
+impl Corridor {
+    /// Allocate a channel with no vertical overlap for the given edge extent.
+    /// If all existing channels overlap, create a new one.
+    fn allocate_channel(&mut self, edge_id: EdgeId, y_start: f64, y_end: f64) -> f64 {
+        // Try existing channels.
+        for ch in &mut self.channels {
+            if !ch.overlaps(y_start, y_end) {
+                return ch.reserve(edge_id, y_start, y_end);
+            }
+        }
+        // All channels overlap — create a new one offset from the last.
+        let new_x = if self.channels.is_empty() {
+            (self.x_start + self.x_end) / 2.0
+        } else {
+            let last_x = self.channels.last().unwrap().x;
+            let center = (self.x_start + self.x_end) / 2.0;
+            if last_x >= center {
+                // Next channel goes to the left of center.
+                self.x_start + CORRIDOR_PAD
+            } else {
+                // Next channel goes to the right of center.
+                self.x_end - CORRIDOR_PAD
+            }
+        };
+        let mut ch = CorridorChannel {
+            x: new_x,
+            occupants: Vec::new(),
+        };
+        let x = ch.reserve(edge_id, y_start, y_end);
+        self.channels.push(ch);
+        x
+    }
+
+    /// The center x of this corridor.
+    fn center_x(&self) -> f64 {
+        (self.x_start + self.x_end) / 2.0
+    }
+}
+
+/// Build corridors from domain bounding boxes.
+///
+/// For each domain: left corridor (domain left edge to first channel zone) and
+/// right corridor (last channel zone to domain right edge).
+/// Between adjacent domains: an inter-domain corridor.
+fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
+    let mut corridors = Vec::new();
+
+    // Sort domains by x for inter-domain corridor detection.
+    let mut sorted_domains: Vec<&DomainLayout> = domain_layouts.iter().collect();
+    sorted_domains.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+
+    for dl in &sorted_domains {
+        let corridor_width = CORRIDOR_PAD * 2.0;
+
+        // Left corridor: between domain left edge and leftmost node area.
+        let left = Corridor {
+            x_start: dl.x,
+            x_end: dl.x + corridor_width,
+            channels: vec![CorridorChannel {
+                x: dl.x + CORRIDOR_PAD,
+                occupants: Vec::new(),
+            }],
+        };
+
+        // Right corridor: between rightmost node area and domain right edge.
+        let right = Corridor {
+            x_start: dl.x + dl.width - corridor_width,
+            x_end: dl.x + dl.width,
+            channels: vec![CorridorChannel {
+                x: dl.x + dl.width - CORRIDOR_PAD,
+                occupants: Vec::new(),
+            }],
+        };
+
+        corridors.push(left);
+        corridors.push(right);
+    }
+
+    // Inter-domain corridors between adjacent domains.
+    for w in sorted_domains.windows(2) {
+        let d1_right = w[0].x + w[0].width;
+        let d2_left = w[1].x;
+        let gap = d2_left - d1_right;
+        if gap > 0.5 {
+            let center_x = (d1_right + d2_left) / 2.0;
+            corridors.push(Corridor {
+                x_start: d1_right,
+                x_end: d2_left,
+                channels: vec![CorridorChannel {
+                    x: center_x,
+                    occupants: Vec::new(),
+                }],
+            });
+        }
+    }
+
+    corridors
+}
+
+/// Find the nearest corridor in the direction the port faces and allocate a channel.
+fn find_corridor_channel(
+    port_x: f64,
+    port_side: PortSide,
+    corridors: &mut Vec<Corridor>,
+    edge_id: EdgeId,
+    y_start: f64,
+    y_end: f64,
+) -> f64 {
+    // Find the nearest corridor in the correct direction.
+    let best_idx = match port_side {
+        PortSide::Left => {
+            // Search leftward: corridor whose center_x < port_x, closest.
+            corridors
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.center_x() <= port_x)
+                .min_by(|(_, a), (_, b)| {
+                    let da = (a.center_x() - port_x).abs();
+                    let db = (b.center_x() - port_x).abs();
+                    da.partial_cmp(&db).unwrap()
+                })
+                .map(|(i, _)| i)
+        }
+        PortSide::Right => {
+            // Search rightward: corridor whose center_x >= port_x, closest.
+            corridors
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.center_x() >= port_x)
+                .min_by(|(_, a), (_, b)| {
+                    let da = (a.center_x() - port_x).abs();
+                    let db = (b.center_x() - port_x).abs();
+                    da.partial_cmp(&db).unwrap()
+                })
+                .map(|(i, _)| i)
+        }
+    };
+
+    match best_idx {
+        Some(idx) => corridors[idx].allocate_channel(edge_id, y_start, y_end),
+        None => {
+            // Fallback: no corridor found, use offset from port.
+            match port_side {
+                PortSide::Left => port_x - CORRIDOR_PAD,
+                PortSide::Right => port_x + CORRIDOR_PAD,
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Port side assignment
@@ -287,105 +478,65 @@ fn build_h_channels(node_layouts: &[NodeLayout], deriv_layouts: &[DerivLayout]) 
     channels
 }
 
-/// Build vertical channels between nodes within the same layer and at the edges.
-///
-/// Each vertical channel sits midway between adjacent nodes (sorted by x)
-/// within the same visual layer. Additional channels are placed to the left of
-/// the leftmost node and to the right of the rightmost node.
-fn build_v_channels(node_layouts: &[NodeLayout], deriv_layouts: &[DerivLayout]) -> Vec<Channel> {
-    // Gather all elements as (x, width, y, height).
-    let mut elements: Vec<(f64, f64, f64, f64)> = Vec::new();
-    for nl in node_layouts {
-        elements.push((nl.x, nl.width, nl.y, nl.height));
-    }
-    for dl in deriv_layouts {
-        elements.push((dl.x, dl.width, dl.y, dl.height));
-    }
-
-    if elements.is_empty() {
-        return Vec::new();
-    }
-
-    // Group by similar y (layer detection).
-    elements.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap().then(a.0.partial_cmp(&b.0).unwrap()));
-
-    let mut channels = Vec::new();
-    let mut layer_start = 0;
-
-    while layer_start < elements.len() {
-        let layer_y = elements[layer_start].2;
-        let mut layer_end = layer_start;
-        while layer_end < elements.len() && (elements[layer_end].2 - layer_y).abs() < 1.0 {
-            layer_end += 1;
-        }
-
-        let layer = &elements[layer_start..layer_end];
-
-        // Compute the y range for this layer.
-        let y_min = layer
-            .iter()
-            .map(|e| e.2)
-            .fold(f64::INFINITY, f64::min)
-            - 50.0;
-        let y_max = layer
-            .iter()
-            .map(|e| e.2 + e.3)
-            .fold(f64::NEG_INFINITY, f64::max)
-            + 50.0;
-
-        // Sort by x within the layer.
-        let mut sorted: Vec<_> = layer.to_vec();
-        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-        // Channel to the left of the leftmost node.
-        if let Some(first) = sorted.first() {
-            let left_x = first.0 - super::NODE_H_SPACING / 2.0;
-            channels.push(Channel {
-                axis: Axis::Vertical,
-                position: left_x,
-                range: (y_min, y_max),
-                occupants: Vec::new(),
-            });
-        }
-
-        // Channels between consecutive nodes.
-        for w in sorted.windows(2) {
-            let right_of_left = w[0].0 + w[0].1;
-            let left_of_right = w[1].0;
-            let mid_x = (right_of_left + left_of_right) / 2.0;
-
-            channels.push(Channel {
-                axis: Axis::Vertical,
-                position: mid_x,
-                range: (y_min, y_max),
-                occupants: Vec::new(),
-            });
-        }
-
-        // Channel to the right of the rightmost node.
-        if let Some(last) = sorted.last() {
-            let right_x = last.0 + last.1 + super::NODE_H_SPACING / 2.0;
-            channels.push(Channel {
-                axis: Axis::Vertical,
-                position: right_x,
-                range: (y_min, y_max),
-                occupants: Vec::new(),
-            });
-        }
-
-        layer_start = layer_end;
-    }
-
-    channels
-}
-
 // ---------------------------------------------------------------------------
 // Port position computation
 // ---------------------------------------------------------------------------
 
+/// Tracks per-(PropId, PortSide) connection counts and assignment indices
+/// for distributed port placement.
+struct PortDistributor {
+    /// Total connections per (PropId, PortSide).
+    counts: std::collections::HashMap<(PropId, PortSide), usize>,
+    /// Next assignment index per (PropId, PortSide).
+    next_index: std::collections::HashMap<(PropId, PortSide), usize>,
+}
+
+impl PortDistributor {
+    /// Build a distributor by counting all property-side connections from edges.
+    fn new(graph: &Graph, port_sides: &PortSideAssignment) -> Self {
+        let mut counts: std::collections::HashMap<(PropId, PortSide), usize> =
+            std::collections::HashMap::new();
+
+        for (idx, edge) in graph.edges.iter().enumerate() {
+            let edge_id = EdgeId(idx as u32);
+            match edge {
+                Edge::Constraint { source_prop, dest_prop, .. } => {
+                    if let Some(&side) = port_sides.get(&(edge_id, EndpointRole::Upstream)) {
+                        *counts.entry((*source_prop, side)).or_insert(0) += 1;
+                    }
+                    if let Some(&side) = port_sides.get(&(edge_id, EndpointRole::Downstream)) {
+                        *counts.entry((*dest_prop, side)).or_insert(0) += 1;
+                    }
+                }
+                Edge::DerivInput { source_prop, .. } => {
+                    if let Some(&side) = port_sides.get(&(edge_id, EndpointRole::Upstream)) {
+                        *counts.entry((*source_prop, side)).or_insert(0) += 1;
+                    }
+                }
+                Edge::Anchor { .. } => {} // anchors use center ports
+            }
+        }
+
+        PortDistributor {
+            counts,
+            next_index: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Get the distributed y for a property-side connection, advancing the index.
+    fn next_y(&mut self, nl: &NodeLayout, prop_idx: usize, prop_id: PropId, side: PortSide) -> f64 {
+        let total = self.counts.get(&(prop_id, side)).copied().unwrap_or(1);
+        let index = self.next_index.entry((prop_id, side)).or_insert(0);
+        let current = *index;
+        *index += 1;
+        nl.distributed_port_y(prop_idx, current, total)
+    }
+}
+
 /// Compute the (x, y) port position and optional side for an edge endpoint.
 ///
 /// Returns `(x, y, Option<PortSide>)`. The side is `None` for link center ports.
+/// When `distributor` is provided, property ports use distributed y placement.
 fn port_position(
     graph: &Graph,
     edge_id: EdgeId,
@@ -393,6 +544,7 @@ fn port_position(
     node_layouts: &[NodeLayout],
     deriv_layouts: &[DerivLayout],
     port_sides: &PortSideAssignment,
+    distributor: &mut PortDistributor,
 ) -> Option<(f64, f64, Option<PortSide>)> {
     let edge = &graph.edges[edge_id.index()];
     let (_upstream, _downstream) = layout_endpoints(edge);
@@ -432,7 +584,10 @@ fn port_position(
                         Some(PortSide::Left) => nl.port_left_x(),
                         Some(PortSide::Right) | None => nl.port_right_x(),
                     };
-                    let y = nl.port_y(prop_idx);
+                    let y = match side {
+                        Some(s) => distributor.next_y(nl, prop_idx, *source_prop, s),
+                        None => nl.port_y(prop_idx),
+                    };
                     Some((x, y, side))
                 }
                 EndpointRole::Downstream => {
@@ -447,7 +602,10 @@ fn port_position(
                         Some(PortSide::Left) => nl.port_left_x(),
                         Some(PortSide::Right) | None => nl.port_right_x(),
                     };
-                    let y = nl.port_y(prop_idx);
+                    let y = match side {
+                        Some(s) => distributor.next_y(nl, prop_idx, *dest_prop, s),
+                        None => nl.port_y(prop_idx),
+                    };
                     Some((x, y, side))
                 }
             }
@@ -470,7 +628,10 @@ fn port_position(
                         Some(PortSide::Left) => nl.port_left_x(),
                         Some(PortSide::Right) | None => nl.port_right_x(),
                     };
-                    let y = nl.port_y(prop_idx);
+                    let y = match side {
+                        Some(s) => distributor.next_y(nl, prop_idx, *source_prop, s),
+                        None => nl.port_y(prop_idx),
+                    };
                     Some((x, y, side))
                 }
                 EndpointRole::Downstream => {
@@ -488,54 +649,6 @@ fn port_position(
 // ---------------------------------------------------------------------------
 // Single edge routing
 // ---------------------------------------------------------------------------
-
-/// Find the nearest vertical channel in the given direction from `from_x`.
-fn find_nearest_v_channel(
-    v_channels: &[Channel],
-    from_x: f64,
-    side: Option<PortSide>,
-) -> Option<usize> {
-    match side {
-        Some(PortSide::Left) => {
-            // Search leftward: find channel with position <= from_x, closest.
-            v_channels
-                .iter()
-                .enumerate()
-                .filter(|(_, ch)| ch.position <= from_x)
-                .min_by(|(_, a), (_, b)| {
-                    let da = (a.position - from_x).abs();
-                    let db = (b.position - from_x).abs();
-                    da.partial_cmp(&db).unwrap()
-                })
-                .map(|(i, _)| i)
-        }
-        Some(PortSide::Right) => {
-            // Search rightward: find channel with position >= from_x, closest.
-            v_channels
-                .iter()
-                .enumerate()
-                .filter(|(_, ch)| ch.position >= from_x)
-                .min_by(|(_, a), (_, b)| {
-                    let da = (a.position - from_x).abs();
-                    let db = (b.position - from_x).abs();
-                    da.partial_cmp(&db).unwrap()
-                })
-                .map(|(i, _)| i)
-        }
-        None => {
-            // No side preference: find nearest channel.
-            v_channels
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    let da = (a.position - from_x).abs();
-                    let db = (b.position - from_x).abs();
-                    da.partial_cmp(&db).unwrap()
-                })
-                .map(|(i, _)| i)
-        }
-    }
-}
 
 /// Find a horizontal channel between two y-positions.
 fn find_h_channel_between(h_channels: &[Channel], src_y: f64, tgt_y: f64) -> Option<usize> {
@@ -559,7 +672,7 @@ fn find_h_channel_between(h_channels: &[Channel], src_y: f64, tgt_y: f64) -> Opt
         .map(|(i, _)| i)
 }
 
-/// Route a single edge. Returns the segments for the route.
+/// Route a single edge using corridor-based vertical channels.
 fn route_single_edge(
     edge_id: EdgeId,
     src_x: f64,
@@ -568,10 +681,10 @@ fn route_single_edge(
     tgt_x: f64,
     tgt_y: f64,
     tgt_side: Option<PortSide>,
-    h_channels: &mut Vec<Channel>,
-    v_channels: &mut Vec<Channel>,
+    h_channels: &mut [Channel],
+    corridors: &mut Vec<Corridor>,
 ) -> Vec<Segment> {
-    // Case 1: Center-port edges (Links) -- no side assignment
+    // Case 1: Center-port edges (Anchors) — no side assignment.
     if src_side.is_none() && tgt_side.is_none() {
         if (src_x - tgt_x).abs() < 0.5 {
             // Straight vertical drop.
@@ -582,11 +695,9 @@ fn route_single_edge(
             }];
         } else {
             // V-H-V: three segments.
-            // Find a horizontal channel between src and tgt.
             let h_y = if let Some(hi) = find_h_channel_between(h_channels, src_y, tgt_y) {
                 h_channels[hi].reserve(edge_id)
             } else {
-                // Fallback: midpoint.
                 (src_y + tgt_y) / 2.0
             };
 
@@ -610,16 +721,10 @@ fn route_single_edge(
         }
     }
 
-    // Case 2a: Intra-column constraint — both Left ports, same X → clean H-V-H bracket.
-    if src_side == Some(PortSide::Left)
-        && tgt_side == Some(PortSide::Left)
-        && (src_x - tgt_x).abs() < 0.5
-    {
-        let v_x = if let Some(vi) = find_nearest_v_channel(v_channels, src_x, src_side) {
-            v_channels[vi].reserve(edge_id)
-        } else {
-            src_x - super::NODE_H_SPACING / 2.0
-        };
+    // Case 2a: Intra-column bracket — both same side, same x → H-V-H through corridor.
+    if src_side == tgt_side && src_side.is_some() && (src_x - tgt_x).abs() < 0.5 {
+        let side = src_side.unwrap();
+        let v_x = find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y);
         return collapse_zero_length(vec![
             Segment::Horizontal {
                 y: src_y,
@@ -639,36 +744,21 @@ fn route_single_edge(
         ]);
     }
 
-    // Case 2: Property-port edges -- up to 5 segments (H-V-H-V-H)
-    let v1_x = if let Some(vi) = find_nearest_v_channel(v_channels, src_x, src_side) {
-        v_channels[vi].reserve(edge_id)
-    } else {
-        // Fallback: offset from src based on side.
-        match src_side {
-            Some(PortSide::Left) => src_x - super::NODE_H_SPACING / 2.0,
-            _ => src_x + super::NODE_H_SPACING / 2.0,
-        }
+    // Case 2b: Cross-corridor routing — H-V-H-V-H (or simplified).
+    let v1_x = match src_side {
+        Some(side) => find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y),
+        None => src_x, // shouldn't happen for property-port edges
     };
 
     let h_y = if let Some(hi) = find_h_channel_between(h_channels, src_y, tgt_y) {
         h_channels[hi].reserve(edge_id)
     } else {
-        // Fallback: midpoint.
         (src_y + tgt_y) / 2.0
     };
 
-    let v2_x = if tgt_side.is_some() {
-        if let Some(vi) = find_nearest_v_channel(v_channels, tgt_x, tgt_side) {
-            v_channels[vi].reserve(edge_id)
-        } else {
-            match tgt_side {
-                Some(PortSide::Left) => tgt_x - super::NODE_H_SPACING / 2.0,
-                _ => tgt_x + super::NODE_H_SPACING / 2.0,
-            }
-        }
-    } else {
-        // Target has no side (e.g., derivation center): go straight to tgt_x.
-        tgt_x
+    let v2_x = match tgt_side {
+        Some(side) => find_corridor_channel(tgt_x, side, corridors, edge_id, src_y, tgt_y),
+        None => tgt_x, // e.g., derivation center
     };
 
     let segments = vec![
@@ -711,6 +801,45 @@ fn collapse_zero_length(segments: Vec<Segment>) -> Vec<Segment> {
 }
 
 // ---------------------------------------------------------------------------
+// Arrowhead clearance
+// ---------------------------------------------------------------------------
+
+/// Shorten the last segment of a route by `ARROWHEAD_SIZE` so the arrowhead tip
+/// lands exactly at the target boundary (markers use refX="0").
+fn shorten_route_for_arrowhead(route: &mut Route) {
+    let amount = super::ARROWHEAD_SIZE;
+    loop {
+        let seg = match route.segments.last_mut() {
+            Some(s) => s,
+            None => return,
+        };
+        let len = seg.length();
+        if len > amount + 0.001 {
+            // Shorten the last segment by `amount`.
+            match seg {
+                Segment::Horizontal { x_end, x_start, .. } => {
+                    if *x_end >= *x_start {
+                        *x_end -= amount;
+                    } else {
+                        *x_end += amount;
+                    }
+                }
+                Segment::Vertical { y_end, y_start, .. } => {
+                    if *y_end >= *y_start {
+                        *y_end -= amount;
+                    } else {
+                        *y_end += amount;
+                    }
+                }
+            }
+            return;
+        }
+        // Segment is too short; remove it entirely and try the next one.
+        route.segments.pop();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Edge priority for routing order
 // ---------------------------------------------------------------------------
 
@@ -727,18 +856,20 @@ fn edge_priority(edge: &Edge) -> u32 {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Route all edges using orthogonal channel-based routing.
+/// Route all edges using orthogonal corridor-based routing.
 ///
-/// Edges are routed in priority order (links first, then deriv inputs, then
-/// constraints). Each route reserves channels so later edges are offset.
+/// Edges are routed in priority order (anchors first, then deriv inputs, then
+/// constraints). Each route reserves corridor channels so later edges are offset.
 pub fn route_all_edges(
     graph: &Graph,
     node_layouts: &[NodeLayout],
     deriv_layouts: &[DerivLayout],
+    domain_layouts: &[DomainLayout],
     port_sides: &PortSideAssignment,
 ) -> Vec<Route> {
     let mut h_channels = build_h_channels(node_layouts, deriv_layouts);
-    let mut v_channels = build_v_channels(node_layouts, deriv_layouts);
+    let mut corridors = build_corridors(domain_layouts);
+    let mut distributor = PortDistributor::new(graph, port_sides);
 
     // Build a priority-sorted list of edge indices.
     let mut edge_indices: Vec<usize> = (0..graph.edges.len()).collect();
@@ -756,6 +887,7 @@ pub fn route_all_edges(
             node_layouts,
             deriv_layouts,
             port_sides,
+            &mut distributor,
         );
         let tgt = port_position(
             graph,
@@ -764,6 +896,7 @@ pub fn route_all_edges(
             node_layouts,
             deriv_layouts,
             port_sides,
+            &mut distributor,
         );
 
         let (src_x, src_y, src_side) = match src {
@@ -784,10 +917,12 @@ pub fn route_all_edges(
             tgt_y,
             tgt_side,
             &mut h_channels,
-            &mut v_channels,
+            &mut corridors,
         );
 
-        routes.push(Route { edge_id, segments });
+        let mut route = Route { edge_id, segments };
+        shorten_route_for_arrowhead(&mut route);
+        routes.push(route);
     }
 
     routes
@@ -865,11 +1000,35 @@ pub fn generate_stub(route: &Route) -> Route {
     }
 }
 
-/// Returns the point at the midpoint (by arc length) of a route as (x, y).
-pub fn route_midpoint(route: &Route) -> (f64, f64) {
+/// Returns the label position for a route: the midpoint of the first vertical
+/// segment, offset 4px horizontally. Falls back to arc-length midpoint if no
+/// vertical segment exists. Returns `(x, y, anchor)`.
+pub fn route_label_position(route: &Route) -> (f64, f64, &'static str) {
+    // Find first vertical segment.
+    for seg in &route.segments {
+        if let Segment::Vertical { x, y_start, y_end } = seg {
+            let mid_y = (y_start + y_end) / 2.0;
+            // Determine which side to offset based on horizontal context.
+            // If there's a preceding horizontal segment going right-to-left (x_end < x_start),
+            // the label goes to the right of the channel; otherwise to the left.
+            let offset_right = route.segments.first().map_or(true, |first| {
+                match first {
+                    Segment::Horizontal { x_start, x_end, .. } => x_end > x_start,
+                    _ => true,
+                }
+            });
+            if offset_right {
+                return (*x + 4.0, mid_y, "start");
+            } else {
+                return (*x - 4.0, mid_y, "end");
+            }
+        }
+    }
+    // Fallback: arc-length midpoint.
     let total: f64 = route.segments.iter().map(|s| s.length()).sum();
     if total < 1e-9 {
-        return route.segments.first().map(|s| s.start()).unwrap_or((0.0, 0.0));
+        let (x, y) = route.segments.first().map(|s| s.start()).unwrap_or((0.0, 0.0));
+        return (x, y, "middle");
     }
     let mut remaining = total / 2.0;
     for seg in &route.segments {
@@ -878,19 +1037,20 @@ pub fn route_midpoint(route: &Route) -> (f64, f64) {
             let frac = remaining / len;
             let (sx, sy) = seg.start();
             let (ex, ey) = seg.end();
-            return (sx + (ex - sx) * frac, sy + (ey - sy) * frac);
+            return (sx + (ex - sx) * frac, sy + (ey - sy) * frac, "middle");
         }
         remaining -= len;
     }
-    route.segments.last().map(|s| s.end()).unwrap_or((0.0, 0.0))
+    let (x, y) = route.segments.last().map(|s| s.end()).unwrap_or((0.0, 0.0));
+    (x, y, "middle")
 }
 
 /// Convert a Route to an EdgePath.  If `label_text` is Some, an EdgeLabel is
-/// placed at the arc-length midpoint of the route, offset 2px above.
+/// placed along the first vertical corridor segment, offset 4px horizontally.
 pub fn route_to_edge_path(route: &Route, label_text: Option<String>) -> EdgePath {
     let label = label_text.map(|text| {
-        let (x, y) = route_midpoint(route);
-        EdgeLabel { text, x, y: y - 2.0, anchor: "middle" }
+        let (x, y, anchor) = route_label_position(route);
+        EdgeLabel { text, x, y, anchor }
     });
     EdgePath {
         edge_id: route.edge_id,
@@ -1034,7 +1194,7 @@ mod tests {
         let deriv_layouts: Vec<DerivLayout> = vec![];
         let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
 
-        let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &port_sides);
+        let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides);
 
         // Find the link route (edge 0).
         let link_route = routes.iter().find(|r| r.edge_id == EdgeId(0)).unwrap();
@@ -1051,10 +1211,10 @@ mod tests {
                     "y_start should be 52.0, got {}",
                     y_start
                 );
-                // y_end = top of B = 100
+                // y_end = top of B (100) minus ARROWHEAD_SIZE (6) = 94
                 assert!(
-                    (y_end - 100.0).abs() < 0.1,
-                    "y_end should be 100.0, got {}",
+                    (y_end - 94.0).abs() < 0.1,
+                    "y_end should be 94.0 (arrowhead clearance), got {}",
                     y_end
                 );
             }
@@ -1075,7 +1235,7 @@ mod tests {
         let deriv_layouts: Vec<DerivLayout> = vec![];
         let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
 
-        let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &port_sides);
+        let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides);
 
         // Find the constraint route (edge 1).
         let constraint_route = routes.iter().find(|r| r.edge_id == EdgeId(1)).unwrap();
@@ -1123,7 +1283,7 @@ mod tests {
         let deriv_layouts: Vec<DerivLayout> = vec![];
         let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
 
-        let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &port_sides);
+        let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides);
 
         // Find the link route (edge 0).
         let link_route = routes.iter().find(|r| r.edge_id == EdgeId(0)).unwrap();
@@ -1154,11 +1314,11 @@ mod tests {
             other => panic!("Expected Horizontal, got {:?}", other),
         }
 
-        // Third segment: vertical to child top center.
+        // Third segment: vertical to child top center minus arrowhead clearance.
         match &link_route.segments[2] {
             Segment::Vertical { x, y_end, .. } => {
                 assert!((x - 240.0).abs() < 0.1); // B center x
-                assert!((y_end - 100.0).abs() < 0.1); // B top y
+                assert!((y_end - 94.0).abs() < 0.1); // B top y (100) - ARROWHEAD_SIZE (6)
             }
             other => panic!("Expected Vertical, got {:?}", other),
         }
@@ -1559,35 +1719,39 @@ mod tests {
     }
 
     #[test]
-    fn test_v_channels_between_nodes() {
-        let node_layouts = vec![
-            NodeLayout {
-                id: NodeId(0),
+    fn test_corridors_from_domains() {
+        use crate::layout::DomainLayout;
+        use crate::model::types::DomainId;
+
+        let domain_layouts = vec![
+            DomainLayout {
+                id: DomainId(0),
+                display_name: "D0".into(),
                 x: 0.0,
                 y: 0.0,
-                width: 80.0,
-                height: 52.0,
+                width: 100.0,
+                height: 200.0,
             },
-            NodeLayout {
-                id: NodeId(1),
+            DomainLayout {
+                id: DomainId(1),
+                display_name: "D1".into(),
                 x: 120.0,
                 y: 0.0,
-                width: 80.0,
-                height: 52.0,
+                width: 100.0,
+                height: 200.0,
             },
         ];
 
-        let v_channels = build_v_channels(&node_layouts, &[]);
+        let corridors = build_corridors(&domain_layouts);
 
-        // Should have 3 vertical channels: left of A, between A and B, right of B.
-        assert_eq!(v_channels.len(), 3);
+        // 2 domains × 2 corridors each + 1 inter-domain = 5 corridors.
+        assert_eq!(corridors.len(), 5, "Expected 5 corridors, got {}", corridors.len());
 
-        // Middle channel: between right edge of A (80) and left edge of B (120).
-        let mid_chan = &v_channels[1];
-        assert!(
-            (mid_chan.position - 100.0).abs() < 0.1,
-            "Mid channel should be at 100.0, got {}",
-            mid_chan.position
-        );
+        // D0 left corridor: x_start=0, center channel at CORRIDOR_PAD=8.
+        assert!((corridors[0].channels[0].x - 8.0).abs() < 0.1);
+        // D0 right corridor: x_end=100, center channel at 100-8=92.
+        assert!((corridors[1].channels[0].x - 92.0).abs() < 0.1);
+        // Inter-domain corridor: between x=100 and x=120, center at 110.
+        assert!((corridors[4].channels[0].x - 110.0).abs() < 0.1);
     }
 }
