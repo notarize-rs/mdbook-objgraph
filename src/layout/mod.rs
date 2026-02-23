@@ -229,32 +229,16 @@ fn single_node_content_width(graph: &Graph, node_id: NodeId) -> f64 {
     f64::max(label_width, max_prop_width) + CONTENT_PAD * 2.0
 }
 
-/// Compute the uniform width for all members of a domain.
-fn domain_node_width(graph: &Graph, domain_id: DomainId) -> f64 {
-    graph
-        .domains
-        .iter()
-        .find(|d| d.id == domain_id)
-        .map(|d| {
-            d.members
-                .iter()
-                .map(|&nid| single_node_content_width(graph, nid))
-                .fold(0.0_f64, f64::max)
-                .max(CONTENT_PAD * 4.0)
-        })
-        .unwrap_or(CONTENT_PAD * 4.0)
-}
-
 /// Returns the display width for a node.
 ///
-/// Nodes within a domain share a uniform width (the max of all domain members).
-/// Top-level nodes (no domain) use their individual content-driven width.
-pub fn node_width(graph: &Graph, node_id: NodeId) -> f64 {
-    let node = &graph.nodes[node_id.index()];
-    match node.domain {
-        Some(did) => domain_node_width(graph, did),
-        None => single_node_content_width(graph, node_id).max(CONTENT_PAD * 4.0),
-    }
+/// All nodes in the graph share a uniform width (the max content width across
+/// all nodes). This produces a clean, aligned appearance.
+pub fn node_width(graph: &Graph, _node_id: NodeId) -> f64 {
+    graph
+        .nodes
+        .iter()
+        .map(|n| single_node_content_width(graph, n.id))
+        .fold(CONTENT_PAD * 4.0, f64::max)
 }
 
 /// Compute the height of a node from the graph model.

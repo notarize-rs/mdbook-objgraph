@@ -136,8 +136,8 @@ domain "AMD KDS" {
   }
 }
 
-domain "NVD" {
-  node NVD "National Vulnerability Database" @anchored {
+domain "NIST" {
+  node NVD @anchored {
     cve_list                 @constrained
   }
 }
