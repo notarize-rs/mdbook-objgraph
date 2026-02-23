@@ -4,7 +4,7 @@ use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId, PropId};
 
 use super::{
     layout_endpoints, DerivLayout, DomainLayout, EdgeLabel, EdgePath, EndpointRole,
-    LayoutEndpoint, NodeLayout, PortSide, CORRIDOR_PAD, STUB_LENGTH,
+    LayoutEndpoint, NodeLayout, PortSide, CHANNEL_GAP, CORRIDOR_PAD, STUB_LENGTH,
 };
 
 // ---------------------------------------------------------------------------
@@ -144,25 +144,17 @@ impl Corridor {
     /// Allocate a channel with no vertical overlap for the given edge extent.
     /// If all existing channels overlap, create a new one.
     fn allocate_channel(&mut self, edge_id: EdgeId, y_start: f64, y_end: f64) -> f64 {
-        // Try existing channels.
+        // Try existing channels (non-overlapping extents can share).
         for ch in &mut self.channels {
             if !ch.overlaps(y_start, y_end) {
                 return ch.reserve(edge_id, y_start, y_end);
             }
         }
-        // All channels overlap — create a new one offset from the last.
+        // All channels overlap — create a new one with CHANNEL_GAP spacing.
         let new_x = if self.channels.is_empty() {
-            (self.x_start + self.x_end) / 2.0
+            self.x_start + CORRIDOR_PAD
         } else {
-            let last_x = self.channels.last().unwrap().x;
-            let center = (self.x_start + self.x_end) / 2.0;
-            if last_x >= center {
-                // Next channel goes to the left of center.
-                self.x_start + CORRIDOR_PAD
-            } else {
-                // Next channel goes to the right of center.
-                self.x_end - CORRIDOR_PAD
-            }
+            self.channels.last().unwrap().x + CHANNEL_GAP
         };
         let mut ch = CorridorChannel {
             x: new_x,
@@ -701,7 +693,8 @@ fn route_single_edge(
     tgt_side: Option<PortSide>,
     h_channels: &mut [Channel],
     corridors: &mut Vec<Corridor>,
-    edge_domain: Option<DomainId>,
+    src_domain: Option<DomainId>,
+    tgt_domain: Option<DomainId>,
 ) -> Vec<Segment> {
     // Case 1: Center-port edges (Anchors) — no side assignment.
     if src_side.is_none() && tgt_side.is_none() {
@@ -743,7 +736,7 @@ fn route_single_edge(
     // Case 2a: Intra-column bracket — both same side, same x → H-V-H through corridor.
     if src_side == tgt_side && src_side.is_some() && (src_x - tgt_x).abs() < 0.5 {
         let side = src_side.unwrap();
-        let v_x = find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y, edge_domain);
+        let v_x = find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y, src_domain);
         return collapse_zero_length(vec![
             Segment::Horizontal {
                 y: src_y,
@@ -772,12 +765,12 @@ fn route_single_edge(
     };
 
     let v1_x = match src_side {
-        Some(side) => find_corridor_channel(src_x, side, corridors, edge_id, src_y, h_y, edge_domain),
+        Some(side) => find_corridor_channel(src_x, side, corridors, edge_id, src_y, h_y, src_domain),
         None => src_x, // shouldn't happen for property-port edges
     };
 
     let v2_x = match tgt_side {
-        Some(side) => find_corridor_channel(tgt_x, side, corridors, edge_id, h_y, tgt_y, edge_domain),
+        Some(side) => find_corridor_channel(tgt_x, side, corridors, edge_id, h_y, tgt_y, tgt_domain),
         None => tgt_x, // e.g., derivation center
     };
 
@@ -928,9 +921,10 @@ pub fn route_all_edges(
             None => continue,
         };
 
-        // Determine the domain for this edge (intra-domain edges get Some(did),
-        // cross-domain or domainless edges get None).
-        let edge_domain = {
+        // Determine the domain affinity for corridor selection.
+        // Intra-domain edges: both endpoints use the same domain's corridors.
+        // Cross-domain edges: both use None to select the inter-domain gap corridor.
+        let (src_domain, tgt_domain) = {
             let edge = &graph.edges[idx];
             let (src_nid, tgt_nid) = match edge {
                 Edge::Anchor { parent, child, .. } => (Some(*parent), Some(*child)),
@@ -941,16 +935,13 @@ pub fn route_all_edges(
                     (Some(prop_node(graph, *source_prop)), None)
                 }
             };
-            match (src_nid, tgt_nid) {
-                (Some(s), Some(t)) => {
-                    let sd = graph.nodes[s.index()].domain;
-                    let td = graph.nodes[t.index()].domain;
-                    match (sd, td) {
-                        (Some(a), Some(b)) if a == b => Some(a),
-                        _ => None,
-                    }
-                }
-                _ => None,
+            let sd = src_nid.and_then(|n| graph.nodes[n.index()].domain);
+            let td = tgt_nid.and_then(|n| graph.nodes[n.index()].domain);
+            // Cross-domain: route through inter-domain (gap) corridor.
+            if sd != td {
+                (None, None)
+            } else {
+                (sd, td)
             }
         };
 
@@ -964,7 +955,8 @@ pub fn route_all_edges(
             tgt_side,
             &mut h_channels,
             &mut corridors,
-            edge_domain,
+            src_domain,
+            tgt_domain,
         );
 
         let mut route = Route { edge_id, segments };
@@ -1807,5 +1799,186 @@ mod tests {
         assert_eq!(corridors[2].domain_id, Some(DomainId(1))); // D1 left
         assert_eq!(corridors[3].domain_id, Some(DomainId(1))); // D1 right
         assert_eq!(corridors[4].domain_id, None);               // inter-domain
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Cross-domain routing uses inter-domain gap corridor
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cross_domain_routing_uses_gap_corridor() {
+        // Two domains: D0 at x~0..100, D1 at x~120..220.
+        // Source node A in D0, target node B in D1.
+        // Cross-domain constraint A::p0 -> B::p1 should use D0's right corridor
+        // for v1_x and D1's left corridor for v2_x.
+        let nodes = vec![
+            Node {
+                id: NodeId(0),
+                ident: "A".into(),
+                display_name: None,
+                properties: vec![PropId(0)],
+                domain: Some(DomainId(0)),
+                is_root: true,
+                is_selected: false,
+            },
+            Node {
+                id: NodeId(1),
+                ident: "B".into(),
+                display_name: None,
+                properties: vec![PropId(1)],
+                domain: Some(DomainId(1)),
+                is_root: false,
+                is_selected: false,
+            },
+        ];
+
+        let properties = vec![
+            Property {
+                id: PropId(0),
+                node: NodeId(0),
+                name: "p0".into(),
+                critical: true,
+                constrained: false,
+            },
+            Property {
+                id: PropId(1),
+                node: NodeId(1),
+                name: "p1".into(),
+                critical: true,
+                constrained: false,
+            },
+        ];
+
+        let edges = vec![Edge::Constraint {
+            source_prop: PropId(0),
+            dest_prop: PropId(1),
+            operation: None,
+        }];
+
+        let mut prop_edges = HashMap::new();
+        prop_edges.insert(PropId(0), vec![EdgeId(0)]);
+        prop_edges.insert(PropId(1), vec![EdgeId(0)]);
+
+        let domains = vec![
+            Domain {
+                id: DomainId(0),
+                display_name: "D0".into(),
+                members: vec![NodeId(0)],
+            },
+            Domain {
+                id: DomainId(1),
+                display_name: "D1".into(),
+                members: vec![NodeId(1)],
+            },
+        ];
+
+        let graph = Graph {
+            nodes,
+            properties,
+            derivations: vec![],
+            edges,
+            domains,
+            prop_edges,
+            node_children: HashMap::new(),
+            node_parent: HashMap::new(),
+        };
+
+        // Node A in D0 zone, node B in D1 zone.
+        // Domain padding (lr_pad) = DOMAIN_PADDING + CORRIDOR_PAD*2 = 10 + 16 = 26px per side.
+        // D0: x=0, nodes at x=26, domain width = 80 + 2*26 = 132, right edge = 132
+        // Gap: 132..148 = 16px inter-domain corridor
+        // D1: x=148, nodes at x=174, domain width = 132, right edge = 280
+        let node_layouts = vec![
+            NodeLayout {
+                id: NodeId(0),
+                x: 26.0, // inside D0 (domain x=0 + lr_pad=26)
+                y: 0.0,
+                width: 80.0,
+                height: 52.0,
+            },
+            NodeLayout {
+                id: NodeId(1),
+                x: 174.0, // inside D1 (domain x=148 + lr_pad=26)
+                y: 100.0,
+                width: 80.0,
+                height: 52.0,
+            },
+        ];
+
+        let domain_layouts = vec![
+            DomainLayout {
+                id: DomainId(0),
+                display_name: "D0".into(),
+                x: 0.0,
+                y: -10.0,
+                width: 132.0, // 80 + 2*26
+                height: 72.0,
+            },
+            DomainLayout {
+                id: DomainId(1),
+                display_name: "D1".into(),
+                x: 148.0, // gap: 132..148 = 16px inter-domain corridor
+                y: 80.0,
+                width: 132.0,
+                height: 72.0,
+            },
+        ];
+
+        let deriv_layouts: Vec<DerivLayout> = vec![];
+        let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
+
+        let routes = route_all_edges(
+            &graph,
+            &node_layouts,
+            &deriv_layouts,
+            &domain_layouts,
+            &port_sides,
+        );
+
+        assert_eq!(routes.len(), 1);
+        let route = &routes[0];
+
+        // The route should be H-V-H (3 segments) or H-V-H-V-H (5 segments).
+        // Key: vertical segments should be in the inter-domain gap corridor,
+        // NOT in the domain-specific corridors.
+
+        // Find vertical segments.
+        let verticals: Vec<&Segment> = route
+            .segments
+            .iter()
+            .filter(|s| matches!(s, Segment::Vertical { .. }))
+            .collect();
+
+        assert!(
+            !verticals.is_empty(),
+            "Route should have at least one vertical segment"
+        );
+
+        // Inter-domain corridor: x_start=132, x_end=148, first channel at x_start + CORRIDOR_PAD = 140
+        let inter_domain_first_channel = 140.0;
+        // D0 right corridor center: 124
+        let d0_right_corridor = 124.0;
+        // D1 left corridor center: 156
+        let d1_left_corridor = 156.0;
+
+        // All vertical segments should be in the inter-domain corridor,
+        // not in domain-specific corridors.
+        for v in &verticals {
+            let v_x = match v {
+                Segment::Vertical { x, .. } => *x,
+                _ => unreachable!(),
+            };
+            let dist_to_gap = (v_x - inter_domain_first_channel).abs();
+            let dist_to_d0 = (v_x - d0_right_corridor).abs();
+            let dist_to_d1 = (v_x - d1_left_corridor).abs();
+            assert!(
+                dist_to_gap <= dist_to_d0 && dist_to_gap <= dist_to_d1,
+                "Vertical at x={} should be in gap corridor (~{}), not D0 ({}) or D1 ({})",
+                v_x,
+                inter_domain_first_channel,
+                d0_right_corridor,
+                d1_left_corridor,
+            );
+        }
     }
 }

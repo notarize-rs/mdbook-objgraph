@@ -635,22 +635,42 @@ Intra-node edges are estimated at 1–3% of all constraints. They are handled as
 special case with forced opposite-side assignment. No iterative side-assignment
 refinement is needed at this frequency.
 
-#### 4.2.5 Phase 5: Domain Bounding Boxes
+#### 4.2.5 Phase 5: Domain Bounding Boxes and Columnar Layout
 
-Domains are not compound nodes. They do not affect the layout algorithm. After
-coordinate assignment, each domain's bounding box is computed:
+After coordinate assignment, each domain's bounding box is computed from its
+member nodes with `DOMAIN_PADDING` top/bottom and `DOMAIN_PADDING + CORRIDOR_PAD * 2`
+left/right (to accommodate intra-domain routing corridors).
 
-```
-For each domain:
-  bbox = bounding_box(domain.members) + padding
-  Render labeled rectangle behind member nodes.
-```
+##### Phase 5b: Columnar Domain Layout
 
-The global layout is computed over all nodes and derivations regardless of
-domain membership. Domain members may not be perfectly clustered. If tighter
-clustering is desired in the future, virtual edges with small weights can be
-added between domain members to pull them together without overriding real edge
-structure.
+Domains are assigned to **columns** based on the cross-domain edge topology,
+creating dedicated gap corridors between columns for cross-domain edge routing.
+
+1. **Build cross-domain adjacency**: For each edge connecting nodes in
+   different domains, record an adjacency between those domains.
+
+2. **Assign columns**: The **hub domain** (most cross-domain neighbors) anchors
+   column 0. BFS from the hub alternates column assignment: direct neighbors go
+   to column 1, their unvisited neighbors to column 0, etc. **Satellite
+   domains** (connected to exactly one other domain) join their sole neighbor's
+   column rather than alternating. Unconnected domains go to column 0.
+
+3. **Size the gap corridor dynamically**: Count the number of cross-column
+   edges (`n`). Gap width = `CORRIDOR_PAD * 2 + max(0, n - 1) * CHANNEL_GAP`.
+   For a single edge: 16px. For 12 edges: 60px. This ensures enough vertical
+   channels for all cross-column routes.
+
+4. **Reposition nodes**: Shift each domain's member nodes so they fall within
+   their assigned column. Domains narrower than the column width are centered.
+
+5. **Recompute bounding boxes** from the repositioned node coordinates.
+
+##### Phase 5c: Vertical Domain Separation
+
+Cross-domain anchor edges impose a vertical ordering: if a node in domain A
+anchors a node in domain B, domain B must appear below domain A. This pass
+shifts child domains (and their member nodes) downward until the required
+vertical gap (`CORRIDOR_PAD * 2`) is achieved.
 
 #### 4.2.6 Phase 6: Edge Routing — Orthogonal, Corridor-Based
 

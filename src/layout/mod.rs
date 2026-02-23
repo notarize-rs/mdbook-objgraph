@@ -438,8 +438,9 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // Phase 5: Domain bounding boxes
     let mut domain_layouts = domain::compute_domain_bounds(graph, &node_layouts);
 
-    // Phase 5b: Separate overlapping domain boxes (and shift their nodes with them).
-    domain::separate_domains(&mut node_layouts, &mut domain_layouts, graph);
+    // Phase 5b: Columnar domain layout — assign domains to columns with
+    // dedicated gap corridors for cross-domain edge routing.
+    domain::columnar_layout(&mut node_layouts, &mut domain_layouts, graph);
 
     // Phase 5c: Enforce vertical ordering for cross-domain anchor hierarchy.
     domain::separate_domains_vertically(&mut node_layouts, &mut domain_layouts, graph);
