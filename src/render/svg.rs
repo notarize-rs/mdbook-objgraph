@@ -84,7 +84,7 @@ fn write_domains(out: &mut String, layout: &LayoutResult) {
 
         writeln!(
             out,
-            r#"        <rect class="obgraph-domain-bg" x="{x}" y="{y}" width="{w}" height="{h}" rx="5"/>"#,
+            r#"        <rect class="obgraph-domain-bg" x="{x}" y="{y}" width="{w}" height="{h}" rx="10"/>"#,
             x = domain.x,
             y = domain.y,
             w = domain.width,
@@ -411,56 +411,63 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, trust: &T
 fn write_defs(out: &mut String) {
     writeln!(out, r#"    <defs>"#).unwrap();
 
-    // Link arrow — 8×5px absolute (markerUnits=userSpaceOnUse avoids strokeWidth scaling)
+    // Shadow filter for node cards
     writeln!(
         out,
-        r#"      <marker id="arrow-link" viewBox="0 0 8 5" refX="8" refY="2.5""#
+        r##"      <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#00000018"/></filter>"##
+    )
+    .unwrap();
+
+    // Anchor/link arrow — 6×6px, refX=0 (path endpoint offset by 6px), green
+    writeln!(
+        out,
+        r#"      <marker id="arrow-link" viewBox="0 0 6 6" refX="0" refY="3""#
     )
     .unwrap();
     writeln!(
         out,
-        r#"              markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="5" orient="auto">"#
+        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto">"#
     )
     .unwrap();
     writeln!(
         out,
-        r#"        <path d="M0,0 L8,2.5 L0,5 Z" class="obgraph-arrow-link"/>"#
+        r#"        <path d="M0,0 L6,3 L0,6 Z" class="obgraph-arrow-link"/>"#
     )
     .unwrap();
     writeln!(out, r#"      </marker>"#).unwrap();
 
-    // Intra-domain constraint arrow — 6×4px absolute, blue
+    // Intra-domain constraint arrow — 6×6px, refX=0, blue
     writeln!(
         out,
-        r#"      <marker id="arrow-constraint" viewBox="0 0 6 4" refX="6" refY="2""#
+        r#"      <marker id="arrow-constraint" viewBox="0 0 6 6" refX="0" refY="3""#
     )
     .unwrap();
     writeln!(
         out,
-        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="4" orient="auto">"#
+        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto">"#
     )
     .unwrap();
     writeln!(
         out,
-        r#"        <path d="M0,0 L6,2 L0,4 Z" class="obgraph-arrow-constraint"/>"#
+        r#"        <path d="M0,0 L6,3 L0,6 Z" class="obgraph-arrow-constraint"/>"#
     )
     .unwrap();
     writeln!(out, r#"      </marker>"#).unwrap();
 
-    // Cross-domain constraint arrow — 6×4px absolute, amber
+    // Cross-domain constraint arrow — 6×6px, refX=0, blue
     writeln!(
         out,
-        r#"      <marker id="arrow-constraint-cross" viewBox="0 0 6 4" refX="6" refY="2""#
+        r#"      <marker id="arrow-constraint-cross" viewBox="0 0 6 6" refX="0" refY="3""#
     )
     .unwrap();
     writeln!(
         out,
-        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="4" orient="auto">"#
+        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto">"#
     )
     .unwrap();
     writeln!(
         out,
-        r#"        <path d="M0,0 L6,2 L0,4 Z" class="obgraph-arrow-constraint-cross"/>"#
+        r#"        <path d="M0,0 L6,3 L0,6 Z" class="obgraph-arrow-constraint-cross"/>"#
     )
     .unwrap();
     writeln!(out, r#"      </marker>"#).unwrap();
