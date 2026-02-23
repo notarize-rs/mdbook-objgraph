@@ -135,7 +135,7 @@ pub fn assign_port_sides(
         let edge_id = EdgeId(idx as u32);
 
         // Links use center ports; no side assignment needed.
-        if edge.is_link() {
+        if edge.is_anchor() {
             continue;
         }
 
@@ -398,7 +398,7 @@ fn port_position(
     let (_upstream, _downstream) = layout_endpoints(edge);
 
     match edge {
-        Edge::Link { parent, child, .. } => {
+        Edge::Anchor { parent, child, .. } => {
             // Links use center top/bottom ports.
             match role {
                 EndpointRole::Upstream => {
@@ -717,7 +717,7 @@ fn collapse_zero_length(segments: Vec<Segment>) -> Vec<Segment> {
 /// Routing priority: lower number = routed first = gets best channels.
 fn edge_priority(edge: &Edge) -> u32 {
     match edge {
-        Edge::Link { .. } => 0,
+        Edge::Anchor { .. } => 0,
         Edge::DerivInput { .. } => 1,
         Edge::Constraint { .. } => 2,
     }
@@ -938,19 +938,19 @@ mod tests {
                 id: PropId(0),
                 node: NodeId(0),
                 name: "prop_a".into(),
-                trust: TrustClass::Critical,
+                critical: true, constrained: false,
             },
             Property {
                 id: PropId(1),
                 node: NodeId(1),
                 name: "prop_b".into(),
-                trust: TrustClass::Critical,
+                critical: true, constrained: false,
             },
         ];
 
         let edges = vec![
             // Edge 0: Link A -> B
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
@@ -1249,13 +1249,13 @@ mod tests {
                 id: PropId(0),
                 node: NodeId(0),
                 name: "p1".into(),
-                trust: TrustClass::Critical,
+                critical: true, constrained: false,
             },
             Property {
                 id: PropId(1),
                 node: NodeId(0),
                 name: "p2".into(),
-                trust: TrustClass::Critical,
+                critical: true, constrained: false,
             },
         ];
 

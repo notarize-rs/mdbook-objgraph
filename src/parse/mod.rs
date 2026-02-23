@@ -3,8 +3,8 @@ pub mod dedup;
 pub mod lexer;
 
 use ast::{
-    AstConstraint, AstDerivationExpr, AstDomain, AstGraph, AstLink, AstNode, AstProperty,
-    AstSourceExpr, AstTrustAnnotation,
+    AstConstraint, AstDerivationExpr, AstDomain, AstGraph, AstAnchor, AstNode, AstProperty,
+    AstSourceExpr,
 };
 use crate::ObgraphError;
 use lexer::{Lexer, Spanned, Token};
@@ -207,18 +207,22 @@ impl Parser {
     // -----------------------------------------------------------------------
     fn parse_prop_decl(&mut self) -> Result<AstProperty, ObgraphError> {
         let name = self.parse_prop_name()?;
-        let trust = match self.peek() {
-            Token::AtTrustConstrained => {
-                self.advance();
-                AstTrustAnnotation::Constrained
+        let mut critical = false;
+        let mut constrained = false;
+        loop {
+            match self.peek() {
+                Token::AtCritical => {
+                    self.advance();
+                    critical = true;
+                }
+                Token::AtConstrained => {
+                    self.advance();
+                    constrained = true;
+                }
+                _ => break,
             }
-            Token::AtTrustAlways => {
-                self.advance();
-                AstTrustAnnotation::Always
-            }
-            _ => AstTrustAnnotation::Default,
-        };
-        Ok(AstProperty { name, trust })
+        }
+        Ok(AstProperty { name, critical, constrained })
     }
 
     // -----------------------------------------------------------------------
@@ -380,14 +384,14 @@ impl Parser {
     }
 
     // -----------------------------------------------------------------------
-    // Parse a link statement.
+    // Parse an anchor statement.
     //
-    //   link ← ident '<-' ident (':' ident)? trailing? '\n'
+    //   anchor ← ident '<-' ident (':' ident)? trailing? '\n'
     //
     // The leading ident has already been consumed by the caller and is passed
     // in as `child_ident`.
     // -----------------------------------------------------------------------
-    fn parse_link(&mut self, child_ident: String) -> Result<AstLink, ObgraphError> {
+    fn parse_anchor(&mut self, child_ident: String) -> Result<AstAnchor, ObgraphError> {
         self.expect(&Token::LeftArrow)?;
         let parent_ident = self.expect_ident()?;
 
@@ -399,7 +403,7 @@ impl Parser {
         };
 
         self.expect_newline_or_eof()?;
-        Ok(AstLink { child_ident, parent_ident, operation })
+        Ok(AstAnchor { child_ident, parent_ident, operation })
     }
 
     // -----------------------------------------------------------------------
@@ -437,7 +441,7 @@ impl Parser {
         let mut graph = AstGraph {
             domains: Vec::new(),
             nodes: Vec::new(),
-            links: Vec::new(),
+            anchors: Vec::new(),
             constraints: Vec::new(),
         };
 
@@ -456,16 +460,16 @@ impl Parser {
                     graph.nodes.push(self.parse_node()?);
                 }
 
-                // A bare identifier starts either a link or a constraint.
+                // A bare identifier starts either an anchor or a constraint.
                 // We parse the identifier, then check what follows:
-                //   - '<-'  → link        (child <- parent ...)
+                //   - '<-'  → anchor      (child <- parent ...)
                 //   - '::'  → constraint  (node::prop <= source ...)
                 Token::Ident(_) => {
                     let first_ident = self.expect_ident()?;
 
                     match self.peek() {
                         Token::LeftArrow => {
-                            graph.links.push(self.parse_link(first_ident)?);
+                            graph.anchors.push(self.parse_anchor(first_ident)?);
                         }
                         Token::ColonColon => {
                             self.advance(); // consume '::'
@@ -480,7 +484,7 @@ impl Parser {
                                 line,
                                 col,
                                 message: format!(
-                                    "expected `<-` (link) or `::` (constraint) after identifier `{first_ident}`, found `{:?}`",
+                                    "expected `<-` (anchor) or `::` (constraint) after identifier `{first_ident}`, found `{:?}`",
                                     self.peek()
                                 ),
                             });
@@ -533,7 +537,7 @@ mod tests {
         let g = p("");
         assert!(g.domains.is_empty());
         assert!(g.nodes.is_empty());
-        assert!(g.links.is_empty());
+        assert!(g.anchors.is_empty());
         assert!(g.constraints.is_empty());
     }
 
@@ -598,20 +602,30 @@ mod tests {
         let props = &g.nodes[0].properties;
         assert_eq!(props.len(), 2);
         assert_eq!(props[0].name, "public_key");
-        assert_eq!(props[0].trust, AstTrustAnnotation::Default);
+        assert!(!props[0].critical);
+        assert!(!props[0].constrained);
         assert_eq!(props[1].name, "subject.org");
     }
 
     #[test]
-    fn test_node_property_trust_always() {
-        let g = p("node ca {\n  public_key @trust(always)\n}\n");
-        assert_eq!(g.nodes[0].properties[0].trust, AstTrustAnnotation::Always);
+    fn test_node_property_critical() {
+        let g = p("node ca {\n  public_key @critical\n}\n");
+        assert!(g.nodes[0].properties[0].critical);
+        assert!(!g.nodes[0].properties[0].constrained);
     }
 
     #[test]
-    fn test_node_property_trust_constrained() {
-        let g = p("node ca {\n  public_key @trust(constrained)\n}\n");
-        assert_eq!(g.nodes[0].properties[0].trust, AstTrustAnnotation::Constrained);
+    fn test_node_property_constrained() {
+        let g = p("node ca {\n  public_key @constrained\n}\n");
+        assert!(!g.nodes[0].properties[0].critical);
+        assert!(g.nodes[0].properties[0].constrained);
+    }
+
+    #[test]
+    fn test_node_property_critical_and_constrained() {
+        let g = p("node ca {\n  public_key @critical @constrained\n}\n");
+        assert!(g.nodes[0].properties[0].critical);
+        assert!(g.nodes[0].properties[0].constrained);
     }
 
     #[test]
@@ -658,14 +672,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Link statements
+    // Anchor statements
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_simple_link() {
         let g = p("cert <- ca\n");
-        assert_eq!(g.links.len(), 1);
-        let l = &g.links[0];
+        assert_eq!(g.anchors.len(), 1);
+        let l = &g.anchors[0];
         assert_eq!(l.child_ident, "cert");
         assert_eq!(l.parent_ident, "ca");
         assert_eq!(l.operation, None);
@@ -674,7 +688,7 @@ mod tests {
     #[test]
     fn test_link_with_operation() {
         let g = p("cert <- ca : sign\n");
-        let l = &g.links[0];
+        let l = &g.anchors[0];
         assert_eq!(l.operation, Some("sign".into()));
     }
 
@@ -759,7 +773,7 @@ mod tests {
     fn test_mixed_top_level() {
         let g = p("node a {\n}\nb <- a\na::p <= a::q\n");
         assert_eq!(g.nodes.len(), 1);
-        assert_eq!(g.links.len(), 1);
+        assert_eq!(g.anchors.len(), 1);
         assert_eq!(g.constraints.len(), 1);
     }
 
@@ -797,30 +811,30 @@ mod tests {
 
     const FULL_EXAMPLE: &str = r#"domain "PKI" {
   node ca "Certificate Authority" @root @selected {
-    subject.common_name    @trust(always)
-    subject.org            @trust(always)
-    public_key             @trust(always)
+    subject.common_name    @constrained
+    subject.org            @constrained
+    public_key             @constrained
   }
 
   node cert "Certificate" {
-    issuer.common_name
-    issuer.org
-    subject.common_name    @trust(constrained)
-    subject.org            @trust(constrained)
+    issuer.common_name     @critical
+    issuer.org             @critical
+    subject.common_name
+    subject.org
     public_key
-    signature
+    signature              @critical
   }
 }
 
 domain "Transport" {
   node tls "TLS Session" {
-    server_cert
-    cipher_suite           @trust(constrained)
+    server_cert            @critical
+    cipher_suite
   }
 }
 
 node revocation "Revocation List" @root {
-  crl                      @trust(always)
+  crl                      @constrained
 }
 
 cert <- ca : sign
@@ -852,13 +866,15 @@ cert::subject.common_name <= revocation::crl : not_in
         assert!(ca.is_selected);
         assert_eq!(ca.properties.len(), 3);
         assert_eq!(ca.properties[0].name, "subject.common_name");
-        assert_eq!(ca.properties[0].trust, AstTrustAnnotation::Always);
+        assert!(!ca.properties[0].critical);
+        assert!(ca.properties[0].constrained);
 
         let cert = &pki.nodes[1];
         assert_eq!(cert.ident, "cert");
         assert_eq!(cert.properties.len(), 6);
-        assert_eq!(cert.properties[2].name, "subject.common_name");
-        assert_eq!(cert.properties[2].trust, AstTrustAnnotation::Constrained);
+        assert_eq!(cert.properties[0].name, "issuer.common_name");
+        assert!(cert.properties[0].critical);
+        assert!(!cert.properties[0].constrained);
 
         // Transport domain
         let transport = &g.domains[1];
@@ -873,16 +889,17 @@ cert::subject.common_name <= revocation::crl : not_in
         assert_eq!(rev.ident, "revocation");
         assert!(rev.is_root);
         assert!(!rev.is_selected);
-        assert_eq!(rev.properties[0].trust, AstTrustAnnotation::Always);
+        assert!(!rev.properties[0].critical);
+        assert!(rev.properties[0].constrained);
 
-        // Links
-        assert_eq!(g.links.len(), 2);
-        assert_eq!(g.links[0].child_ident, "cert");
-        assert_eq!(g.links[0].parent_ident, "ca");
-        assert_eq!(g.links[0].operation, Some("sign".into()));
-        assert_eq!(g.links[1].child_ident, "tls");
-        assert_eq!(g.links[1].parent_ident, "cert");
-        assert_eq!(g.links[1].operation, None);
+        // Anchors
+        assert_eq!(g.anchors.len(), 2);
+        assert_eq!(g.anchors[0].child_ident, "cert");
+        assert_eq!(g.anchors[0].parent_ident, "ca");
+        assert_eq!(g.anchors[0].operation, Some("sign".into()));
+        assert_eq!(g.anchors[1].child_ident, "tls");
+        assert_eq!(g.anchors[1].parent_ident, "cert");
+        assert_eq!(g.anchors[1].operation, None);
 
         // Constraints
         assert_eq!(g.constraints.len(), 4);

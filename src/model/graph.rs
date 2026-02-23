@@ -2,13 +2,12 @@
 
 use std::collections::HashMap;
 
-use crate::parse::ast::{AstDerivationExpr, AstGraph, AstSourceExpr, AstTrustAnnotation};
+use crate::parse::ast::{AstDerivationExpr, AstGraph, AstSourceExpr};
 use crate::parse::dedup::DerivDedup;
 use crate::ObgraphError;
 
 use super::types::{
     DerivId, Derivation, Domain, DomainId, Edge, EdgeId, Graph, Node, NodeId, PropId, Property,
-    TrustClass,
 };
 use super::validate;
 
@@ -123,7 +122,8 @@ impl Builder {
         node_id: NodeId,
         node_ident: &str,
         name: &str,
-        trust: TrustClass,
+        critical: bool,
+        constrained: bool,
     ) -> Result<PropId, ObgraphError> {
         let key = (node_ident.to_string(), name.to_string());
         if self.prop_lookup.contains_key(&key) {
@@ -136,7 +136,8 @@ impl Builder {
             id,
             node: node_id,
             name: name.to_string(),
-            trust,
+            critical,
+            constrained,
         };
         self.properties.push(prop);
         self.prop_lookup.insert(key, id);
@@ -146,15 +147,16 @@ impl Builder {
     }
 
     /// Allocate an ephemeral output property for a derivation.
-    /// The property is given a synthetic name and Always trust so it never
-    /// gates node trust on its own.
+    /// The property is not critical and not constrained — it never gates
+    /// node verification on its own.
     fn alloc_deriv_output_prop(&mut self, node_id: NodeId, synth_name: &str) -> PropId {
         let id = self.next_prop_id();
         let prop = Property {
             id,
             node: node_id,
             name: synth_name.to_string(),
-            trust: TrustClass::Always,
+            critical: false,
+            constrained: false,
         };
         self.properties.push(prop);
         // Ephemeral props are NOT registered in prop_lookup (they are
@@ -291,18 +293,6 @@ impl Builder {
 }
 
 // ---------------------------------------------------------------------------
-// TrustClass conversion
-// ---------------------------------------------------------------------------
-
-fn trust_class_from(ann: AstTrustAnnotation) -> TrustClass {
-    match ann {
-        AstTrustAnnotation::Default => TrustClass::Critical,
-        AstTrustAnnotation::Constrained => TrustClass::Constrained,
-        AstTrustAnnotation::Always => TrustClass::Always,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
 
@@ -337,8 +327,7 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
             member_ids.push(node_id);
 
             for ast_prop in &ast_node.properties {
-                let trust = trust_class_from(ast_prop.trust);
-                b.alloc_property(node_id, &ast_node.ident, &ast_prop.name, trust)?;
+                b.alloc_property(node_id, &ast_node.ident, &ast_prop.name, ast_prop.critical, ast_prop.constrained)?;
             }
         }
 
@@ -363,33 +352,32 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
         )?;
 
         for ast_prop in &ast_node.properties {
-            let trust = trust_class_from(ast_prop.trust);
-            b.alloc_property(node_id, &ast_node.ident, &ast_prop.name, trust)?;
+            b.alloc_property(node_id, &ast_node.ident, &ast_prop.name, ast_prop.critical, ast_prop.constrained)?;
         }
     }
 
     // ------------------------------------------------------------------
-    // Phase 3: Process links.
+    // Phase 3: Process anchors.
     // ------------------------------------------------------------------
-    for ast_link in &ast.links {
-        let child_id = b.resolve_node(&ast_link.child_ident)?;
-        let parent_id = b.resolve_node(&ast_link.parent_ident)?;
+    for ast_anchor in &ast.anchors {
+        let child_id = b.resolve_node(&ast_anchor.child_ident)?;
+        let parent_id = b.resolve_node(&ast_anchor.parent_ident)?;
 
-        let eid = b.push_edge(Edge::Link {
+        let eid = b.push_edge(Edge::Anchor {
             child: child_id,
             parent: parent_id,
-            operation: ast_link.operation.clone(),
+            operation: ast_anchor.operation.clone(),
         });
 
-        // node_children: parent -> [edge_ids for each child link]
+        // node_children: parent -> [edge_ids for each child anchor]
         b.node_children.entry(parent_id).or_default().push(eid);
 
-        // node_parent: child -> edge_id of its parent link
+        // node_parent: child -> edge_id of its parent anchor
         // If a child already has a parent, that's a validation error.
         if b.node_parent.contains_key(&child_id) {
             return Err(ObgraphError::Validation(format!(
-                "node {} has more than one parent link",
-                ast_link.child_ident
+                "node {} has more than one parent anchor",
+                ast_anchor.child_ident
             )));
         }
         b.node_parent.insert(child_id, eid);
@@ -437,17 +425,18 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
 mod tests {
     use super::*;
     use crate::parse::ast::{
-        AstConstraint, AstDerivationExpr, AstDomain, AstGraph, AstLink, AstNode, AstProperty,
-        AstSourceExpr, AstTrustAnnotation,
+        AstAnchor, AstConstraint, AstDerivationExpr, AstDomain, AstGraph, AstNode, AstProperty,
+        AstSourceExpr,
     };
 
     // Helper to build a minimal AstNode (non-root).
-    fn ast_node(ident: &str, props: Vec<(&str, AstTrustAnnotation)>) -> AstNode {
+    fn ast_node(ident: &str, props: Vec<(&str, bool, bool)>) -> AstNode {
         ast_node_root(ident, props, false)
     }
 
     // Helper to build a minimal AstNode with explicit is_root flag.
-    fn ast_node_root(ident: &str, props: Vec<(&str, AstTrustAnnotation)>, is_root: bool) -> AstNode {
+    // Props are (name, critical, constrained).
+    fn ast_node_root(ident: &str, props: Vec<(&str, bool, bool)>, is_root: bool) -> AstNode {
         AstNode {
             ident: ident.to_string(),
             display_name: None,
@@ -455,9 +444,10 @@ mod tests {
             is_selected: false,
             properties: props
                 .into_iter()
-                .map(|(name, trust)| AstProperty {
+                .map(|(name, critical, constrained)| AstProperty {
                     name: name.to_string(),
-                    trust,
+                    critical,
+                    constrained,
                 })
                 .collect(),
         }
@@ -479,7 +469,7 @@ mod tests {
         let ast = AstGraph {
             domains: vec![],
             nodes: vec![],
-            links: vec![],
+            anchors: vec![],
             constraints: vec![],
         };
         let g = build(ast).expect("empty graph should build");
@@ -501,13 +491,13 @@ mod tests {
             nodes: vec![ast_node_root(
                 "ca",
                 vec![
-                    ("subject.common_name", AstTrustAnnotation::Always),
-                    ("subject.org", AstTrustAnnotation::Always),
-                    ("public_key", AstTrustAnnotation::Always),
+                    ("subject.common_name", false, true),  // @constrained
+                    ("subject.org", false, true),           // @constrained
+                    ("public_key", false, true),            // @constrained
                 ],
                 true,
             )],
-            links: vec![],
+            anchors: vec![],
             constraints: vec![],
         };
         let g = build(ast).expect("single node should build");
@@ -524,7 +514,8 @@ mod tests {
         assert_eq!(node.properties[2], PropId(2));
 
         assert_eq!(g.properties[0].name, "subject.common_name");
-        assert_eq!(g.properties[0].trust, TrustClass::Always);
+        assert!(g.properties[0].constrained);
+        assert!(!g.properties[0].critical);
         assert_eq!(g.properties[1].name, "subject.org");
         assert_eq!(g.properties[2].name, "public_key");
     }
@@ -537,48 +528,48 @@ mod tests {
         AstGraph {
             domains: vec![],
             nodes: vec![
-                // ca is a root (no parent link).
+                // ca is a root (no parent anchor).
                 ast_node_root(
                     "ca",
                     vec![
-                        ("subject.common_name", AstTrustAnnotation::Always),
-                        ("subject.org", AstTrustAnnotation::Always),
-                        ("public_key", AstTrustAnnotation::Always),
+                        ("subject.common_name", false, true),  // @constrained
+                        ("subject.org", false, true),           // @constrained
+                        ("public_key", false, true),            // @constrained
                     ],
                     true,
                 ),
                 ast_node(
                     "cert",
                     vec![
-                        ("issuer.common_name", AstTrustAnnotation::Default), // Critical
-                        ("issuer.org", AstTrustAnnotation::Default),         // Critical
-                        ("subject.common_name", AstTrustAnnotation::Constrained),
-                        ("subject.org", AstTrustAnnotation::Constrained),
-                        ("public_key", AstTrustAnnotation::Default),    // Critical
-                        ("signature", AstTrustAnnotation::Default),     // Critical
+                        ("issuer.common_name", true, false),    // @critical
+                        ("issuer.org", true, false),            // @critical
+                        ("subject.common_name", false, false),  // informational (receives constraint from revocation::crl)
+                        ("subject.org", false, true),           // @constrained
+                        ("public_key", true, false),            // @critical
+                        ("signature", true, false),             // @critical
                     ],
                 ),
                 ast_node(
                     "tls",
                     vec![
-                        ("server_cert", AstTrustAnnotation::Default),   // Critical
-                        ("cipher_suite", AstTrustAnnotation::Constrained),
+                        ("server_cert", true, false),           // @critical
+                        ("cipher_suite", false, true),          // @constrained
                     ],
                 ),
-                // revocation is also a root (no parent link).
+                // revocation is also a root (no parent anchor).
                 ast_node_root(
                     "revocation",
-                    vec![("crl", AstTrustAnnotation::Always)],
+                    vec![("crl", false, true)],                 // @constrained
                     true,
                 ),
             ],
-            links: vec![
-                AstLink {
+            anchors: vec![
+                AstAnchor {
                     child_ident: "cert".to_string(),
                     parent_ident: "ca".to_string(),
                     operation: Some("sign".to_string()),
                 },
-                AstLink {
+                AstAnchor {
                     child_ident: "tls".to_string(),
                     parent_ident: "cert".to_string(),
                     operation: None,
@@ -630,7 +621,8 @@ mod tests {
         // P0..P2: ca
         assert_eq!(g.properties[0].name, "subject.common_name");
         assert_eq!(g.properties[0].node, NodeId(0)); // ca
-        assert_eq!(g.properties[0].trust, TrustClass::Always);
+        assert!(g.properties[0].constrained);
+        assert!(!g.properties[0].critical);
 
         assert_eq!(g.properties[1].name, "subject.org");
         assert_eq!(g.properties[2].name, "public_key");
@@ -638,55 +630,56 @@ mod tests {
         // P3..P8: cert
         assert_eq!(g.properties[3].name, "issuer.common_name");
         assert_eq!(g.properties[3].node, NodeId(1)); // cert
-        assert_eq!(g.properties[3].trust, TrustClass::Critical);
+        assert!(g.properties[3].critical);
+        assert!(!g.properties[3].constrained);
 
         assert_eq!(g.properties[4].name, "issuer.org");
-        assert_eq!(g.properties[4].trust, TrustClass::Critical);
+        assert!(g.properties[4].critical);
 
         assert_eq!(g.properties[5].name, "subject.common_name");
-        assert_eq!(g.properties[5].trust, TrustClass::Constrained);
+        assert!(!g.properties[5].constrained); // informational (receives constraint edge)
 
         assert_eq!(g.properties[6].name, "subject.org");
-        assert_eq!(g.properties[6].trust, TrustClass::Constrained);
+        assert!(g.properties[6].constrained);
 
         assert_eq!(g.properties[7].name, "public_key");
-        assert_eq!(g.properties[7].trust, TrustClass::Critical);
+        assert!(g.properties[7].critical);
 
         assert_eq!(g.properties[8].name, "signature");
-        assert_eq!(g.properties[8].trust, TrustClass::Critical);
+        assert!(g.properties[8].critical);
 
         // P9..P10: tls
         assert_eq!(g.properties[9].name, "server_cert");
         assert_eq!(g.properties[9].node, NodeId(2)); // tls
-        assert_eq!(g.properties[9].trust, TrustClass::Critical);
+        assert!(g.properties[9].critical);
 
         assert_eq!(g.properties[10].name, "cipher_suite");
-        assert_eq!(g.properties[10].trust, TrustClass::Constrained);
+        assert!(g.properties[10].constrained);
 
         // P11: revocation
         assert_eq!(g.properties[11].name, "crl");
         assert_eq!(g.properties[11].node, NodeId(3)); // revocation
-        assert_eq!(g.properties[11].trust, TrustClass::Always);
+        assert!(g.properties[11].constrained);
 
         assert_eq!(g.properties.len(), 12);
     }
 
     #[test]
-    fn test_pki_links() {
+    fn test_pki_anchors() {
         let g = build(make_pki_ast()).expect("PKI graph should build");
 
         // E0: ca -> cert (sign)
         // E1: cert -> tls
-        let link_edges: Vec<_> = g
+        let anchor_edges: Vec<_> = g
             .edges
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.is_link())
+            .filter(|(_, e)| e.is_anchor())
             .collect();
-        assert_eq!(link_edges.len(), 2);
+        assert_eq!(anchor_edges.len(), 2);
 
-        match &link_edges[0].1 {
-            Edge::Link {
+        match &anchor_edges[0].1 {
+            Edge::Anchor {
                 child,
                 parent,
                 operation,
@@ -695,11 +688,11 @@ mod tests {
                 assert_eq!(*parent, NodeId(0)); // ca
                 assert_eq!(operation.as_deref(), Some("sign"));
             }
-            _ => panic!("expected Link"),
+            _ => panic!("expected Anchor"),
         }
 
-        match &link_edges[1].1 {
-            Edge::Link {
+        match &anchor_edges[1].1 {
+            Edge::Anchor {
                 child,
                 parent,
                 operation,
@@ -708,7 +701,7 @@ mod tests {
                 assert_eq!(*parent, NodeId(1)); // cert
                 assert!(operation.is_none());
             }
-            _ => panic!("expected Link"),
+            _ => panic!("expected Anchor"),
         }
     }
 
@@ -756,7 +749,7 @@ mod tests {
     fn test_pki_adjacency() {
         let g = build(make_pki_ast()).expect("PKI graph should build");
 
-        // ca (NodeId(0)) should have one child link: cert
+        // ca (NodeId(0)) should have one child anchor: cert
         let ca_children = g.children_of(NodeId(0));
         assert_eq!(ca_children.len(), 1);
 
@@ -781,17 +774,17 @@ mod tests {
 
     #[test]
     fn test_domains() {
-        // All nodes are roots since there are no links in this test.
+        // All nodes are roots since there are no anchors in this test.
         let ast = AstGraph {
             domains: vec![AstDomain {
                 display_name: "Infra".to_string(),
                 nodes: vec![
-                    ast_node_root("alpha", vec![("x", AstTrustAnnotation::Always)], true),
-                    ast_node_root("beta", vec![("y", AstTrustAnnotation::Default)], true),
+                    ast_node_root("alpha", vec![("x", false, true)], true),  // @constrained
+                    ast_node_root("beta", vec![("y", true, false)], true),   // @critical
                 ],
             }],
-            nodes: vec![ast_node_root("gamma", vec![("z", AstTrustAnnotation::Constrained)], true)],
-            links: vec![],
+            nodes: vec![ast_node_root("gamma", vec![("z", false, true)], true)],  // @constrained
+            anchors: vec![],
             constraints: vec![],
         };
         let g = build(ast).expect("domain graph should build");
@@ -823,16 +816,16 @@ mod tests {
 
     #[test]
     fn test_derivation_simple() {
-        // Two nodes: signer (public_key @always) and verifier (sig @critical).
-        // signer is a root; verifier is a child of signer via Link.
+        // Two nodes: signer (public_key @constrained) and verifier (sig @critical).
+        // signer is a root; verifier is a child of signer via Anchor.
         // Constraint: verifier::sig <= verify(signer::public_key) : verified_by
         let ast = AstGraph {
             domains: vec![],
             nodes: vec![
-                ast_node_root("signer", vec![("public_key", AstTrustAnnotation::Always)], true),
-                ast_node("verifier", vec![("sig", AstTrustAnnotation::Default)]),
+                ast_node_root("signer", vec![("public_key", false, true)], true),  // @constrained
+                ast_node("verifier", vec![("sig", true, false)]),                   // @critical
             ],
-            links: vec![AstLink {
+            anchors: vec![AstAnchor {
                 child_ident: "verifier".to_string(),
                 parent_ident: "signer".to_string(),
                 operation: None,
@@ -863,9 +856,9 @@ mod tests {
         // Ephemeral output: P2
         assert_eq!(deriv.output_prop, PropId(2));
 
-        // Edges: E0=Link(signer->verifier), E1=DerivInput(P0->D0), E2=Constraint(P2->P1)
+        // Edges: E0=Anchor(signer->verifier), E1=DerivInput(P0->D0), E2=Constraint(P2->P1)
         assert_eq!(g.edges.len(), 3);
-        assert!(g.edges[0].is_link());
+        assert!(g.edges[0].is_anchor());
         assert!(g.edges[1].is_deriv_input());
         assert!(g.edges[2].is_constraint());
 
@@ -910,17 +903,17 @@ mod tests {
         let ast = AstGraph {
             domains: vec![],
             nodes: vec![
-                // src is a root; dst is a child of src via Link.
-                ast_node_root("src", vec![("data", AstTrustAnnotation::Always)], true),
+                // src is a root; dst is a child of src via Anchor.
+                ast_node_root("src", vec![("data", false, true)], true),  // @constrained
                 ast_node(
                     "dst",
                     vec![
-                        ("hash_a", AstTrustAnnotation::Default),
-                        ("hash_b", AstTrustAnnotation::Default),
+                        ("hash_a", true, false),  // @critical
+                        ("hash_b", true, false),  // @critical
                     ],
                 ),
             ],
-            links: vec![AstLink {
+            anchors: vec![AstAnchor {
                 child_ident: "dst".to_string(),
                 parent_ident: "src".to_string(),
                 operation: None,
@@ -981,22 +974,22 @@ mod tests {
                 ast_node("foo", vec![]),
                 ast_node("foo", vec![]),
             ],
-            links: vec![],
+            anchors: vec![],
             constraints: vec![],
         };
         assert!(build(ast).is_err());
     }
 
     // -----------------------------------------------------------------------
-    // Test: unknown node in link is rejected
+    // Test: unknown node in anchor is rejected
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_unknown_node_in_link_rejected() {
+    fn test_unknown_node_in_anchor_rejected() {
         let ast = AstGraph {
             domains: vec![],
             nodes: vec![ast_node_root("known", vec![], false)],
-            links: vec![AstLink {
+            anchors: vec![AstAnchor {
                 child_ident: "known".to_string(),
                 parent_ident: "unknown".to_string(), // "unknown" doesn't exist
                 operation: None,
@@ -1015,10 +1008,10 @@ mod tests {
         let ast = AstGraph {
             domains: vec![],
             nodes: vec![
-                ast_node_root("a", vec![("x", AstTrustAnnotation::Always)], true),
-                ast_node("b", vec![("y", AstTrustAnnotation::Default)]),
+                ast_node_root("a", vec![("x", false, true)], true),  // @constrained
+                ast_node("b", vec![("y", true, false)]),              // @critical
             ],
-            links: vec![AstLink {
+            anchors: vec![AstAnchor {
                 child_ident: "b".to_string(),
                 parent_ident: "a".to_string(),
                 operation: None,
@@ -1034,7 +1027,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: multi-parent link is rejected
+    // Test: multi-parent anchor is rejected
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1046,13 +1039,13 @@ mod tests {
                 ast_node_root("p2", vec![], true),
                 ast_node("child", vec![]),
             ],
-            links: vec![
-                AstLink {
+            anchors: vec![
+                AstAnchor {
                     child_ident: "child".to_string(),
                     parent_ident: "p1".to_string(),
                     operation: None,
                 },
-                AstLink {
+                AstAnchor {
                     child_ident: "child".to_string(),
                     parent_ident: "p2".to_string(),
                     operation: None,
@@ -1083,10 +1076,10 @@ mod tests {
             domains: vec![],
             nodes: vec![
                 // src is root; verifier is its child.
-                ast_node_root("src", vec![("x", AstTrustAnnotation::Always)], true),
-                ast_node("verifier", vec![("out", AstTrustAnnotation::Default)]),
+                ast_node_root("src", vec![("x", false, true)], true),     // @constrained
+                ast_node("verifier", vec![("out", true, false)]),          // @critical
             ],
-            links: vec![AstLink {
+            anchors: vec![AstAnchor {
                 child_ident: "verifier".to_string(),
                 parent_ident: "src".to_string(),
                 operation: None,

@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::types::{DerivId, Edge, Graph, NodeId, PropId, TrustClass};
+use super::types::{DerivId, Edge, Graph, NodeId, PropId};
 use crate::ObgraphError;
 
 /// Validate a constructed graph against all rules from DESIGN.md §7.2.
@@ -13,10 +13,10 @@ pub fn validate(graph: &Graph) -> Result<(), ObgraphError> {
     check_duplicate_property_names(graph)?;
     check_nonexistent_node_references(graph)?;
     check_nonexistent_property_references(graph)?;
-    check_constraint_on_always_trust(graph)?;
-    check_root_node_incoming_link(graph)?;
-    check_non_root_without_incoming_link(graph)?;
-    check_multiple_incoming_links(graph)?;
+    check_constraint_on_constrained_prop(graph)?;
+    check_root_node_incoming_anchor(graph)?;
+    check_non_root_without_incoming_anchor(graph)?;
+    check_multiple_incoming_anchors(graph)?;
     check_nullary_derivations(graph)?;
     check_cycles(graph)?;
     Ok(())
@@ -67,16 +67,16 @@ fn check_nonexistent_node_references(graph: &Graph) -> Result<(), ObgraphError> 
     let node_count = graph.nodes.len();
     for edge in &graph.edges {
         match edge {
-            Edge::Link { child, parent, .. } => {
+            Edge::Anchor { child, parent, .. } => {
                 if child.index() >= node_count {
                     return Err(ObgraphError::Validation(format!(
-                        "link references nonexistent child node id {}",
+                        "anchor references nonexistent child node id {}",
                         child
                     )));
                 }
                 if parent.index() >= node_count {
                     return Err(ObgraphError::Validation(format!(
-                        "link references nonexistent parent node id {}",
+                        "anchor references nonexistent parent node id {}",
                         parent
                     )));
                 }
@@ -133,7 +133,7 @@ fn check_nonexistent_property_references(graph: &Graph) -> Result<(), ObgraphErr
                     )));
                 }
             }
-            Edge::Link { .. } => {}
+            Edge::Anchor { .. } => {}
         }
     }
 
@@ -151,18 +151,18 @@ fn check_nonexistent_property_references(graph: &Graph) -> Result<(), ObgraphErr
 }
 
 // ---------------------------------------------------------------------------
-// Rule: Constraint on @trust(always) property
+// Rule: Constraint on @constrained property
 // ---------------------------------------------------------------------------
 
-fn check_constraint_on_always_trust(graph: &Graph) -> Result<(), ObgraphError> {
+fn check_constraint_on_constrained_prop(graph: &Graph) -> Result<(), ObgraphError> {
     for edge in &graph.edges {
         if let Edge::Constraint { dest_prop, .. } = edge {
             let prop = &graph.properties[dest_prop.index()];
-            if prop.trust == TrustClass::Always {
+            if prop.constrained {
                 let node = &graph.nodes[prop.node.index()];
                 return Err(ObgraphError::Validation(format!(
-                    "property '{}' on node '{}' is @trust(always) but has an incoming constraint \
-                     (contradictory: always-trusted properties cannot be constrained)",
+                    "property '{}' on node '{}' is @constrained but has an incoming constraint \
+                     (contradictory: pre-satisfied properties cannot also be constrained by edges)",
                     prop.name, node.ident
                 )));
             }
@@ -172,14 +172,14 @@ fn check_constraint_on_always_trust(graph: &Graph) -> Result<(), ObgraphError> {
 }
 
 // ---------------------------------------------------------------------------
-// Rule: @root node with incoming link
+// Rule: @root node with incoming anchor edge
 // ---------------------------------------------------------------------------
 
-fn check_root_node_incoming_link(graph: &Graph) -> Result<(), ObgraphError> {
+fn check_root_node_incoming_anchor(graph: &Graph) -> Result<(), ObgraphError> {
     for node in &graph.nodes {
         if node.is_root && graph.node_parent.contains_key(&node.id) {
             return Err(ObgraphError::Validation(format!(
-                "node '{}' is annotated @root but appears as the child in a link \
+                "node '{}' is annotated @root but appears as the child in an anchor \
                  (root nodes must not have a parent)",
                 node.ident
             )));
@@ -189,14 +189,14 @@ fn check_root_node_incoming_link(graph: &Graph) -> Result<(), ObgraphError> {
 }
 
 // ---------------------------------------------------------------------------
-// Rule: Non-@root node without incoming link (orphan)
+// Rule: Non-@root node without incoming anchor (orphan)
 // ---------------------------------------------------------------------------
 
-fn check_non_root_without_incoming_link(graph: &Graph) -> Result<(), ObgraphError> {
+fn check_non_root_without_incoming_anchor(graph: &Graph) -> Result<(), ObgraphError> {
     for node in &graph.nodes {
         if !node.is_root && !graph.node_parent.contains_key(&node.id) {
             return Err(ObgraphError::Validation(format!(
-                "node '{}' is not @root but has no incoming link \
+                "node '{}' is not @root but has no incoming anchor \
                  (orphaned nodes must be annotated @root or connected to a parent)",
                 node.ident
             )));
@@ -206,17 +206,17 @@ fn check_non_root_without_incoming_link(graph: &Graph) -> Result<(), ObgraphErro
 }
 
 // ---------------------------------------------------------------------------
-// Rule: Multiple incoming links
+// Rule: Multiple incoming anchors
 // ---------------------------------------------------------------------------
 
-fn check_multiple_incoming_links(graph: &Graph) -> Result<(), ObgraphError> {
+fn check_multiple_incoming_anchors(graph: &Graph) -> Result<(), ObgraphError> {
     // node_parent is a HashMap<NodeId, EdgeId> so by construction it holds at
     // most one parent per node. We verify consistency by counting Link edges
     // per child directly, which catches any discrepancy between the edge list
     // and the index.
     let mut incoming_count: HashMap<NodeId, usize> = HashMap::new();
     for edge in &graph.edges {
-        if let Edge::Link { child, .. } = edge {
+        if let Edge::Anchor { child, .. } = edge {
             *incoming_count.entry(*child).or_insert(0) += 1;
         }
     }
@@ -224,7 +224,7 @@ fn check_multiple_incoming_links(graph: &Graph) -> Result<(), ObgraphError> {
         if *count > 1 {
             let ident = &graph.nodes[node_id.index()].ident;
             return Err(ObgraphError::Validation(format!(
-                "node '{}' has {} incoming links (at most one is allowed)",
+                "node '{}' has {} incoming anchors (at most one is allowed)",
                 ident, count
             )));
         }
@@ -283,7 +283,7 @@ fn check_cycles(graph: &Graph) -> Result<(), ObgraphError> {
 
     for edge in &graph.edges {
         match edge {
-            Edge::Link { parent, child, .. } => {
+            Edge::Anchor { parent, child, .. } => {
                 add_edge(node_vtx(*parent), node_vtx(*child));
             }
             Edge::Constraint {
@@ -328,7 +328,7 @@ fn check_cycles(graph: &Graph) -> Result<(), ObgraphError> {
 
     if visited != total {
         return Err(ObgraphError::Validation(
-            "cycle detected in the graph (links, constraints, and derivation edges form a cycle)"
+            "cycle detected in the graph (anchors, constraints, and derivation edges form a cycle)"
                 .to_string(),
         ));
     }
@@ -399,7 +399,7 @@ mod tests {
             is_root: false,
             is_selected: false,
         });
-        g.edges.push(Edge::Link {
+        g.edges.push(Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
@@ -436,7 +436,8 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "sig".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties.push(PropId(0));
 
@@ -444,7 +445,8 @@ mod tests {
             id: PropId(1),
             node: NodeId(1),
             name: "sig".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[1].properties.push(PropId(1));
 
@@ -469,13 +471,15 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "a".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.properties.push(Property {
             id: PropId(1),
             node: NodeId(0),
             name: "b".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties = vec![PropId(0), PropId(1)];
 
@@ -515,7 +519,7 @@ mod tests {
             });
         }
         // Give the second node a parent so orphan check doesn't fire first.
-        g.edges.push(Edge::Link {
+        g.edges.push(Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
@@ -543,7 +547,8 @@ mod tests {
                 id: PropId(i),
                 node: NodeId(0),
                 name: "sig".to_string(),
-                trust: TrustClass::Critical,
+                critical: true,
+            constrained: false,
             });
             g.nodes[0].properties.push(PropId(i));
         }
@@ -561,10 +566,10 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn nonexistent_child_node_in_link_fails() {
+    fn nonexistent_child_node_in_anchor_fails() {
         let mut g = single_root_graph();
         // Edge references NodeId(99) which doesn't exist.
-        g.edges.push(Edge::Link {
+        g.edges.push(Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(99),
             operation: None,
@@ -579,9 +584,9 @@ mod tests {
     }
 
     #[test]
-    fn nonexistent_parent_node_in_link_fails() {
+    fn nonexistent_parent_node_in_anchor_fails() {
         let mut g = single_root_graph();
-        g.edges.push(Edge::Link {
+        g.edges.push(Edge::Anchor {
             parent: NodeId(99),
             child: NodeId(0),
             operation: None,
@@ -606,7 +611,8 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "p".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties.push(PropId(0));
 
@@ -631,7 +637,8 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "out".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties.push(PropId(0));
         g.derivations.push(Derivation {
@@ -654,56 +661,60 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Constraint on @trust(always) property
+    // Constraint on @constrained property
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn constraint_on_always_trust_fails() {
+    fn constraint_on_constrained_prop_fails() {
         let mut g = single_root_graph();
 
         g.properties.push(Property {
             id: PropId(0),
             node: NodeId(0),
             name: "source".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.properties.push(Property {
             id: PropId(1),
             node: NodeId(0),
-            name: "always_prop".to_string(),
-            trust: TrustClass::Always, // @trust(always)
+            name: "constrained_prop".to_string(),
+            critical: false,
+            constrained: true, // @constrained
         });
         g.nodes[0].properties = vec![PropId(0), PropId(1)];
 
         g.edges.push(Edge::Constraint {
             source_prop: PropId(0),
-            dest_prop: PropId(1), // dest is @trust(always) — invalid
+            dest_prop: PropId(1), // dest is @constrained — invalid
             operation: None,
         });
 
         let err = validate(&g).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("@trust(always)") && msg.contains("constraint"),
+            msg.contains("@constrained") && msg.contains("constraint"),
             "unexpected error: {msg}"
         );
     }
 
     #[test]
-    fn constraint_targeting_non_always_passes() {
+    fn constraint_targeting_non_constrained_passes() {
         let mut g = single_root_graph();
 
         g.properties.push(Property {
             id: PropId(0),
             node: NodeId(0),
             name: "source".to_string(),
-            trust: TrustClass::Always, // source is always — ok, only dest matters
+            critical: false,
+            constrained: true, // source is constrained — ok, only dest matters
         });
         g.properties.push(Property {
             id: PropId(1),
             node: NodeId(0),
             name: "dest".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties = vec![PropId(0), PropId(1)];
 
@@ -720,11 +731,11 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // @root node with incoming link
+    // @root node with incoming anchor
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn root_node_with_incoming_link_fails() {
+    fn root_node_with_incoming_anchor_fails() {
         let mut g = two_node_graph();
         // Make the child a root as well — contradictory.
         g.nodes[1].is_root = true;
@@ -738,7 +749,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Non-@root node without incoming link (orphan)
+    // Non-@root node without incoming anchor (orphan)
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -758,17 +769,17 @@ mod tests {
         let err = validate(&g).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("orphan") || msg.contains("no incoming link"),
+            msg.contains("orphan") || msg.contains("no incoming anchor"),
             "unexpected error: {msg}"
         );
     }
 
     // ---------------------------------------------------------------------------
-    // Multiple incoming links
+    // Multiple incoming anchors
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn multiple_incoming_links_fails() {
+    fn multiple_incoming_anchors_fails() {
         let mut g = empty_graph();
         // Three nodes: two parents + one child.
         for i in 0..3u32 {
@@ -782,13 +793,13 @@ mod tests {
                 is_selected: false,
             });
         }
-        // Two links both pointing to NodeId(2).
-        g.edges.push(Edge::Link {
+        // Two anchors both pointing to NodeId(2).
+        g.edges.push(Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(2),
             operation: None,
         });
-        g.edges.push(Edge::Link {
+        g.edges.push(Edge::Anchor {
             parent: NodeId(1),
             child: NodeId(2),
             operation: None,
@@ -800,7 +811,7 @@ mod tests {
         let err = validate(&g).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("incoming links") || msg.contains("multiple"),
+            msg.contains("incoming anchors") || msg.contains("multiple"),
             "unexpected error: {msg}"
         );
     }
@@ -817,7 +828,8 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "out".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties.push(PropId(0));
 
@@ -845,13 +857,15 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "in".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.properties.push(Property {
             id: PropId(1),
             node: NodeId(0),
             name: "out".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties = vec![PropId(0), PropId(1)];
 
@@ -885,13 +899,15 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "a".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.properties.push(Property {
             id: PropId(1),
             node: NodeId(0),
             name: "b".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties = vec![PropId(0), PropId(1)];
 
@@ -914,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_link_cycle_fails() {
+    fn direct_anchor_cycle_fails() {
         // Two nodes each claiming to be the parent of the other.
         let mut g = empty_graph();
         for i in 0..2u32 {
@@ -928,14 +944,14 @@ mod tests {
                 is_selected: false,
             });
         }
-        // n0 -> n1 (link)
-        g.edges.push(Edge::Link {
+        // n0 -> n1 (anchor)
+        g.edges.push(Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
         });
-        // n1 -> n0 (link, cycle!)
-        g.edges.push(Edge::Link {
+        // n1 -> n0 (anchor, cycle!)
+        g.edges.push(Edge::Anchor {
             parent: NodeId(1),
             child: NodeId(0),
             operation: None,
@@ -971,13 +987,15 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "a".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.properties.push(Property {
             id: PropId(1),
             node: NodeId(0),
             name: "b".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties = vec![PropId(0), PropId(1)];
 
@@ -1022,13 +1040,15 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "in".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.properties.push(Property {
             id: PropId(1),
             node: NodeId(0),
             name: "out".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         });
         g.nodes[0].properties = vec![PropId(0), PropId(1)];
 
@@ -1068,12 +1088,12 @@ mod tests {
                 is_selected: false,
             });
         }
-        g.edges.push(Edge::Link {
+        g.edges.push(Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
         });
-        g.edges.push(Edge::Link {
+        g.edges.push(Edge::Anchor {
             parent: NodeId(1),
             child: NodeId(2),
             operation: None,

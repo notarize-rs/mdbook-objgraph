@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::types::{DerivId, Edge, Graph, NodeId, PropId, TrustClass};
+use super::types::{DerivId, Edge, Graph, NodeId, PropId};
 
 /// The result of trust propagation: per-node and per-property trust booleans.
 #[derive(Debug, Clone)]
@@ -52,12 +52,12 @@ pub fn propagate(graph: &Graph) -> TrustState {
     // --- Worklist ---
     let mut worklist: VecDeque<PropId> = VecDeque::new();
 
-    // Initialize Always properties on Trusted (root) nodes.
+    // Initialize @constrained properties on Trusted (root) nodes.
     for node in &graph.nodes {
         if node_trusted[&node.id] {
             for &pid in &node.properties {
                 let prop = &graph.properties[pid.index()];
-                if prop.trust == TrustClass::Always {
+                if prop.constrained {
                     *prop_trusted.entry(pid).or_insert(false) = true;
                     worklist.push_back(pid);
                 }
@@ -124,20 +124,20 @@ pub fn propagate(graph: &Graph) -> TrustState {
                     .unwrap_or(false);
 
             if parent_ok {
-                // All Critical properties must be Trusted.
+                // All @critical properties must be Trusted.
                 let all_critical_trusted = node.properties.iter().all(|&qid| {
                     let q = &graph.properties[qid.index()];
-                    q.trust != TrustClass::Critical
+                    !q.critical
                         || prop_trusted.get(&qid).copied().unwrap_or(false)
                 });
 
                 if all_critical_trusted {
                     *node_trusted.entry(nid).or_insert(false) = true;
 
-                    // Node becoming Trusted unlocks its Always properties.
+                    // Node becoming Trusted unlocks its @constrained properties.
                     for &qid in &node.properties {
                         let q = &graph.properties[qid.index()];
-                        if q.trust == TrustClass::Always {
+                        if q.constrained {
                             let q_entry = prop_trusted.entry(qid).or_insert(false);
                             if !*q_entry {
                                 *q_entry = true;
@@ -166,7 +166,7 @@ mod tests {
 
     use super::*;
     use crate::model::types::{
-        Derivation, Edge, EdgeId, Graph, Node, NodeId, Property, PropId, TrustClass,
+        Derivation, Edge, EdgeId, Graph, Node, NodeId, Property, PropId,
     };
 
     // -----------------------------------------------------------------------
@@ -193,7 +193,7 @@ mod tests {
                 } => {
                     map.entry(*source_prop).or_default().push(eid);
                 }
-                Edge::Link { .. } => {}
+                Edge::Anchor { .. } => {}
             }
         }
         map
@@ -207,7 +207,7 @@ mod tests {
         let mut parent: HashMap<NodeId, EdgeId> = HashMap::new();
         for (i, edge) in edges.iter().enumerate() {
             let eid = EdgeId(i as u32);
-            if let Edge::Link {
+            if let Edge::Anchor {
                 parent: p,
                 child: c,
                 ..
@@ -255,12 +255,13 @@ mod tests {
     }
 
     /// Convenience: create a Property.
-    fn prop(id: u32, node_id: u32, name: &str, trust: TrustClass) -> Property {
+    fn prop(id: u32, node_id: u32, name: &str, critical: bool, constrained: bool) -> Property {
         Property {
             id: PropId(id),
             node: NodeId(node_id),
             name: name.to_string(),
-            trust,
+            critical,
+            constrained,
         }
     }
 
@@ -273,8 +274,8 @@ mod tests {
         // Graph: one root node with two Always properties and no edges.
         let nodes = vec![node(0, "root", vec![PropId(0), PropId(1)], true)];
         let properties = vec![
-            prop(0, 0, "p0", TrustClass::Always),
-            prop(1, 0, "p1", TrustClass::Always),
+            prop(0, 0, "p0", false, true),
+            prop(1, 0, "p1", false, true),
         ];
         let graph = make_graph(nodes, properties, vec![], vec![]);
 
@@ -310,12 +311,12 @@ mod tests {
             node(1, "child", vec![PropId(1)], false),
         ];
         let properties = vec![
-            prop(0, 0, "p0", TrustClass::Always),
-            prop(1, 1, "p1", TrustClass::Critical),
+            prop(0, 0, "p0", false, true),
+            prop(1, 1, "p1", true, false),
         ];
         let edges = vec![
             // Link: parent=0, child=1
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
@@ -353,8 +354,8 @@ mod tests {
             node(0, "root", vec![], true),
             node(1, "child", vec![PropId(0)], false),
         ];
-        let properties = vec![prop(0, 1, "p0", TrustClass::Critical)];
-        let edges = vec![Edge::Link {
+        let properties = vec![prop(0, 1, "p0", true, false)];
+        let edges = vec![Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
@@ -399,11 +400,11 @@ mod tests {
             node(1, "child", vec![PropId(2), PropId(3)], false),
         ];
         let properties = vec![
-            prop(0, 0, "p0", TrustClass::Always),
-            prop(1, 0, "p1", TrustClass::Always),
+            prop(0, 0, "p0", false, true),
+            prop(1, 0, "p1", false, true),
             // P2 is the derivation output — treated as Constrained (gets trust from deriv)
-            prop(2, 1, "p2_deriv_out", TrustClass::Constrained),
-            prop(3, 1, "p3", TrustClass::Critical),
+            prop(2, 1, "p2_deriv_out", false, true),
+            prop(3, 1, "p3", true, false),
         ];
         let derivations = vec![Derivation {
             id: DerivId(0),
@@ -412,7 +413,7 @@ mod tests {
             output_prop: PropId(2),
         }];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
@@ -463,9 +464,9 @@ mod tests {
             node(1, "child", vec![PropId(2)], false),
         ];
         let properties = vec![
-            prop(0, 0, "p0", TrustClass::Always),
-            prop(1, 0, "p1", TrustClass::Critical), // no incoming constraint
-            prop(2, 1, "p2_deriv_out", TrustClass::Constrained),
+            prop(0, 0, "p0", false, true),
+            prop(1, 0, "p1", true, false), // no incoming constraint
+            prop(2, 1, "p2_deriv_out", false, true),
         ];
         let derivations = vec![Derivation {
             id: DerivId(0),
@@ -474,7 +475,7 @@ mod tests {
             output_prop: PropId(2),
         }];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
@@ -576,18 +577,18 @@ mod tests {
 
         // Properties vector (indexed 0..=11, use placeholder for gaps)
         let mut properties_map: Vec<Option<Property>> = (0..12).map(|_| None).collect();
-        properties_map[0] = Some(prop(0, 0, "subject.common_name", TrustClass::Always));
-        properties_map[1] = Some(prop(1, 0, "public_key", TrustClass::Always));
-        properties_map[2] = Some(prop(2, 0, "crl_url", TrustClass::Always));
-        properties_map[3] = Some(prop(3, 2, "issuer.common_name", TrustClass::Critical));
-        properties_map[4] = Some(prop(4, 2, "signature", TrustClass::Critical));
-        properties_map[5] = Some(prop(5, 2, "subject.common_name", TrustClass::Always));
-        properties_map[6] = Some(prop(6, 2, "not_after", TrustClass::Constrained));
-        properties_map[7] = Some(prop(7, 2, "public_key", TrustClass::Critical));
-        properties_map[8] = Some(prop(8, 3, "server_name", TrustClass::Critical));
-        properties_map[9] = Some(prop(9, 3, "not_after", TrustClass::Critical));
-        properties_map[10] = Some(prop(10, 3, "cipher_suite", TrustClass::Constrained));
-        properties_map[11] = Some(prop(11, 1, "crl", TrustClass::Always));
+        properties_map[0] = Some(prop(0, 0, "subject.common_name", false, true));
+        properties_map[1] = Some(prop(1, 0, "public_key", false, true));
+        properties_map[2] = Some(prop(2, 0, "crl_url", false, true));
+        properties_map[3] = Some(prop(3, 2, "issuer.common_name", true, false));
+        properties_map[4] = Some(prop(4, 2, "signature", true, false));
+        properties_map[5] = Some(prop(5, 2, "subject.common_name", false, true));
+        properties_map[6] = Some(prop(6, 2, "not_after", false, true));
+        properties_map[7] = Some(prop(7, 2, "public_key", true, false));
+        properties_map[8] = Some(prop(8, 3, "server_name", true, false));
+        properties_map[9] = Some(prop(9, 3, "not_after", true, false));
+        properties_map[10] = Some(prop(10, 3, "cipher_suite", false, true));
+        properties_map[11] = Some(prop(11, 1, "crl", false, true));
 
         // Fill in placeholders with dummy entries so that indexing by PropId works.
         // (The graph only indexes into properties by PropId.index(), so all slots
@@ -600,19 +601,20 @@ mod tests {
                     id: PropId(i as u32),
                     node: NodeId(0),
                     name: format!("_placeholder_{}", i),
-                    trust: TrustClass::Critical,
+                    critical: true,
+                    constrained: false,
                 })
             })
             .collect();
 
         let edges = vec![
             // Links
-            Edge::Link {
+            Edge::Anchor {
                 parent: ca_id,
                 child: cert_id,
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: cert_id,
                 child: tls_id,
                 operation: None,

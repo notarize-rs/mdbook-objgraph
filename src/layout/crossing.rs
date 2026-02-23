@@ -164,7 +164,7 @@ fn edge_endpoints(
     // An edge can be "expanded" into multiple layer-adjacent segments
     // if it's a long edge. We need to return all adjacent-layer pairs.
     match edge {
-        Edge::Link { parent, child, .. } => {
+        Edge::Anchor { parent, child, .. } => {
             let src = LayerElement::Node(*parent);
             let dst = LayerElement::Node(*child);
             if let (Some(&src_layer), Some(&dst_layer)) =
@@ -939,7 +939,7 @@ mod tests {
         for (i, edge) in edges.iter().enumerate() {
             let eid = EdgeId(i as u32);
             match edge {
-                Edge::Link { parent, child, .. } => {
+                Edge::Anchor { parent, child, .. } => {
                     node_children.entry(*parent).or_default().push(eid);
                     node_parent.insert(*child, eid);
                 }
@@ -993,7 +993,7 @@ mod tests {
             id: PropId(id),
             node: NodeId(node),
             name: name.to_string(),
-            trust: TrustClass::Critical,
+            critical: true, constrained: false,
         }
     }
 
@@ -1009,7 +1009,7 @@ mod tests {
             make_node(0, "A", vec![]),
             make_node(1, "B", vec![]),
         ];
-        let edges = vec![Edge::Link {
+        let edges = vec![Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
@@ -1043,12 +1043,12 @@ mod tests {
             make_node(3, "D", vec![]),
         ];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(3),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(1),
                 child: NodeId(2),
                 operation: None,
@@ -1214,22 +1214,22 @@ mod tests {
             make_node(5, "F", vec![]),
         ];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(3),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(1),
                 child: NodeId(2),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(2),
                 child: NodeId(5),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(3),
                 child: NodeId(4),
                 operation: None,
@@ -1297,17 +1297,17 @@ mod tests {
             make_node(4, "E", vec![]),
         ];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(3),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(1),
                 child: NodeId(2),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(2),
                 child: NodeId(4),
                 operation: None,
@@ -1441,12 +1441,12 @@ mod tests {
             make_node(3, "D", vec![]),
         ];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(2),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(1),
                 child: NodeId(3),
                 operation: None,

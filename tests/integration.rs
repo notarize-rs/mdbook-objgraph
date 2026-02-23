@@ -3,30 +3,30 @@
 const PKI_EXAMPLE: &str = r#"
 domain "PKI" {
   node ca "Certificate Authority" @root @selected {
-    subject.common_name    @trust(always)
-    subject.org            @trust(always)
-    public_key             @trust(always)
+    subject.common_name    @constrained
+    subject.org            @constrained
+    public_key             @constrained
   }
 
   node cert "Certificate" {
-    issuer.common_name
-    issuer.org
-    subject.common_name    @trust(constrained)
-    subject.org            @trust(constrained)
-    public_key
-    signature
+    issuer.common_name     @critical
+    issuer.org             @critical
+    subject.common_name
+    subject.org            @constrained
+    public_key             @critical
+    signature              @critical
   }
 }
 
 domain "Transport" {
   node tls "TLS Session" {
-    server_cert
-    cipher_suite           @trust(constrained)
+    server_cert            @critical
+    cipher_suite           @constrained
   }
 }
 
 node revocation "Revocation List" @root {
-  crl                      @trust(always)
+  crl                      @constrained
 }
 
 cert <- ca : sign
@@ -53,11 +53,11 @@ fn pki_example_full_pipeline() {
 fn simple_two_node_pipeline() {
     let input = r#"
 node root "Root" @root {
-  value @trust(always)
+  value @constrained
 }
 
 node child "Child" {
-  check
+  check @critical
 }
 
 child <- root
@@ -75,8 +75,8 @@ child::check <= root::value
 fn single_root_node() {
     let input = r#"
 node solo "Solo Node" @root {
-  prop_a @trust(always)
-  prop_b @trust(always)
+  prop_a @constrained
+  prop_b @constrained
 }
 "#;
     let result = mdbook_obgraph::process(input);
@@ -86,122 +86,122 @@ node solo "Solo Node" @root {
 const SEV_SNP_TPM: &str = r#"
 domain "Verifier" {
   node System "System Clock" @root {
-    current_time             @trust(always)
+    current_time             @constrained
   }
 
   node Challenge "Attestation Challenge" @root @selected {
-    nonce                    @trust(always)
+    nonce                    @constrained
   }
 }
 
 domain "AMD SEV-SNP" {
   node ARK "AMD Root Key" @root {
-    subject                  @trust(always)
-    issuer
-    public_key               @trust(always)
-    not_before
-    not_after
+    subject                  @constrained
+    issuer                   @critical
+    public_key               @constrained
+    not_before               @critical
+    not_after                @critical
   }
 
   node ASK "AMD Signing Key" {
-    subject                  @trust(constrained)
-    issuer
-    public_key
-    signature
-    not_before
-    not_after
+    subject                  @constrained
+    issuer                   @critical
+    public_key               @critical
+    signature                @critical
+    not_before               @critical
+    not_after                @critical
   }
 
   node VCEK "VCEK" {
-    subject                  @trust(constrained)
-    issuer
-    public_key
-    signature
-    not_before
-    not_after
-    chip_id
+    subject                  @constrained
+    issuer                   @critical
+    public_key               @critical
+    signature                @critical
+    not_before               @critical
+    not_after                @critical
+    chip_id                  @critical
   }
 
   node Report "Attestation Report" @selected {
-    chip_id
+    chip_id                  @critical
     report_data
-    tcb_version
-    signature
+    tcb_version              @critical
+    signature                @critical
   }
 }
 
 domain "AMD KDS" {
   node KDS "Key Distribution Service" @root {
-    supported_tcbs           @trust(always)
+    supported_tcbs           @constrained
   }
 }
 
 domain "NVD" {
   node NVD "National Vulnerability Database" @root {
-    cve_list                 @trust(always)
+    cve_list                 @constrained
   }
 }
 
 domain "TPM" {
   node MfgCA "Manufacturer CA" @root {
-    subject                  @trust(always)
-    issuer
-    public_key               @trust(always)
-    not_before
-    not_after
+    subject                  @constrained
+    issuer                   @critical
+    public_key               @constrained
+    not_before               @critical
+    not_after                @critical
   }
 
   node EK "Endorsement Key" {
-    subject                  @trust(constrained)
-    issuer
-    public_key
-    signature
-    not_before
-    not_after
+    subject                  @constrained
+    issuer                   @critical
+    public_key               @critical
+    signature                @critical
+    not_before               @critical
+    not_after                @critical
   }
 
   node AK "Attestation Key" {
-    public_key
+    public_key               @critical
   }
 
   node Quote "TPM Quote" {
-    nonce
+    nonce                    @critical
     pcr_digest
-    measurement              @trust(constrained)
-    signature
+    measurement              @constrained
+    signature                @critical
   }
 
   node TCGLog "TCG Event Log" {
-    event_entries
+    event_entries            @critical
   }
 }
 
 domain "Guest vTPM" {
   node GuestData "Guest Report Data" {
-    nonce
-    public_key
+    nonce                    @critical
+    public_key               @critical
   }
 
   node vEK "vTPM EK" {
-    subject                  @trust(constrained)
-    issuer                   @trust(constrained)
-    public_key
-    signature
+    subject                  @constrained
+    issuer                   @constrained
+    public_key               @critical
+    signature                @critical
   }
 
   node vAK "vTPM AK" {
-    public_key
+    public_key               @critical
   }
 
   node vQuote "vTPM Quote" {
     nonce
     pcr_digest
-    measurement              @trust(constrained)
-    signature
+    measurement              @constrained
+    signature                @critical
   }
 
   node vTCGLog "vTPM Event Log" {
-    event_entries
+    event_entries            @critical
   }
 }
 

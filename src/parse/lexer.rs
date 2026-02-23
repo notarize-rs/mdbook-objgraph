@@ -15,10 +15,10 @@ pub enum Token {
     AtRoot,
     /// `@selected`
     AtSelected,
-    /// `@trust(constrained)`
-    AtTrustConstrained,
-    /// `@trust(always)`
-    AtTrustAlways,
+    /// `@critical`
+    AtCritical,
+    /// `@constrained`
+    AtConstrained,
     /// `<-` link arrow
     LeftArrow,
     /// `<=` constraint operator
@@ -152,46 +152,12 @@ impl<'a> Lexer<'a> {
         match name.as_str() {
             "root" => Ok(Token::AtRoot),
             "selected" => Ok(Token::AtSelected),
-            "trust" => self.lex_trust_annotation(line, col),
+            "critical" => Ok(Token::AtCritical),
+            "constrained" => Ok(Token::AtConstrained),
             other => Err(crate::ObgraphError::Parse {
                 line,
                 col,
                 message: format!("unknown annotation `@{other}`"),
-            }),
-        }
-    }
-
-    /// Parse the `(constrained)` or `(always)` portion of `@trust(...)`.
-    fn lex_trust_annotation(&mut self, line: usize, col: usize) -> Result<Token, crate::ObgraphError> {
-        // expect '('
-        match self.peek() {
-            Some('(') => { self.advance(); }
-            _ => return Err(crate::ObgraphError::Parse {
-                line,
-                col,
-                message: "`@trust` must be followed by `(constrained)` or `(always)`".to_string(),
-            }),
-        }
-        let mut kind = String::new();
-        while matches!(self.peek(), Some(c) if c.is_ascii_alphabetic()) {
-            kind.push(self.advance().unwrap());
-        }
-        // expect ')'
-        match self.peek() {
-            Some(')') => { self.advance(); }
-            _ => return Err(crate::ObgraphError::Parse {
-                line,
-                col,
-                message: "expected `)` after trust kind".to_string(),
-            }),
-        }
-        match kind.as_str() {
-            "constrained" => Ok(Token::AtTrustConstrained),
-            "always" => Ok(Token::AtTrustAlways),
-            other => Err(crate::ObgraphError::Parse {
-                line,
-                col,
-                message: format!("unknown trust kind `{other}`; expected `constrained` or `always`"),
             }),
         }
     }
@@ -423,15 +389,15 @@ mod tests {
     }
 
     #[test]
-    fn test_at_trust_constrained() {
-        let toks = tokenize("@trust(constrained)");
-        assert_eq!(toks[0], Token::AtTrustConstrained);
+    fn test_at_critical() {
+        let toks = tokenize("@critical");
+        assert_eq!(toks[0], Token::AtCritical);
     }
 
     #[test]
-    fn test_at_trust_always() {
-        let toks = tokenize("@trust(always)");
-        assert_eq!(toks[0], Token::AtTrustAlways);
+    fn test_at_constrained() {
+        let toks = tokenize("@constrained");
+        assert_eq!(toks[0], Token::AtConstrained);
     }
 
     #[test]
@@ -573,8 +539,8 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_trust_kind() {
-        let err = Lexer::new("@trust(unknown)").tokenize().unwrap_err();
+    fn test_unknown_annotation_word() {
+        let err = Lexer::new("@trust").tokenize().unwrap_err();
         assert!(matches!(err, crate::ObgraphError::Parse { .. }));
     }
 
@@ -654,14 +620,14 @@ mod tests {
 
     #[test]
     fn test_property_annotation_tokens() {
-        let toks = tokenize("subject.common_name @trust(always)");
+        let toks = tokenize("subject.common_name @constrained");
         assert_eq!(
             toks,
             vec![
                 Token::Ident("subject".into()),
                 Token::Dot,
                 Token::Ident("common_name".into()),
-                Token::AtTrustAlways,
+                Token::AtConstrained,
                 Token::Newline,
                 Token::Eof,
             ]

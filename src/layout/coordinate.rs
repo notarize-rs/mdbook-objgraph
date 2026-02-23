@@ -234,7 +234,7 @@ fn build_adjacency(
         // 2) Graph edges that connect elements in adjacent layers.
         for edge in &graph.edges {
             match edge {
-                crate::model::types::Edge::Link { parent, child, .. } => {
+                crate::model::types::Edge::Anchor { parent, child, .. } => {
                     if let (Some(&ep), Some(&ec)) = (
                         emap.node_to_elem.get(parent),
                         emap.node_to_elem.get(child),
@@ -781,7 +781,7 @@ mod tests {
                     id: pid,
                     node: nid,
                     name: format!("prop{}", j),
-                    trust: TrustClass::Critical,
+                    critical: true, constrained: false,
                 });
                 prop_ids.push(pid);
             }
@@ -821,7 +821,7 @@ mod tests {
             let eid = EdgeId(i as u32);
             let parent = NodeId(parent_idx);
             let child = NodeId(child_idx);
-            g.edges.push(Edge::Link {
+            g.edges.push(Edge::Anchor {
                 parent,
                 child,
                 operation: None,

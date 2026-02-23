@@ -17,30 +17,30 @@ fn run_quality(input: &str) -> quality::QualityReport {
 const PKI_EXAMPLE: &str = r#"
 domain "PKI" {
   node ca "Certificate Authority" @root @selected {
-    subject.common_name    @trust(always)
-    subject.org            @trust(always)
-    public_key             @trust(always)
+    subject.common_name    @constrained
+    subject.org            @constrained
+    public_key             @constrained
   }
 
   node cert "Certificate" {
-    issuer.common_name
-    issuer.org
-    subject.common_name    @trust(constrained)
-    subject.org            @trust(constrained)
-    public_key
-    signature
+    issuer.common_name     @critical
+    issuer.org             @critical
+    subject.common_name
+    subject.org            @constrained
+    public_key             @critical
+    signature              @critical
   }
 }
 
 domain "Transport" {
   node tls "TLS Session" {
-    server_cert
-    cipher_suite           @trust(constrained)
+    server_cert            @critical
+    cipher_suite           @constrained
   }
 }
 
 node revocation "Revocation List" @root {
-  crl                      @trust(always)
+  crl                      @constrained
 }
 
 cert <- ca : sign

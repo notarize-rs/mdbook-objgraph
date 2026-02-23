@@ -212,7 +212,7 @@ pub enum LayoutEndpoint {
 /// Returns (upstream, downstream) layout endpoints for an edge.
 pub fn layout_endpoints(edge: &Edge) -> (LayoutEndpoint, LayoutEndpoint) {
     match edge {
-        Edge::Link { parent, child, .. } => {
+        Edge::Anchor { parent, child, .. } => {
             (LayoutEndpoint::Node(*parent), LayoutEndpoint::Node(*child))
         }
         Edge::Constraint {
@@ -264,7 +264,7 @@ fn tree_center_nodes(
                     .iter()
                     .flat_map(|eids| eids.iter())
                     .filter_map(|&eid| match &graph.edges[eid.index()] {
-                        Edge::Link { child, .. }
+                        Edge::Anchor { child, .. }
                             if graph.nodes[child.index()].domain == parent_domain =>
                         {
                             Some(*child)
@@ -387,7 +387,7 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         };
 
         match edge {
-            Edge::Link { .. } => {
+            Edge::Anchor { .. } => {
                 links.push(edge_path);
             }
             Edge::DerivInput { .. } => {
@@ -449,7 +449,7 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
 /// Extract the operation label text from an edge, if present.
 fn edge_operation(edge: &Edge) -> Option<String> {
     match edge {
-        Edge::Link { operation, .. } => operation.clone(),
+        Edge::Anchor { operation, .. } => operation.clone(),
         Edge::Constraint { operation, .. } => operation.clone(),
         Edge::DerivInput { .. } => None,
     }

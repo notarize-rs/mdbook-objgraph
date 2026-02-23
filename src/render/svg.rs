@@ -3,8 +3,8 @@
 use std::fmt::Write;
 
 use crate::layout::{EdgePath, LayoutResult, HEADER_HEIGHT, ROW_HEIGHT};
-use crate::model::trust::TrustState;
-use crate::model::types::{Graph, TrustClass};
+use crate::model::state::TrustState;
+use crate::model::types::Graph;
 
 use super::interactivity;
 use super::style;
@@ -349,16 +349,13 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, trust: &T
             let prop = &graph.properties[pid.index()];
             let prop_trusted = trust.is_prop_trusted(pid);
 
-            // Trust attribute: "always" for TrustClass::Always, else trusted/untrusted
-            let trust_attr = match prop.trust {
-                TrustClass::Always => "always",
-                _ => {
-                    if prop_trusted {
-                        "trusted"
-                    } else {
-                        "untrusted"
-                    }
-                }
+            // Trust attribute: "constrained" for @constrained props, else trusted/untrusted
+            let trust_attr = if prop.constrained {
+                "always" // backwards-compat: @constrained maps to data-trust="always"
+            } else if prop_trusted {
+                "trusted"
+            } else {
+                "untrusted"
             };
 
             let row_y = nl.y + HEADER_HEIGHT + prop_idx as f64 * ROW_HEIGHT;
@@ -505,9 +502,9 @@ mod tests {
 
     use super::*;
     use crate::layout::{CrossDomainPaths, DomainLayout, EdgePath, NodeLayout};
-    use crate::model::trust;
+    use crate::model::state;
     use crate::model::types::{
-        Domain, DomainId, Edge, EdgeId, Graph, Node, NodeId, Property, PropId, TrustClass,
+        Domain, DomainId, Edge, EdgeId, Graph, Node, NodeId, Property, PropId,
     };
 
     // -----------------------------------------------------------------------
@@ -530,7 +527,7 @@ mod tests {
                 Edge::DerivInput { source_prop, .. } => {
                     map.entry(*source_prop).or_default().push(eid);
                 }
-                Edge::Link { .. } => {}
+                Edge::Anchor { .. } => {}
             }
         }
         map
@@ -543,7 +540,7 @@ mod tests {
         let mut parent: HashMap<NodeId, EdgeId> = HashMap::new();
         for (i, edge) in edges.iter().enumerate() {
             let eid = EdgeId(i as u32);
-            if let Edge::Link {
+            if let Edge::Anchor {
                 parent: p,
                 child: c,
                 ..
@@ -589,7 +586,7 @@ mod tests {
         };
 
         let graph = make_graph(vec![node], vec![], vec![], vec![]);
-        let trust_state = trust::propagate(&graph);
+        let trust_state = state::propagate(&graph);
 
         let layout = LayoutResult {
             nodes: vec![NodeLayout {
@@ -690,15 +687,16 @@ mod tests {
             id: PropId(0),
             node: NodeId(1),
             name: "secret".to_string(),
-            trust: TrustClass::Critical,
+            critical: true,
+            constrained: false,
         }];
-        let edges = vec![Edge::Link {
+        let edges = vec![Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
         }];
         let graph = make_graph(nodes, properties, edges, vec![]);
-        let trust_state = trust::propagate(&graph);
+        let trust_state = state::propagate(&graph);
 
         assert!(!trust_state.is_node_trusted(NodeId(1)), "child should be untrusted");
 
@@ -776,13 +774,15 @@ mod tests {
                 id: PropId(0),
                 node: NodeId(0),
                 name: "src_prop".to_string(),
-                trust: TrustClass::Always,
+                critical: false,
+                constrained: true,
             },
             Property {
                 id: PropId(1),
                 node: NodeId(1),
                 name: "dst_prop".to_string(),
-                trust: TrustClass::Critical,
+                critical: true,
+            constrained: false,
             },
         ];
         let edges = vec![Edge::Constraint {
@@ -805,7 +805,7 @@ mod tests {
         ];
 
         let graph = make_graph(nodes, properties, edges, domains);
-        let trust_state = trust::propagate(&graph);
+        let trust_state = state::propagate(&graph);
 
         // Cross-domain paths for source node 0.
         let mut cross_map: HashMap<NodeId, CrossDomainPaths> = HashMap::new();
@@ -904,7 +904,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 5: TrustClass::Always properties carry data-trust="always"
+    // Test 5: @constrained properties carry data-trust="always"
     // -----------------------------------------------------------------------
 
     #[test]
@@ -922,10 +922,11 @@ mod tests {
             id: PropId(0),
             node: NodeId(0),
             name: "always_prop".to_string(),
-            trust: TrustClass::Always,
+            critical: false,
+            constrained: true,
         }];
         let graph = make_graph(nodes, properties, vec![], vec![]);
-        let trust_state = trust::propagate(&graph);
+        let trust_state = state::propagate(&graph);
 
         let layout = LayoutResult {
             nodes: vec![NodeLayout {
@@ -984,7 +985,7 @@ mod tests {
             is_selected: false,
         }];
         let graph = make_graph(nodes, vec![], vec![], vec![]);
-        let trust_state = trust::propagate(&graph);
+        let trust_state = state::propagate(&graph);
 
         let layout = LayoutResult {
             nodes: vec![NodeLayout {

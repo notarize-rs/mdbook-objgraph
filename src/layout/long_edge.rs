@@ -65,7 +65,7 @@ fn edge_endpoints(
     assignment: &LayerAssignment,
 ) -> Option<(EndpointVertex, u32, EndpointVertex, u32)> {
     match edge {
-        Edge::Link { parent, child, .. } => {
+        Edge::Anchor { parent, child, .. } => {
             let src_layer = *assignment.node_layers.get(parent)?;
             let tgt_layer = *assignment.node_layers.get(child)?;
             Some((
@@ -113,7 +113,7 @@ fn edge_endpoints(
 /// endpoints.
 fn min_span_for_edge(edge: &Edge, _graph: &Graph) -> u32 {
     match edge {
-        Edge::Link { .. } => 2,          // Node -> Node
+        Edge::Anchor { .. } => 2,          // Node -> Node
         Edge::Constraint { .. } => 2,    // Node -> Node
         Edge::DerivInput { .. } => 1,    // Node -> Deriv
     }
@@ -237,7 +237,7 @@ mod tests {
         for (idx, edge) in edges.iter().enumerate() {
             let eid = EdgeId(idx as u32);
             match edge {
-                Edge::Link { parent, child, .. } => {
+                Edge::Anchor { parent, child, .. } => {
                     node_children.entry(*parent).or_default().push(eid);
                     node_parent.insert(*child, eid);
                 }
@@ -287,7 +287,7 @@ mod tests {
             id: PropId(id),
             node: NodeId(node),
             name: name.to_string(),
-            trust: TrustClass::Critical,
+            critical: true, constrained: false,
         }
     }
 
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn test_no_long_edges() {
         let nodes = vec![make_node(0, "a", &[]), make_node(1, "b", &[])];
-        let edges = vec![Edge::Link {
+        let edges = vec![Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
@@ -331,7 +331,7 @@ mod tests {
         // Min span for Node->Node is 2, actual span is 6 => long edge.
         // Segments should appear in layers 1, 2, 3, 4, 5.
         let nodes = vec![make_node(0, "a", &[]), make_node(1, "b", &[])];
-        let edges = vec![Edge::Link {
+        let edges = vec![Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
@@ -383,7 +383,7 @@ mod tests {
             output_prop: PropId(1),
         }];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
@@ -439,12 +439,12 @@ mod tests {
         ];
         let props = vec![make_prop(0, 0, "out"), make_prop(1, 2, "in")];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(1),
                 child: NodeId(2),
                 operation: None,
@@ -528,12 +528,12 @@ mod tests {
             make_node(2, "c", &[]),
         ];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(1),
                 child: NodeId(2),
                 operation: None,

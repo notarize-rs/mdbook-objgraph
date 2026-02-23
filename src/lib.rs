@@ -27,11 +27,11 @@ pub enum ObgraphError {
 /// Process an obgraph definition string into a self-contained HTML/SVG fragment.
 ///
 /// This is the top-level library API composing all pipeline phases:
-/// parse -> validate -> trust propagation -> layout -> render.
+/// parse -> validate -> state propagation -> layout -> render.
 pub fn process(input: &str) -> Result<String, ObgraphError> {
     let ast = parse::parse(input)?;
     let graph = model::build(ast)?;
-    let trust = model::trust::propagate(&graph);
+    let trust = model::state::propagate(&graph);
     let layout_result = layout::layout(&graph)?;
     Ok(render::render(&graph, &layout_result, &trust))
 }

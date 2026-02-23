@@ -484,7 +484,7 @@ fn find_node_edge_overlaps(
 fn edge_connects_to_node(graph: &Graph, edge_id: EdgeId, node_id: NodeId) -> bool {
     let edge = &graph.edges[edge_id.index()];
     match edge {
-        crate::model::types::Edge::Link { parent, child, .. } => {
+        crate::model::types::Edge::Anchor { parent, child, .. } => {
             *parent == node_id || *child == node_id
         }
         crate::model::types::Edge::Constraint {
@@ -538,7 +538,7 @@ fn compute_max_parent_misalignment(graph: &Graph, nodes: &[NodeLayout]) -> f64 {
     // Build parent -> children center-X list.
     let mut parent_to_child_centers: HashMap<NodeId, Vec<f64>> = HashMap::new();
     for edge in &graph.edges {
-        if let Edge::Link { parent, child, .. } = edge
+        if let Edge::Anchor { parent, child, .. } = edge
             && let Some(child_nl) = nodes.iter().find(|n| n.id == *child)
         {
             let cx = child_nl.x + child_nl.width / 2.0;

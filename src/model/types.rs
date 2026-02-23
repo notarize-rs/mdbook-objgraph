@@ -59,10 +59,10 @@ pub struct Graph {
     /// Includes edges to/from derivation ports.
     pub prop_edges: HashMap<PropId, Vec<EdgeId>>,
 
-    /// Node-level adjacency for links only: NodeId -> Vec<EdgeId> (children).
+    /// Node-level adjacency for anchors only: NodeId -> Vec<EdgeId> (children).
     pub node_children: HashMap<NodeId, Vec<EdgeId>>,
 
-    /// Node-level adjacency for links only: NodeId -> EdgeId (parent link).
+    /// Node-level adjacency for anchors only: NodeId -> EdgeId (parent anchor).
     pub node_parent: HashMap<NodeId, EdgeId>,
 }
 
@@ -81,12 +81,12 @@ impl Graph {
             .find(|p| p.name == prop_name)
     }
 
-    /// Get the parent node of a given node (via its incoming link), if any.
+    /// Get the parent node of a given node (via its incoming anchor), if any.
     pub fn parent_of(&self, node_id: NodeId) -> Option<NodeId> {
         self.node_parent.get(&node_id).map(|&eid| {
             match &self.edges[eid.index()] {
-                Edge::Link { parent, .. } => *parent,
-                _ => unreachable!("node_parent should only contain Link edges"),
+                Edge::Anchor { parent, .. } => *parent,
+                _ => unreachable!("node_parent should only contain Anchor edges"),
             }
         })
     }
@@ -99,7 +99,7 @@ impl Graph {
             .unwrap_or(&[])
     }
 
-    /// Get all child link edges for a node.
+    /// Get all child anchor edges for a node.
     pub fn children_of(&self, node_id: NodeId) -> &[EdgeId] {
         self.node_children
             .get(&node_id)
@@ -144,17 +144,10 @@ pub struct Property {
     pub id: PropId,
     pub node: NodeId,
     pub name: String,
-    pub trust: TrustClass,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustClass {
-    /// Default: gates node trust, needs constraint.
-    Critical,
-    /// `@trust(constrained)`: doesn't gate, needs constraint.
-    Constrained,
-    /// `@trust(always)`: doesn't gate, no constraint needed.
-    Always,
+    /// `@critical` — property gates node verification.
+    pub critical: bool,
+    /// `@constrained` — property is pre-satisfied (annotation-constrained).
+    pub constrained: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +179,8 @@ pub struct Domain {
 
 #[derive(Debug, Clone)]
 pub enum Edge {
-    /// Hierarchical link: parent -> child. Trust flows parent to child.
-    Link {
+    /// Hierarchical anchor: parent -> child. Anchoring flows parent to child.
+    Anchor {
         child: NodeId,
         parent: NodeId,
         operation: Option<String>,
@@ -208,9 +201,9 @@ pub enum Edge {
 }
 
 impl Edge {
-    /// Returns true if this is a Link edge.
-    pub fn is_link(&self) -> bool {
-        matches!(self, Edge::Link { .. })
+    /// Returns true if this is an Anchor edge.
+    pub fn is_anchor(&self) -> bool {
+        matches!(self, Edge::Anchor { .. })
     }
 
     /// Returns true if this is a Constraint edge.
@@ -226,7 +219,7 @@ impl Edge {
     /// Edge weight for layout purposes.
     pub fn weight(&self) -> u32 {
         match self {
-            Edge::Link { .. } => 3,
+            Edge::Anchor { .. } => 3,
             Edge::DerivInput { .. } => 2,
             Edge::Constraint { .. } => 1,
         }

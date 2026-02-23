@@ -10,7 +10,7 @@
 pub struct AstGraph {
     pub domains: Vec<AstDomain>,
     pub nodes: Vec<AstNode>,
-    pub links: Vec<AstLink>,
+    pub anchors: Vec<AstAnchor>,
     pub constraints: Vec<AstConstraint>,
 }
 
@@ -35,23 +35,15 @@ pub struct AstNode {
 #[derive(Debug, Clone)]
 pub struct AstProperty {
     pub name: String,
-    pub trust: AstTrustAnnotation,
+    /// `@critical` — property gates node verification.
+    pub critical: bool,
+    /// `@constrained` — property is pre-satisfied (annotation-constrained).
+    pub constrained: bool,
 }
 
-/// The trust annotation on a property.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AstTrustAnnotation {
-    /// No annotation — critical, gates node trust.
-    Default,
-    /// `@trust(constrained)` — doesn't gate, needs constraint.
-    Constrained,
-    /// `@trust(always)` — doesn't gate, no constraint needed.
-    Always,
-}
-
-/// A link between two nodes: `child <- parent [: operation]`.
+/// An anchor between two nodes: `child <- parent [: operation]`.
 #[derive(Debug, Clone)]
-pub struct AstLink {
+pub struct AstAnchor {
     pub child_ident: String,
     pub parent_ident: String,
     pub operation: Option<String>,

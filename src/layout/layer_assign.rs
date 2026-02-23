@@ -98,7 +98,7 @@ fn build_simplex_graph(graph: &Graph) -> SimplexGraph {
     for (idx, edge) in graph.edges.iter().enumerate() {
         let edge_id = EdgeId(idx as u32);
         let (source, target) = match edge {
-            Edge::Link { parent, child, .. } => {
+            Edge::Anchor { parent, child, .. } => {
                 (Vertex::Node(*parent), Vertex::Node(*child))
             }
             Edge::Constraint {
@@ -856,7 +856,7 @@ mod tests {
         for (idx, edge) in edges.iter().enumerate() {
             let eid = EdgeId(idx as u32);
             match edge {
-                Edge::Link { parent, child, .. } => {
+                Edge::Anchor { parent, child, .. } => {
                     node_children.entry(*parent).or_default().push(eid);
                     node_parent.insert(*child, eid);
                 }
@@ -907,7 +907,7 @@ mod tests {
             id: PropId(id),
             node: NodeId(node),
             name: name.to_string(),
-            trust: TrustClass::Critical,
+            critical: true, constrained: false,
         }
     }
 
@@ -919,7 +919,7 @@ mod tests {
             make_node(0, "parent", &[], true),
             make_node(1, "child", &[], false),
         ];
-        let edges = vec![Edge::Link {
+        let edges = vec![Edge::Anchor {
             parent: NodeId(0),
             child: NodeId(1),
             operation: None,
@@ -941,12 +941,12 @@ mod tests {
             make_node(2, "c", &[], false),
         ];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(1),
                 child: NodeId(2),
                 operation: None,
@@ -985,7 +985,7 @@ mod tests {
             output_prop: PropId(1),
         }];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
@@ -1041,17 +1041,17 @@ mod tests {
             make_prop(4, 3, "status"),
         ];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: Some("signs".into()),
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(1),
                 child: NodeId(2),
                 operation: Some("authenticates".into()),
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(3),
                 operation: Some("publishes".into()),
@@ -1161,17 +1161,17 @@ mod tests {
             make_node(3, "d", &[], false),
         ];
         let edges = vec![
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(1),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(0),
                 child: NodeId(2),
                 operation: None,
             },
-            Edge::Link {
+            Edge::Anchor {
                 parent: NodeId(1),
                 child: NodeId(3),
                 operation: None,
