@@ -146,15 +146,14 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
 
     // Collect all edge paths for geometric analysis.
     let all_paths: Vec<&EdgePath> = layout
-        .links
+        .anchors
         .iter()
-        .chain(layout.derivation_edges.iter())
         .chain(layout.intra_domain_constraints.iter())
         .chain(
             layout
                 .cross_domain_constraints
-                .values()
-                .flat_map(|c| c.full_paths.iter()),
+                .iter()
+                .map(|c| &c.full_path),
         )
         .collect();
 

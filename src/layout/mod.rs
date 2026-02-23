@@ -6,8 +6,6 @@ pub mod long_edge;
 pub mod quality;
 pub mod routing;
 
-use std::collections::HashMap;
-
 use crate::model::types::{
     DerivId, DomainId, Edge, EdgeId, Graph, NodeId, PropId,
 };
@@ -18,18 +16,21 @@ use long_edge::{LayerEntry, LayerItem};
 // Sizing constants (DESIGN.md §4.2.4)
 // ---------------------------------------------------------------------------
 
-pub const HEADER_HEIGHT: f64 = 14.0;
-pub const ROW_HEIGHT: f64 = 11.0;
-pub const PORT_MARGIN: f64 = 8.0;
+pub const HEADER_HEIGHT: f64 = 32.0;
+pub const ROW_HEIGHT: f64 = 20.0;
+pub const CONTENT_PAD: f64 = 12.0;
 pub const PORT_RADIUS: f64 = 4.0;
-pub const NODE_H_SPACING: f64 = 18.0;
-pub const LAYER_V_SPACING: f64 = 22.0;
-pub const DERIV_V_SPACING: f64 = 10.0;
+pub const NODE_H_SPACING: f64 = 40.0;
+pub const LAYER_V_SPACING: f64 = 48.0;
+pub const DERIV_V_SPACING: f64 = 24.0;
 pub const DOMAIN_PADDING: f64 = 10.0;
-pub const EDGE_SPACING: f64 = 6.0;
-pub const STUB_LENGTH: f64 = 10.0;
+pub const CORRIDOR_PAD: f64 = 8.0;
+pub const STUB_LENGTH: f64 = 20.0;
 pub const CHAR_WIDTH: f64 = 5.5;
 pub const GLOBAL_MARGIN: f64 = 12.0;
+pub const PILL_HEIGHT: f64 = 20.0;
+pub const PILL_CONTENT_PAD: f64 = 12.0;
+pub const CHANNEL_GAP: f64 = 4.0;
 
 // ---------------------------------------------------------------------------
 // Layout result types (DESIGN.md §5.5)
@@ -40,10 +41,10 @@ pub struct LayoutResult {
     pub nodes: Vec<NodeLayout>,
     pub derivations: Vec<DerivLayout>,
     pub domains: Vec<DomainLayout>,
-    pub links: Vec<EdgePath>,
-    pub derivation_edges: Vec<EdgePath>,
+    pub anchors: Vec<EdgePath>,
     pub intra_domain_constraints: Vec<EdgePath>,
-    pub cross_domain_constraints: HashMap<NodeId, CrossDomainPaths>,
+    pub cross_domain_constraints: Vec<CrossDomainPaths>,
+    pub cross_domain_deriv_chains: Vec<DerivChain>,
     pub width: f64,
     pub height: f64,
 }
@@ -73,18 +74,18 @@ impl NodeLayout {
         self.y + HEADER_HEIGHT + prop_index as f64 * ROW_HEIGHT + ROW_HEIGHT / 2.0
     }
 
-    /// Link port x-coordinate (center of node).
-    pub fn link_port_x(&self) -> f64 {
+    /// Anchor port x-coordinate (center of node).
+    pub fn anchor_port_x(&self) -> f64 {
         self.x + self.width / 2.0
     }
 
-    /// Link port y-coordinate at top edge (for incoming link from parent).
-    pub fn link_port_top_y(&self) -> f64 {
+    /// Anchor port y-coordinate at top edge (for incoming anchor from parent).
+    pub fn anchor_port_top_y(&self) -> f64 {
         self.y
     }
 
-    /// Link port y-coordinate at bottom edge (for outgoing link to child).
-    pub fn link_port_bottom_y(&self) -> f64 {
+    /// Anchor port y-coordinate at bottom edge (for outgoing anchor to child).
+    pub fn anchor_port_bottom_y(&self) -> f64 {
         self.y + self.height
     }
 }
@@ -126,8 +127,17 @@ pub struct EdgeLabel {
 }
 
 #[derive(Debug, Clone)]
-pub struct CrossDomainPaths {
+pub struct DerivChain {
+    pub deriv_id: DerivId,
+    pub participants: Vec<NodeId>,
     pub full_paths: Vec<EdgePath>,
+    pub stub_paths: Vec<EdgePath>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CrossDomainPaths {
+    pub participants: Vec<NodeId>,
+    pub full_path: EdgePath,
     pub stub_paths: Vec<EdgePath>,
 }
 
@@ -160,7 +170,7 @@ fn single_node_content_width(graph: &Graph, node_id: NodeId) -> f64 {
         .iter()
         .map(|&pid| graph.properties[pid.index()].name.len() as f64 * CHAR_WIDTH)
         .fold(0.0_f64, f64::max);
-    f64::max(label_width, max_prop_width) + PORT_MARGIN * 2.0
+    f64::max(label_width, max_prop_width) + CONTENT_PAD * 2.0
 }
 
 /// Compute the uniform node width: the minimum width needed for the widest node.
@@ -171,7 +181,7 @@ pub fn uniform_node_width(graph: &Graph) -> f64 {
         .iter()
         .map(|n| single_node_content_width(graph, n.id))
         .fold(0.0_f64, f64::max)
-        .max(PORT_MARGIN * 4.0)
+        .max(CONTENT_PAD * 4.0)
 }
 
 /// Returns the display width for a node (uniform across all nodes).
@@ -188,12 +198,12 @@ pub fn node_height(graph: &Graph, node_id: NodeId) -> f64 {
 /// Compute the width of a derivation node.
 pub fn deriv_width(graph: &Graph, deriv_id: DerivId) -> f64 {
     let deriv = &graph.derivations[deriv_id.index()];
-    deriv.operation.len() as f64 * CHAR_WIDTH + PORT_MARGIN * 2.0
+    deriv.operation.len() as f64 * CHAR_WIDTH + PILL_CONTENT_PAD * 2.0
 }
 
-/// Compute the height of a derivation node (one row).
+/// Compute the height of a derivation pill.
 pub fn deriv_height() -> f64 {
-    ROW_HEIGHT
+    PILL_HEIGHT
 }
 
 // ---------------------------------------------------------------------------
@@ -366,11 +376,10 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // Phase 6b: Edge routing
     let routes = routing::route_all_edges(graph, &node_layouts, &deriv_layouts, &port_sides);
 
-    // Classify edges into links, derivation edges, and constraints
-    let mut links = Vec::new();
-    let mut derivation_edges = Vec::new();
+    // Classify edges into anchors, derivation edges, and constraints
+    let mut anchors = Vec::new();
     let mut intra_domain_constraints = Vec::new();
-    let mut cross_domain_constraints: HashMap<NodeId, CrossDomainPaths> = HashMap::new();
+    let mut cross_domain_constraints: Vec<CrossDomainPaths> = Vec::new();
 
     for route in &routes {
         let edge = &graph.edges[route.edge_id.index()];
@@ -388,10 +397,13 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
 
         match edge {
             Edge::Anchor { .. } => {
-                links.push(edge_path);
+                anchors.push(edge_path);
             }
             Edge::DerivInput { .. } => {
-                derivation_edges.push(edge_path);
+                // Derivation input edges are now part of DerivChain structs
+                // (built by Stream D). For now, include them in intra-domain constraints
+                // so they still render.
+                intra_domain_constraints.push(edge_path);
             }
             Edge::Constraint {
                 source_prop,
@@ -403,7 +415,7 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
                 let is_cross_domain = is_cross_domain_constraint(graph, src_node, dst_node);
 
                 if is_cross_domain {
-                    // Generate stub route (no label on stubs)
+                    // Generate stub routes (no label on stubs)
                     let stub_route = routing::generate_stub(route);
                     let stub_svg = routing::route_to_svg_path(&stub_route);
                     let stub_path = EdgePath {
@@ -412,17 +424,11 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
                         label: None,
                     };
 
-                    // Add to both source and destination node entries
-                    for &nid in &[src_node, dst_node] {
-                        let entry = cross_domain_constraints
-                            .entry(nid)
-                            .or_insert_with(|| CrossDomainPaths {
-                                full_paths: Vec::new(),
-                                stub_paths: Vec::new(),
-                            });
-                        entry.full_paths.push(edge_path.clone());
-                        entry.stub_paths.push(stub_path.clone());
-                    }
+                    cross_domain_constraints.push(CrossDomainPaths {
+                        participants: vec![src_node, dst_node],
+                        full_path: edge_path,
+                        stub_paths: vec![stub_path],
+                    });
                 } else {
                     intra_domain_constraints.push(edge_path);
                 }
@@ -437,10 +443,10 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         nodes: node_layouts,
         derivations: deriv_layouts,
         domains: domain_layouts,
-        links,
-        derivation_edges,
+        anchors,
         intra_domain_constraints,
         cross_domain_constraints,
+        cross_domain_deriv_chains: Vec::new(),
         width,
         height,
     })

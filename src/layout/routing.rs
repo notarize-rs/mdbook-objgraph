@@ -4,7 +4,7 @@ use crate::model::types::{Edge, EdgeId, Graph, NodeId, PropId};
 
 use super::{
     layout_endpoints, DerivLayout, EdgeLabel, EdgePath, EndpointRole, LayoutEndpoint, NodeLayout,
-    PortSide, EDGE_SPACING, STUB_LENGTH,
+    PortSide, CORRIDOR_PAD, STUB_LENGTH,
 };
 
 // ---------------------------------------------------------------------------
@@ -72,16 +72,16 @@ impl Channel {
     /// Occupants are spaced symmetrically around the channel center.
     fn offset_position(&self, occupant_index: usize) -> f64 {
         let n = occupant_index;
-        // Center the group: offset = (i - (n-1)/2) * EDGE_SPACING
+        // Center the group: offset = (i - (n-1)/2) * CORRIDOR_PAD
         // For a new occupant being added at index `occupant_index`:
-        let _offset = (n as f64 - 0.0) * EDGE_SPACING;
+        let _offset = (n as f64 - 0.0) * CORRIDOR_PAD;
         // Simple scheme: first occupant at center, subsequent ones offset alternately
         if n == 0 {
             self.position
         } else if n % 2 == 1 {
-            self.position + ((n as f64 + 1.0) / 2.0).ceil() * EDGE_SPACING
+            self.position + ((n as f64 + 1.0) / 2.0).ceil() * CORRIDOR_PAD
         } else {
-            self.position - (n as f64 / 2.0) * EDGE_SPACING
+            self.position - (n as f64 / 2.0) * CORRIDOR_PAD
         }
     }
 
@@ -404,12 +404,12 @@ fn port_position(
                 EndpointRole::Upstream => {
                     // Source is parent node, bottom center.
                     let nl = find_node_layout(node_layouts, *parent)?;
-                    Some((nl.link_port_x(), nl.link_port_bottom_y(), None))
+                    Some((nl.anchor_port_x(), nl.anchor_port_bottom_y(), None))
                 }
                 EndpointRole::Downstream => {
                     // Target is child node, top center.
                     let nl = find_node_layout(node_layouts, *child)?;
-                    Some((nl.link_port_x(), nl.link_port_top_y(), None))
+                    Some((nl.anchor_port_x(), nl.anchor_port_top_y(), None))
                 }
             }
         }

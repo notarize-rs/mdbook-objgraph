@@ -117,9 +117,9 @@ fn write_domains(out: &mut String, layout: &LayoutResult) {
 fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult) {
     writeln!(out, r#"    <g class="obgraph-edges">"#).unwrap();
 
-    // --- Link paths ---
+    // --- Anchor paths ---
     writeln!(out, r#"      <g class="obgraph-links">"#).unwrap();
-    for ep in &layout.links {
+    for ep in &layout.anchors {
         writeln!(
             out,
             r#"        <path class="obgraph-link" d="{d}" data-edge="{id}" marker-end="url(#arrow-link)"/>"#,
@@ -137,20 +137,7 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult) {
     }
     writeln!(out, r#"      </g>"#).unwrap();
 
-    // --- Derivation input edges ---
-    writeln!(out, r#"      <g class="obgraph-deriv-edges">"#).unwrap();
-    for ep in &layout.derivation_edges {
-        writeln!(
-            out,
-            r#"        <path class="obgraph-deriv-edge" d="{d}" data-edge="{id}"/>"#,
-            d = ep.svg_path,
-            id = ep.edge_id.0
-        )
-        .unwrap();
-    }
-    writeln!(out, r#"      </g>"#).unwrap();
-
-    // --- Intra-domain constraint paths ---
+    // --- Intra-domain constraint and derivation input paths ---
     writeln!(out, r#"      <g class="obgraph-constraints-intra">"#).unwrap();
     for ep in &layout.intra_domain_constraints {
         writeln!(
@@ -172,31 +159,28 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult) {
 
     // --- Cross-domain constraint: full paths (hidden by CSS class by default) ---
     writeln!(out, r#"      <g class="obgraph-constraints-cross">"#).unwrap();
-    for (node_id, cross) in &layout.cross_domain_constraints {
-        // For each full path we need source-node and target-node.
-        // The edge_id on the full_path lets us look up the edge.
-        for ep in &cross.full_paths {
-            let (src_node, dst_node) = constraint_node_ids(graph, ep);
-            writeln!(
-                out,
-                r#"        <path class="obgraph-constraint-full" d="{d}" data-edge="{id}" data-source-node="{src}" data-target-node="{dst}" marker-end="url(#arrow-constraint-cross)"/>"#,
-                d = ep.svg_path,
-                id = ep.edge_id.0,
-                src = src_node,
-                dst = dst_node,
-            )
-            .unwrap();
-        }
-        let _ = node_id; // suppress unused warning; node_id is the key for grouping
+    for cross in &layout.cross_domain_constraints {
+        let ep = &cross.full_path;
+        let (src_node, dst_node) = constraint_node_ids(graph, ep);
+        writeln!(
+            out,
+            r#"        <path class="obgraph-constraint-full" d="{d}" data-edge="{id}" data-source-node="{src}" data-target-node="{dst}" marker-end="url(#arrow-constraint-cross)"/>"#,
+            d = ep.svg_path,
+            id = ep.edge_id.0,
+            src = src_node,
+            dst = dst_node,
+        )
+        .unwrap();
     }
     writeln!(out, r#"      </g>"#).unwrap();
 
     // --- Cross-domain constraint: stub paths ---
     writeln!(out, r#"      <g class="obgraph-constraint-stubs">"#).unwrap();
-    for (node_id, cross) in &layout.cross_domain_constraints {
+    for cross in &layout.cross_domain_constraints {
         for ep in &cross.stub_paths {
-            let src_node = node_id.0;
-            let (_, dst_node) = constraint_node_ids(graph, ep);
+            let participants = &cross.participants;
+            let src_node = participants.first().map(|n| n.0).unwrap_or(0);
+            let dst_node = participants.last().map(|n| n.0).unwrap_or(0);
             writeln!(
                 out,
                 r#"        <path class="obgraph-constraint-stub" d="{d}" data-edge="{id}" data-source-node="{src}" data-target-node="{dst}" marker-end="url(#arrow-constraint-cross)"/>"#,
@@ -598,10 +582,10 @@ mod tests {
             }],
             derivations: vec![],
             domains: vec![],
-            links: vec![],
-            derivation_edges: vec![],
+            anchors: vec![],
+            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
-            cross_domain_constraints: HashMap::new(),
+            cross_domain_constraints: vec![],
             width: 200.0,
             height: 100.0,
         };
@@ -719,14 +703,14 @@ mod tests {
             ],
             derivations: vec![],
             domains: vec![],
-            links: vec![EdgePath {
+            anchors: vec![EdgePath {
                 edge_id: EdgeId(0),
                 svg_path: "M 70,48 L 70,100".to_string(),
                 label: None,
             }],
-            derivation_edges: vec![],
+            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
-            cross_domain_constraints: HashMap::new(),
+            cross_domain_constraints: vec![],
             width: 200.0,
             height: 200.0,
         };
@@ -807,23 +791,20 @@ mod tests {
         let graph = make_graph(nodes, properties, edges, domains);
         let trust_state = state::propagate(&graph);
 
-        // Cross-domain paths for source node 0.
-        let mut cross_map: HashMap<NodeId, CrossDomainPaths> = HashMap::new();
-        cross_map.insert(
-            NodeId(0),
-            CrossDomainPaths {
-                full_paths: vec![EdgePath {
-                    edge_id: EdgeId(0),
-                    svg_path: "M 100,50 L 200,150".to_string(),
-                    label: None,
-                }],
-                stub_paths: vec![EdgePath {
-                    edge_id: EdgeId(0),
-                    svg_path: "M 100,50 L 120,50".to_string(),
-                    label: None,
-                }],
+        // Cross-domain paths.
+        let cross_vec = vec![CrossDomainPaths {
+            participants: vec![NodeId(0), NodeId(1)],
+            full_path: EdgePath {
+                edge_id: EdgeId(0),
+                svg_path: "M 100,50 L 200,150".to_string(),
+                label: None,
             },
-        );
+            stub_paths: vec![EdgePath {
+                edge_id: EdgeId(0),
+                svg_path: "M 100,50 L 120,50".to_string(),
+                label: None,
+            }],
+        }];
 
         let layout = LayoutResult {
             nodes: vec![
@@ -861,10 +842,10 @@ mod tests {
                     height: 80.0,
                 },
             ],
-            links: vec![],
-            derivation_edges: vec![],
+            anchors: vec![],
+            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
-            cross_domain_constraints: cross_map,
+            cross_domain_constraints: cross_vec,
             width: 400.0,
             height: 200.0,
         };
@@ -938,10 +919,10 @@ mod tests {
             }],
             derivations: vec![],
             domains: vec![],
-            links: vec![],
-            derivation_edges: vec![],
+            anchors: vec![],
+            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
-            cross_domain_constraints: HashMap::new(),
+            cross_domain_constraints: vec![],
             width: 200.0,
             height: 100.0,
         };
@@ -997,10 +978,10 @@ mod tests {
             }],
             derivations: vec![],
             domains: vec![],
-            links: vec![],
-            derivation_edges: vec![],
+            anchors: vec![],
+            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
-            cross_domain_constraints: HashMap::new(),
+            cross_domain_constraints: vec![],
             width: 300.0,
             height: 100.0,
         };
