@@ -234,6 +234,46 @@ fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
     corridors
 }
 
+/// Find the index of the nearest corridor in the direction the port faces.
+///
+/// Returns `None` if no matching corridor is found.
+fn find_best_corridor_idx(
+    port_x: f64,
+    port_side: PortSide,
+    corridors: &[Corridor],
+    edge_domain: Option<DomainId>,
+) -> Option<usize> {
+    let domain_matches = |c: &Corridor| -> bool {
+        match edge_domain {
+            Some(did) => c.domain_id == Some(did),
+            None => c.domain_id.is_none(),
+        }
+    };
+
+    match port_side {
+        PortSide::Left => corridors
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.center_x() <= port_x && domain_matches(c))
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.center_x() - port_x).abs();
+                let db = (b.center_x() - port_x).abs();
+                da.partial_cmp(&db).unwrap()
+            })
+            .map(|(i, _)| i),
+        PortSide::Right => corridors
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.center_x() >= port_x && domain_matches(c))
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.center_x() - port_x).abs();
+                let db = (b.center_x() - port_x).abs();
+                da.partial_cmp(&db).unwrap()
+            })
+            .map(|(i, _)| i),
+    }
+}
+
 /// Find the nearest corridor in the direction the port faces and allocate a channel.
 ///
 /// `edge_domain` constrains corridor selection: `Some(did)` means prefer only
@@ -248,45 +288,7 @@ fn find_corridor_channel(
     y_end: f64,
     edge_domain: Option<DomainId>,
 ) -> f64 {
-    // Filter corridors by domain affinity:
-    //   - Intra-domain edges (Some(did)) → only same-domain corridors
-    //   - Cross-domain edges (None) → only inter-domain corridors (domain_id == None)
-    let domain_matches = |c: &Corridor| -> bool {
-        match edge_domain {
-            Some(did) => c.domain_id == Some(did),
-            None => c.domain_id.is_none(),
-        }
-    };
-
-    // Find the nearest corridor in the correct direction.
-    let best_idx = match port_side {
-        PortSide::Left => {
-            corridors
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.center_x() <= port_x && domain_matches(c))
-                .min_by(|(_, a), (_, b)| {
-                    let da = (a.center_x() - port_x).abs();
-                    let db = (b.center_x() - port_x).abs();
-                    da.partial_cmp(&db).unwrap()
-                })
-                .map(|(i, _)| i)
-        }
-        PortSide::Right => {
-            corridors
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.center_x() >= port_x && domain_matches(c))
-                .min_by(|(_, a), (_, b)| {
-                    let da = (a.center_x() - port_x).abs();
-                    let db = (b.center_x() - port_x).abs();
-                    da.partial_cmp(&db).unwrap()
-                })
-                .map(|(i, _)| i)
-        }
-    };
-
-    match best_idx {
+    match find_best_corridor_idx(port_x, port_side, corridors, edge_domain) {
         Some(idx) => corridors[idx].allocate_channel(edge_id, y_start, y_end),
         None => {
             // Fallback: no corridor found, use offset from port.
@@ -756,8 +758,38 @@ fn route_single_edge(
         ]);
     }
 
-    // Case 2b: Cross-corridor routing — H-V-H-V-H (or simplified).
-    // Compute h_y first so we can pass correct vertical extents to each corridor.
+    // Case 2b: Cross-corridor routing.
+    //
+    // When both endpoints route to the same corridor (e.g., both sides of a
+    // cross-domain edge face the gap corridor), use a single vertical channel
+    // for an H-V-H (3-segment) route. Otherwise, use H-V-H-V-H (5-segment).
+    if let (Some(src_s), Some(tgt_s)) = (src_side, tgt_side) {
+        let src_corr = find_best_corridor_idx(src_x, src_s, corridors, src_domain);
+        let tgt_corr = find_best_corridor_idx(tgt_x, tgt_s, corridors, tgt_domain);
+        if let (Some(si), Some(ti)) = (src_corr, tgt_corr) && si == ti {
+            // Same corridor — single channel, H-V-H route.
+            let v_x = corridors[si].allocate_channel(edge_id, src_y, tgt_y);
+            return collapse_zero_length(vec![
+                Segment::Horizontal {
+                    y: src_y,
+                    x_start: src_x,
+                    x_end: v_x,
+                },
+                Segment::Vertical {
+                    x: v_x,
+                    y_start: src_y,
+                    y_end: tgt_y,
+                },
+                Segment::Horizontal {
+                    y: tgt_y,
+                    x_start: v_x,
+                    x_end: tgt_x,
+                },
+            ]);
+        }
+    }
+
+    // Different corridors — H-V-H-V-H route.
     let h_y = if let Some(hi) = find_h_channel_between(h_channels, src_y, tgt_y) {
         h_channels[hi].reserve(edge_id)
     } else {
@@ -766,12 +798,12 @@ fn route_single_edge(
 
     let v1_x = match src_side {
         Some(side) => find_corridor_channel(src_x, side, corridors, edge_id, src_y, h_y, src_domain),
-        None => src_x, // shouldn't happen for property-port edges
+        None => src_x,
     };
 
     let v2_x = match tgt_side {
         Some(side) => find_corridor_channel(tgt_x, side, corridors, edge_id, h_y, tgt_y, tgt_domain),
-        None => tgt_x, // e.g., derivation center
+        None => tgt_x,
     };
 
     let segments = vec![
