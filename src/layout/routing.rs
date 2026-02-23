@@ -1,6 +1,6 @@
 /// Orthogonal channel-based edge routing (DESIGN.md §4.2.6).
 
-use crate::model::types::{Edge, EdgeId, Graph, NodeId, PropId};
+use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId, PropId};
 
 use super::{
     layout_endpoints, DerivLayout, DomainLayout, EdgeLabel, EdgePath, EndpointRole,
@@ -136,6 +136,8 @@ pub struct Corridor {
     pub x_start: f64,
     pub x_end: f64,
     pub channels: Vec<CorridorChannel>,
+    /// `Some(id)` for intra-domain corridors (L/R), `None` for inter-domain corridors.
+    pub domain_id: Option<DomainId>,
 }
 
 impl Corridor {
@@ -200,6 +202,7 @@ fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
                 x: dl.x + CORRIDOR_PAD,
                 occupants: Vec::new(),
             }],
+            domain_id: Some(dl.id),
         };
 
         // Right corridor: between rightmost node area and domain right edge.
@@ -210,6 +213,7 @@ fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
                 x: dl.x + dl.width - CORRIDOR_PAD,
                 occupants: Vec::new(),
             }],
+            domain_id: Some(dl.id),
         };
 
         corridors.push(left);
@@ -230,6 +234,7 @@ fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
                     x: center_x,
                     occupants: Vec::new(),
                 }],
+                domain_id: None,
             });
         }
     }
@@ -238,6 +243,10 @@ fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
 }
 
 /// Find the nearest corridor in the direction the port faces and allocate a channel.
+///
+/// `edge_domain` constrains corridor selection: `Some(did)` means prefer only
+/// corridors belonging to that domain (for intra-domain edges); `None` means
+/// any corridor is acceptable (for cross-domain edges).
 fn find_corridor_channel(
     port_x: f64,
     port_side: PortSide,
@@ -245,15 +254,23 @@ fn find_corridor_channel(
     edge_id: EdgeId,
     y_start: f64,
     y_end: f64,
+    edge_domain: Option<DomainId>,
 ) -> f64 {
+    // Filter corridors: intra-domain edges prefer same-domain corridors.
+    let domain_matches = |c: &Corridor| -> bool {
+        match edge_domain {
+            Some(did) => c.domain_id == Some(did),
+            None => true,
+        }
+    };
+
     // Find the nearest corridor in the correct direction.
     let best_idx = match port_side {
         PortSide::Left => {
-            // Search leftward: corridor whose center_x < port_x, closest.
             corridors
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| c.center_x() <= port_x)
+                .filter(|(_, c)| c.center_x() <= port_x && domain_matches(c))
                 .min_by(|(_, a), (_, b)| {
                     let da = (a.center_x() - port_x).abs();
                     let db = (b.center_x() - port_x).abs();
@@ -262,11 +279,10 @@ fn find_corridor_channel(
                 .map(|(i, _)| i)
         }
         PortSide::Right => {
-            // Search rightward: corridor whose center_x >= port_x, closest.
             corridors
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| c.center_x() >= port_x)
+                .filter(|(_, c)| c.center_x() >= port_x && domain_matches(c))
                 .min_by(|(_, a), (_, b)| {
                     let da = (a.center_x() - port_x).abs();
                     let db = (b.center_x() - port_x).abs();
@@ -683,6 +699,7 @@ fn route_single_edge(
     tgt_side: Option<PortSide>,
     h_channels: &mut [Channel],
     corridors: &mut Vec<Corridor>,
+    edge_domain: Option<DomainId>,
 ) -> Vec<Segment> {
     // Case 1: Center-port edges (Anchors) — no side assignment.
     if src_side.is_none() && tgt_side.is_none() {
@@ -724,7 +741,7 @@ fn route_single_edge(
     // Case 2a: Intra-column bracket — both same side, same x → H-V-H through corridor.
     if src_side == tgt_side && src_side.is_some() && (src_x - tgt_x).abs() < 0.5 {
         let side = src_side.unwrap();
-        let v_x = find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y);
+        let v_x = find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y, edge_domain);
         return collapse_zero_length(vec![
             Segment::Horizontal {
                 y: src_y,
@@ -745,19 +762,20 @@ fn route_single_edge(
     }
 
     // Case 2b: Cross-corridor routing — H-V-H-V-H (or simplified).
-    let v1_x = match src_side {
-        Some(side) => find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y),
-        None => src_x, // shouldn't happen for property-port edges
-    };
-
+    // Compute h_y first so we can pass correct vertical extents to each corridor.
     let h_y = if let Some(hi) = find_h_channel_between(h_channels, src_y, tgt_y) {
         h_channels[hi].reserve(edge_id)
     } else {
         (src_y + tgt_y) / 2.0
     };
 
+    let v1_x = match src_side {
+        Some(side) => find_corridor_channel(src_x, side, corridors, edge_id, src_y, h_y, edge_domain),
+        None => src_x, // shouldn't happen for property-port edges
+    };
+
     let v2_x = match tgt_side {
-        Some(side) => find_corridor_channel(tgt_x, side, corridors, edge_id, src_y, tgt_y),
+        Some(side) => find_corridor_channel(tgt_x, side, corridors, edge_id, h_y, tgt_y, edge_domain),
         None => tgt_x, // e.g., derivation center
     };
 
@@ -908,6 +926,32 @@ pub fn route_all_edges(
             None => continue,
         };
 
+        // Determine the domain for this edge (intra-domain edges get Some(did),
+        // cross-domain or domainless edges get None).
+        let edge_domain = {
+            let edge = &graph.edges[idx];
+            let (src_nid, tgt_nid) = match edge {
+                Edge::Anchor { parent, child, .. } => (Some(*parent), Some(*child)),
+                Edge::Constraint { source_prop, dest_prop, .. } => {
+                    (Some(prop_node(graph, *source_prop)), Some(prop_node(graph, *dest_prop)))
+                }
+                Edge::DerivInput { source_prop, .. } => {
+                    (Some(prop_node(graph, *source_prop)), None)
+                }
+            };
+            match (src_nid, tgt_nid) {
+                (Some(s), Some(t)) => {
+                    let sd = graph.nodes[s.index()].domain;
+                    let td = graph.nodes[t.index()].domain;
+                    match (sd, td) {
+                        (Some(a), Some(b)) if a == b => Some(a),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+
         let segments = route_single_edge(
             edge_id,
             src_x,
@@ -918,6 +962,7 @@ pub fn route_all_edges(
             tgt_side,
             &mut h_channels,
             &mut corridors,
+            edge_domain,
         );
 
         let mut route = Route { edge_id, segments };
@@ -1753,5 +1798,12 @@ mod tests {
         assert!((corridors[1].channels[0].x - 92.0).abs() < 0.1);
         // Inter-domain corridor: between x=100 and x=120, center at 110.
         assert!((corridors[4].channels[0].x - 110.0).abs() < 0.1);
+
+        // Verify domain_id assignments.
+        assert_eq!(corridors[0].domain_id, Some(DomainId(0))); // D0 left
+        assert_eq!(corridors[1].domain_id, Some(DomainId(0))); // D0 right
+        assert_eq!(corridors[2].domain_id, Some(DomainId(1))); // D1 left
+        assert_eq!(corridors[3].domain_id, Some(DomainId(1))); // D1 right
+        assert_eq!(corridors[4].domain_id, None);               // inter-domain
     }
 }
