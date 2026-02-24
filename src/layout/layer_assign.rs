@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::model::types::{DerivId, Edge, EdgeId, Graph, NodeId};
+use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId};
 use crate::ObgraphError;
 
 // ---------------------------------------------------------------------------
@@ -778,6 +778,340 @@ pub fn network_simplex(graph: &Graph) -> Result<LayerAssignment, ObgraphError> {
     Ok(LayerAssignment {
         node_layers,
         deriv_layers,
+        num_layers,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Compound layer assignment: enforce domain contiguity
+// ---------------------------------------------------------------------------
+
+/// A meta-element in the compound graph: either a domain (containing multiple
+/// nodes/derivations) or a standalone element (free node or cross-domain deriv).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MetaElement {
+    Domain(DomainId),
+    FreeNode(NodeId),
+    CrossDomainDeriv(DerivId),
+}
+
+/// Run network simplex and then enforce domain contiguity by remapping layers.
+///
+/// Domains become first-class layout participants: all members of a domain
+/// occupy a contiguous range of layers, with inter-domain gap layers between
+/// meta-elements (domains, free nodes, cross-domain derivations).
+pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, ObgraphError> {
+    // Step 1: Run the standard network simplex.
+    let base = network_simplex(graph)?;
+
+    if graph.domains.is_empty() {
+        return Ok(base);
+    }
+
+    // Step 2: Classify elements into meta-elements.
+
+    // Build domain membership lookup: NodeId -> DomainId.
+    let node_domain: HashMap<NodeId, DomainId> = graph
+        .nodes
+        .iter()
+        .filter_map(|n| n.domain.map(|d| (n.id, d)))
+        .collect();
+
+    // Classify derivations as intra-domain or cross-domain.
+    let deriv_domain: HashMap<DerivId, Option<DomainId>> = graph
+        .derivations
+        .iter()
+        .map(|deriv| {
+            let input_domains: HashSet<Option<DomainId>> = deriv
+                .inputs
+                .iter()
+                .map(|&pid| graph.nodes[graph.properties[pid.index()].node.index()].domain)
+                .collect();
+            let output_domain =
+                graph.nodes[graph.properties[deriv.output_prop.index()].node.index()].domain;
+
+            // Intra-domain: all inputs and output in the same single domain.
+            let all_same = input_domains.len() == 1
+                && input_domains.iter().next().copied().flatten() == output_domain
+                && output_domain.is_some();
+
+            (deriv.id, if all_same { output_domain } else { None })
+        })
+        .collect();
+
+    // Step 3: For each domain, collect internal layers used by its members.
+    // "Internal layers" = the sorted distinct layers of member nodes + intra-domain derivations.
+    let mut domain_internal_layers: HashMap<DomainId, Vec<u32>> = HashMap::new();
+    for domain in &graph.domains {
+        let mut layers: Vec<u32> = Vec::new();
+        for &nid in &domain.members {
+            if let Some(&l) = base.node_layers.get(&nid) {
+                layers.push(l);
+            }
+        }
+        // Include intra-domain derivations.
+        for (&did, &maybe_dom) in &deriv_domain {
+            if maybe_dom == Some(domain.id) {
+                if let Some(&l) = base.deriv_layers.get(&did) {
+                    layers.push(l);
+                }
+            }
+        }
+        layers.sort();
+        layers.dedup();
+        domain_internal_layers.insert(domain.id, layers);
+    }
+
+    // Step 4: Build meta-element list and ordering constraints.
+    let mut meta_elements: Vec<MetaElement> = Vec::new();
+    let mut meta_set: HashSet<MetaElement> = HashSet::new();
+
+    for domain in &graph.domains {
+        let me = MetaElement::Domain(domain.id);
+        meta_elements.push(me);
+        meta_set.insert(me);
+    }
+    for node in &graph.nodes {
+        if node.domain.is_none() {
+            let me = MetaElement::FreeNode(node.id);
+            meta_elements.push(me);
+            meta_set.insert(me);
+        }
+    }
+    for (&did, &maybe_dom) in &deriv_domain {
+        if maybe_dom.is_none() {
+            let me = MetaElement::CrossDomainDeriv(did);
+            meta_elements.push(me);
+            meta_set.insert(me);
+        }
+    }
+
+    // Map each vertex to its meta-element.
+    let vertex_meta = |v: &Vertex| -> Option<MetaElement> {
+        match v {
+            Vertex::Node(nid) => {
+                if let Some(&did) = node_domain.get(nid) {
+                    Some(MetaElement::Domain(did))
+                } else {
+                    Some(MetaElement::FreeNode(*nid))
+                }
+            }
+            Vertex::Deriv(did) => {
+                if let Some(&maybe_dom) = deriv_domain.get(did) {
+                    if let Some(dom_id) = maybe_dom {
+                        Some(MetaElement::Domain(dom_id))
+                    } else {
+                        Some(MetaElement::CrossDomainDeriv(*did))
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    };
+
+    // Build ordering edges between meta-elements from the original graph edges.
+    let mut meta_order: HashSet<(MetaElement, MetaElement)> = HashSet::new();
+    let sg = build_simplex_graph(graph);
+    for edge in &sg.edges {
+        if let (Some(src_me), Some(tgt_me)) = (vertex_meta(&edge.source), vertex_meta(&edge.target))
+        {
+            if src_me != tgt_me {
+                meta_order.insert((src_me, tgt_me));
+            }
+        }
+    }
+
+    // Step 5: Compute initial y-position for each meta-element (for topological ordering).
+    // Use the minimum base layer of its constituents.
+    let meta_min_layer: HashMap<MetaElement, u32> = meta_elements
+        .iter()
+        .map(|me| {
+            let min_l = match me {
+                MetaElement::Domain(did) => domain_internal_layers
+                    .get(did)
+                    .and_then(|layers| layers.first().copied())
+                    .unwrap_or(0),
+                MetaElement::FreeNode(nid) => *base.node_layers.get(nid).unwrap_or(&0),
+                MetaElement::CrossDomainDeriv(did) => *base.deriv_layers.get(did).unwrap_or(&0),
+            };
+            (*me, min_l)
+        })
+        .collect();
+
+    // Step 6: Topological sort of meta-elements respecting ordering constraints.
+    // Use Kahn's algorithm; break ties by meta_min_layer (preserving simplex ordering).
+    let sorted_meta = {
+        let mut in_degree: HashMap<MetaElement, usize> = HashMap::new();
+        let mut adj: HashMap<MetaElement, Vec<MetaElement>> = HashMap::new();
+        for me in &meta_elements {
+            in_degree.entry(*me).or_insert(0);
+            adj.entry(*me).or_default();
+        }
+        for &(src, tgt) in &meta_order {
+            if meta_set.contains(&src) && meta_set.contains(&tgt) {
+                adj.entry(src).or_default().push(tgt);
+                *in_degree.entry(tgt).or_insert(0) += 1;
+            }
+        }
+
+        let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>> =
+            std::collections::BinaryHeap::new();
+        let me_index: HashMap<MetaElement, usize> = meta_elements
+            .iter()
+            .enumerate()
+            .map(|(i, me)| (*me, i))
+            .collect();
+
+        for (&me, &deg) in &in_degree {
+            if deg == 0 {
+                queue.push(std::cmp::Reverse((meta_min_layer[&me], me_index[&me])));
+            }
+        }
+
+        let mut sorted = Vec::new();
+        while let Some(std::cmp::Reverse((_, idx))) = queue.pop() {
+            let me = meta_elements[idx];
+            sorted.push(me);
+            if let Some(neighbors) = adj.get(&me) {
+                for &nbr in neighbors {
+                    let deg = in_degree.get_mut(&nbr).unwrap();
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push(std::cmp::Reverse((meta_min_layer[&nbr], me_index[&nbr])));
+                    }
+                }
+            }
+        }
+        sorted
+    };
+
+    // Step 7: Assign contiguous layer ranges.
+    // Walk sorted meta-elements, assigning layers with inter-domain gaps.
+    let mut new_node_layers: HashMap<NodeId, u32> = HashMap::new();
+    let mut new_deriv_layers: HashMap<DerivId, u32> = HashMap::new();
+    let mut cursor: u32 = 0; // Always points to the next available even layer.
+
+    // Inter-domain gap: 2 layers (one even + one odd) to allow edge routing
+    // through the gap. The first element starts with no leading gap.
+    let inter_domain_gap: u32 = 2;
+
+    for (i, me) in sorted_meta.iter().enumerate() {
+        if i > 0 {
+            cursor += inter_domain_gap;
+            // Ensure cursor is on even boundary for consistency.
+            if cursor % 2 != 0 {
+                cursor += 1;
+            }
+        }
+
+        match me {
+            MetaElement::Domain(did) => {
+                let internal_layers = &domain_internal_layers[did];
+                if internal_layers.is_empty() {
+                    continue;
+                }
+
+                // Compact internal layers: map each distinct base layer to
+                // the next consecutive layer, preserving parity (even for
+                // nodes, odd for derivations). This eliminates gaps from
+                // cross-domain edges that inflated the base assignment.
+                let domain = graph.domains.iter().find(|d| d.id == *did).unwrap();
+                let mut local_cursor = cursor;
+                for &old_layer in internal_layers {
+                    // Snap to required parity: even layers hold nodes,
+                    // odd layers hold derivations.
+                    if local_cursor % 2 != old_layer % 2 {
+                        local_cursor += 1;
+                    }
+                    let new_layer = local_cursor;
+
+                    // Map all nodes/derivations on this old layer within this domain.
+                    for &nid in &domain.members {
+                        if base.node_layers.get(&nid) == Some(&old_layer) {
+                            new_node_layers.insert(nid, new_layer);
+                        }
+                    }
+                    // Intra-domain derivations.
+                    for (&deriv_id, &maybe_dom) in &deriv_domain {
+                        if maybe_dom == Some(*did)
+                            && base.deriv_layers.get(&deriv_id) == Some(&old_layer)
+                        {
+                            new_deriv_layers.insert(deriv_id, new_layer);
+                        }
+                    }
+
+                    local_cursor += 1;
+                }
+
+                // Advance cursor past the domain's compacted range.
+                cursor = local_cursor;
+                // Advance cursor to next even layer after the domain.
+                if cursor % 2 != 0 {
+                    cursor += 1;
+                }
+            }
+            MetaElement::FreeNode(nid) => {
+                // Free node on an even layer.
+                if cursor % 2 != 0 {
+                    cursor += 1;
+                }
+                new_node_layers.insert(*nid, cursor);
+                cursor += 2; // Occupy this even layer, skip the odd.
+            }
+            MetaElement::CrossDomainDeriv(did) => {
+                // Cross-domain derivation on an odd layer.
+                if cursor % 2 == 0 {
+                    cursor += 1;
+                }
+                new_deriv_layers.insert(*did, cursor);
+                cursor += 1; // Advance past the odd layer.
+            }
+        }
+    }
+
+    // Step 8: Normalize and compute num_layers.
+    let all_layers: Vec<u32> = new_node_layers
+        .values()
+        .chain(new_deriv_layers.values())
+        .copied()
+        .collect();
+    let min_layer = all_layers.iter().copied().min().unwrap_or(0);
+    for l in new_node_layers.values_mut() {
+        *l -= min_layer;
+    }
+    for l in new_deriv_layers.values_mut() {
+        *l -= min_layer;
+    }
+    let num_layers = new_node_layers
+        .values()
+        .chain(new_deriv_layers.values())
+        .copied()
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    // Step 9: Verify parity invariant.
+    for (&nid, &l) in &new_node_layers {
+        if l % 2 != 0 {
+            return Err(ObgraphError::Layout(format!(
+                "compound: node {:?} assigned to odd layer {} (expected even)",
+                nid, l
+            )));
+        }
+    }
+    for (&did, &l) in &new_deriv_layers {
+        if l % 2 != 1 {
+            return Err(ObgraphError::Layout(format!(
+                "compound: derivation {:?} assigned to even layer {} (expected odd)",
+                did, l
+            )));
+        }
+    }
+
+    Ok(LayerAssignment {
+        node_layers: new_node_layers,
+        deriv_layers: new_deriv_layers,
         num_layers,
     })
 }

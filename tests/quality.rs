@@ -101,3 +101,59 @@ fn sev_snp_quality_summary() {
         report.summary()
     );
 }
+
+#[test]
+fn sev_snp_no_derivs_inside_domains() {
+    let input = include_str!("sev_snp_input.obgraph");
+    let report = run_quality(input);
+    assert!(
+        report.derivs_inside_domains.is_empty(),
+        "Cross-domain derivations must not overlap any domain: {:?}",
+        report.derivs_inside_domains
+    );
+}
+
+#[test]
+fn sev_snp_no_free_nodes_inside_domains() {
+    let input = include_str!("sev_snp_input.obgraph");
+    let report = run_quality(input);
+    assert!(
+        report.free_nodes_inside_domains.is_empty(),
+        "Domain-less nodes must not overlap any domain: {:?}",
+        report.free_nodes_inside_domains
+    );
+}
+
+#[test]
+fn sev_snp_domain_contiguity() {
+    let input = include_str!("sev_snp_input.obgraph");
+    let report = run_quality(input);
+    assert!(
+        report.domain_contiguity_violations.is_empty(),
+        "Domains must be vertically contiguous: {:?}",
+        report.domain_contiguity_violations
+    );
+}
+
+#[test]
+fn sev_snp_no_inter_domain_edges_in_intra_corridors() {
+    let input = include_str!("sev_snp_input.obgraph");
+    let report = run_quality(input);
+    assert!(
+        report.inter_domain_edges_in_intra_corridors.is_empty(),
+        "Inter-domain edges must not route through intra-domain corridors: {:?}",
+        report.inter_domain_edges_in_intra_corridors
+    );
+}
+
+#[test]
+fn sev_snp_no_channel_collisions() {
+    let input = include_str!("sev_snp_input.obgraph");
+    let report = run_quality(input);
+    assert!(
+        report.channel_collisions.is_empty(),
+        "Edges must not share the same vertical channel at overlapping y-ranges: {:?}",
+        report.channel_collisions
+    );
+}
+

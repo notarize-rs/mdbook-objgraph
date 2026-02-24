@@ -136,8 +136,9 @@ pub struct Corridor {
     pub x_start: f64,
     pub x_end: f64,
     pub channels: Vec<CorridorChannel>,
-    /// `Some(id)` for intra-domain corridors (L/R), `None` for inter-domain corridors.
-    pub domain_id: Option<DomainId>,
+    /// Domain IDs this corridor belongs to. Empty for inter-domain corridors.
+    /// Multiple IDs when same-column domains share the same corridor x-range.
+    pub domain_ids: Vec<DomainId>,
 }
 
 impl Corridor {
@@ -173,9 +174,13 @@ impl Corridor {
 
 /// Build corridors from domain bounding boxes.
 ///
-/// For each domain: left corridor (domain left edge to first channel zone) and
-/// right corridor (last channel zone to domain right edge).
-/// Between adjacent domains: an inter-domain corridor.
+/// Creates three kinds of corridors:
+/// 1. Per-domain intra-domain corridors (left/right edges of each domain).
+/// 2. Inter-column gap corridors between columns of domains.
+/// 3. Outer corridors on the left and right edges of the entire layout.
+///
+/// The outer and inter-column corridors have empty `domain_ids` and are used
+/// exclusively by cross-domain edges.
 fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
     let mut corridors = Vec::new();
 
@@ -186,52 +191,101 @@ fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
     for dl in &sorted_domains {
         let corridor_width = CORRIDOR_PAD * 2.0;
 
-        // Left corridor: between domain left edge and leftmost node area.
-        let left = Corridor {
-            x_start: dl.x,
-            x_end: dl.x + corridor_width,
-            channels: vec![CorridorChannel {
-                x: dl.x + CORRIDOR_PAD,
-                occupants: Vec::new(),
-            }],
-            domain_id: Some(dl.id),
-        };
+        let left_x_start = dl.x;
+        let left_x_end = dl.x + corridor_width;
+        let right_x_start = dl.x + dl.width - corridor_width;
+        let right_x_end = dl.x + dl.width;
 
-        // Right corridor: between rightmost node area and domain right edge.
-        let right = Corridor {
-            x_start: dl.x + dl.width - corridor_width,
-            x_end: dl.x + dl.width,
-            channels: vec![CorridorChannel {
-                x: dl.x + dl.width - CORRIDOR_PAD,
-                occupants: Vec::new(),
-            }],
-            domain_id: Some(dl.id),
-        };
-
-        corridors.push(left);
-        corridors.push(right);
+        // Merge with existing corridor at same x-range, or create new.
+        merge_or_create_corridor(&mut corridors, left_x_start, left_x_end, dl.id);
+        merge_or_create_corridor(&mut corridors, right_x_start, right_x_end, dl.id);
     }
 
-    // Inter-domain corridors between adjacent domains.
+    // Inter-column gap corridors between adjacent domains at different x-ranges.
+    let mut seen_gaps: Vec<(f64, f64)> = Vec::new();
     for w in sorted_domains.windows(2) {
         let d1_right = w[0].x + w[0].width;
         let d2_left = w[1].x;
         let gap = d2_left - d1_right;
         if gap > 0.5 {
-            let center_x = (d1_right + d2_left) / 2.0;
+            // Avoid duplicate gap corridors for domains at same x.
+            let key = (d1_right, d2_left);
+            if seen_gaps.iter().any(|(a, b)| (a - key.0).abs() < 0.5 && (b - key.1).abs() < 0.5) {
+                continue;
+            }
+            seen_gaps.push(key);
             corridors.push(Corridor {
                 x_start: d1_right,
                 x_end: d2_left,
                 channels: vec![CorridorChannel {
-                    x: center_x,
+                    x: d1_right + CORRIDOR_PAD,
                     occupants: Vec::new(),
                 }],
-                domain_id: None,
+                domain_ids: vec![],
             });
         }
     }
 
+    // Outer corridors: left edge (x=0 to leftmost domain) and right edge
+    // (rightmost domain to rightmost domain + outer width).
+    if let (Some(leftmost), Some(rightmost)) = (sorted_domains.first(), sorted_domains.last()) {
+        let left_edge = leftmost.x;
+        if left_edge > CORRIDOR_PAD + 0.5 {
+            // There's space for an outer left corridor.
+            corridors.push(Corridor {
+                x_start: 0.0,
+                x_end: left_edge,
+                channels: vec![CorridorChannel {
+                    x: CORRIDOR_PAD,
+                    occupants: Vec::new(),
+                }],
+                domain_ids: vec![],
+            });
+        }
+
+        let right_edge = rightmost.x + rightmost.width;
+        let outer_width = CORRIDOR_PAD * 2.0;
+        corridors.push(Corridor {
+            x_start: right_edge,
+            x_end: right_edge + outer_width,
+            channels: vec![CorridorChannel {
+                x: right_edge + CORRIDOR_PAD,
+                occupants: Vec::new(),
+            }],
+            domain_ids: vec![],
+        });
+    }
+
     corridors
+}
+
+/// Merge a domain into an existing corridor at the same x-range, or create one.
+fn merge_or_create_corridor(
+    corridors: &mut Vec<Corridor>,
+    x_start: f64,
+    x_end: f64,
+    domain_id: DomainId,
+) {
+    // Check if a corridor already exists at this x-range.
+    for c in corridors.iter_mut() {
+        if (c.x_start - x_start).abs() < 0.5 && (c.x_end - x_end).abs() < 0.5 {
+            if !c.domain_ids.contains(&domain_id) {
+                c.domain_ids.push(domain_id);
+            }
+            return;
+        }
+    }
+    // Create new corridor.
+    let center_x = (x_start + x_end) / 2.0;
+    corridors.push(Corridor {
+        x_start,
+        x_end,
+        channels: vec![CorridorChannel {
+            x: center_x,
+            occupants: Vec::new(),
+        }],
+        domain_ids: vec![domain_id],
+    });
 }
 
 /// Find the index of the nearest corridor in the direction the port faces.
@@ -245,8 +299,8 @@ fn find_best_corridor_idx(
 ) -> Option<usize> {
     let domain_matches = |c: &Corridor| -> bool {
         match edge_domain {
-            Some(did) => c.domain_id == Some(did),
-            None => c.domain_id.is_none(),
+            Some(did) => c.domain_ids.contains(&did),
+            None => c.domain_ids.is_empty(),
         }
     };
 
@@ -405,8 +459,7 @@ pub fn assign_port_sides(
                 sides.insert((edge_id, EndpointRole::Upstream), PortSide::Left);
                 sides.insert((edge_id, EndpointRole::Downstream), PortSide::Right);
             } else {
-                // Same center x: alternate between left and right corridors
-                // to balance corridor occupancy.
+                // Same center x: alternate between left and right corridors.
                 let side = if same_col_counter % 2 == 0 {
                     PortSide::Right
                 } else {
@@ -962,8 +1015,11 @@ pub fn route_all_edges(
         };
 
         // Determine the domain affinity for corridor selection.
+        //
         // Intra-domain edges: both endpoints use the same domain's corridors.
-        // Cross-domain edges: both use None to select the inter-domain gap corridor.
+        // Cross-domain edges: always use (None, None) to select the inter-column
+        // gap corridor. Port side assignment already directs same-column
+        // cross-domain edges toward the gap corridor side.
         let (src_domain, tgt_domain) = {
             let edge = &graph.edges[idx];
             let (src_nid, tgt_nid) = match edge {
@@ -977,11 +1033,12 @@ pub fn route_all_edges(
             };
             let sd = src_nid.and_then(|n| graph.nodes[n.index()].domain);
             let td = tgt_nid.and_then(|n| graph.nodes[n.index()].domain);
-            // Cross-domain: route through inter-domain (gap) corridor.
-            if sd != td {
-                (None, None)
-            } else {
+            if sd == td {
+                // Intra-domain: use own domain corridors.
                 (sd, td)
+            } else {
+                // Cross-domain: always use the inter-column gap corridor.
+                (None, None)
             }
         };
 
@@ -1823,22 +1880,30 @@ mod tests {
 
         let corridors = build_corridors(&domain_layouts);
 
-        // 2 domains × 2 corridors each + 1 inter-domain = 5 corridors.
-        assert_eq!(corridors.len(), 5, "Expected 5 corridors, got {}", corridors.len());
+        // 2 domains at different x-ranges → 2 intra-domain corridors each +
+        // 1 inter-column gap + 1 outer right corridor = 6 corridors.
+        // (No outer left corridor since D0 starts at x=0.)
+        assert_eq!(corridors.len(), 6, "Expected 6 corridors, got {}", corridors.len());
 
         // D0 left corridor: x_start=0, center channel at CORRIDOR_PAD=8.
         assert!((corridors[0].channels[0].x - 8.0).abs() < 0.1);
         // D0 right corridor: x_end=100, center channel at 100-8=92.
         assert!((corridors[1].channels[0].x - 92.0).abs() < 0.1);
-        // Inter-domain corridor: between x=100 and x=120, center at 110.
-        assert!((corridors[4].channels[0].x - 110.0).abs() < 0.1);
+        // Inter-column gap corridor: between x=100 and x=120, first channel at
+        // x_start + CORRIDOR_PAD = 108.
+        let gap_idx = corridors.iter().position(|c| c.x_start > 99.0 && c.x_end < 121.0 && c.domain_ids.is_empty()).unwrap();
+        assert!((corridors[gap_idx].channels[0].x - 108.0).abs() < 0.1);
+        // Outer right corridor: x_start=220, first channel at 220+8=228.
+        let outer_right_idx = corridors.iter().position(|c| c.x_start > 219.0 && c.domain_ids.is_empty() && c.x_start != corridors[gap_idx].x_start).unwrap();
+        assert!((corridors[outer_right_idx].channels[0].x - 228.0).abs() < 0.1);
 
-        // Verify domain_id assignments.
-        assert_eq!(corridors[0].domain_id, Some(DomainId(0))); // D0 left
-        assert_eq!(corridors[1].domain_id, Some(DomainId(0))); // D0 right
-        assert_eq!(corridors[2].domain_id, Some(DomainId(1))); // D1 left
-        assert_eq!(corridors[3].domain_id, Some(DomainId(1))); // D1 right
-        assert_eq!(corridors[4].domain_id, None);               // inter-domain
+        // Verify domain_ids assignments.
+        assert_eq!(corridors[0].domain_ids, vec![DomainId(0)]); // D0 left
+        assert_eq!(corridors[1].domain_ids, vec![DomainId(0)]); // D0 right
+        assert_eq!(corridors[2].domain_ids, vec![DomainId(1)]); // D1 left
+        assert_eq!(corridors[3].domain_ids, vec![DomainId(1)]); // D1 right
+        assert!(corridors[gap_idx].domain_ids.is_empty());         // inter-column gap
+        assert!(corridors[outer_right_idx].domain_ids.is_empty()); // outer right
     }
 
     // -----------------------------------------------------------------------

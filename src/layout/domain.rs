@@ -5,11 +5,11 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::model::types::{DomainId, Edge, Graph};
+use crate::model::types::{DerivId, DomainId, Edge, Graph, NodeId};
 
 use super::{
-    DomainLayout, NodeLayout, CHANNEL_GAP, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT,
-    INTER_NODE_GAP,
+    DerivLayout, DomainLayout, NodeLayout, CHANNEL_GAP, CORRIDOR_PAD, DOMAIN_PADDING,
+    DOMAIN_TITLE_HEIGHT, INTER_NODE_GAP,
 };
 
 /// Compute bounding boxes for all domains from final node positions.
@@ -170,8 +170,9 @@ pub fn columnar_layout(
     // Step 2: Assign domains to columns.
     let columns = assign_columns(&adj, domain_layouts);
 
-    // Step 3: Count cross-column edges for gap sizing.
-    let cross_col_counts = count_cross_column_edges(&columns, domain_layouts, graph);
+    // Step 3: Count max simultaneous cross-column channels for gap sizing.
+    let cross_col_counts =
+        count_cross_domain_channels(&columns, domain_layouts, node_layouts, graph);
 
     // Step 4: Compute column geometry (with dynamic gap widths).
     let (col_widths, gap_widths) =
@@ -322,17 +323,28 @@ fn assign_columns(
     columns
 }
 
-/// Count the number of cross-column edges for each gap between adjacent columns.
-fn count_cross_column_edges(
+/// Count the maximum simultaneous channels needed in each inter-column gap.
+///
+/// Uses a sweep-line approach: for each cross-domain edge (regardless of
+/// whether the endpoints are in the same or different columns), compute the
+/// vertical extent (min/max y of source and target nodes). The router sends
+/// ALL cross-domain edges through the inter-domain gap corridor, so we must
+/// count all of them — not just cross-column edges.
+///
+/// Two edges can share a channel if their vertical extents don't overlap.
+/// The maximum number of edges whose extents overlap at any single
+/// y-coordinate gives the required channel count.
+fn count_cross_domain_channels(
     columns: &[Vec<usize>],
     domain_layouts: &[DomainLayout],
+    node_layouts: &[NodeLayout],
     graph: &Graph,
 ) -> Vec<usize> {
     if columns.len() < 2 {
         return Vec::new();
     }
 
-    // Build domain_id → column index mapping.
+    // Build domain_id → column index mapping (for gap assignment).
     let mut domain_to_col: HashMap<DomainId, usize> = HashMap::new();
     for (col_idx, col_domains) in columns.iter().enumerate() {
         for &dl_idx in col_domains {
@@ -340,12 +352,18 @@ fn count_cross_column_edges(
         }
     }
 
-    // For each gap between columns i and i+1, count edges that cross it.
-    let mut gap_counts = vec![0usize; columns.len() - 1];
+    // Collect vertical extents of ALL cross-domain edges per gap.
+    // Cross-domain edges between columns use the gap between those columns.
+    // Cross-domain edges within the same column also route through the
+    // nearest gap (the router sends them to corridor with domain_id=None).
+    let num_gaps = columns.len() - 1;
+    let mut gap_extents: Vec<Vec<(f64, f64)>> = vec![Vec::new(); num_gaps];
 
     for edge in &graph.edges {
-        let (src_domain, tgt_domain) = match edge {
+        let (src_node_id, tgt_node_id, src_domain, tgt_domain) = match edge {
             Edge::Anchor { parent, child, .. } => (
+                *parent,
+                *child,
                 graph.nodes[parent.index()].domain,
                 graph.nodes[child.index()].domain,
             ),
@@ -353,35 +371,81 @@ fn count_cross_column_edges(
                 source_prop,
                 dest_prop,
                 ..
-            } => (
-                graph.nodes[graph.properties[source_prop.index()].node.index()].domain,
-                graph.nodes[graph.properties[dest_prop.index()].node.index()].domain,
-            ),
+            } => {
+                let sn = graph.properties[source_prop.index()].node;
+                let tn = graph.properties[dest_prop.index()].node;
+                (sn, tn, graph.nodes[sn.index()].domain, graph.nodes[tn.index()].domain)
+            }
             Edge::DerivInput {
                 source_prop,
                 target_deriv,
             } => {
-                let src_node = graph.properties[source_prop.index()].node;
+                let sn = graph.properties[source_prop.index()].node;
                 let deriv = &graph.derivations[target_deriv.index()];
-                let tgt_node = graph.properties[deriv.output_prop.index()].node;
-                (
-                    graph.nodes[src_node.index()].domain,
-                    graph.nodes[tgt_node.index()].domain,
-                )
+                let tn = graph.properties[deriv.output_prop.index()].node;
+                (sn, tn, graph.nodes[sn.index()].domain, graph.nodes[tn.index()].domain)
             }
         };
 
-        let cols = src_domain
-            .zip(tgt_domain)
-            .and_then(|(sd, td)| Some((domain_to_col.get(&sd)?, domain_to_col.get(&td)?)));
-        if let Some((&sc, &tc)) = cols {
-            if sc != tc && sc.min(tc) < gap_counts.len() {
-                gap_counts[sc.min(tc)] += 1;
-            }
+        // Only cross-domain edges.
+        let is_cross_domain = match (src_domain, tgt_domain) {
+            (Some(sd), Some(td)) => sd != td,
+            _ => true, // one or both domain-less → cross-domain
+        };
+        if !is_cross_domain {
+            continue;
         }
+
+        // Determine which gap this edge routes through.
+        let gap_idx = match (src_domain, tgt_domain) {
+            (Some(sd), Some(td)) => {
+                let sc = domain_to_col.get(&sd).copied();
+                let tc = domain_to_col.get(&td).copied();
+                match (sc, tc) {
+                    (Some(s), Some(t)) if s != t => s.min(t),
+                    // Same column or unknown: assign to the nearest gap.
+                    // For same-column cross-domain edges, the router picks
+                    // the nearest inter-domain corridor, which is gap 0 in
+                    // a 2-column layout. Use the source column's left gap.
+                    (Some(s), _) => s.saturating_sub(1).min(num_gaps - 1),
+                    (_, Some(t)) => t.saturating_sub(1).min(num_gaps - 1),
+                    _ => 0,
+                }
+            }
+            _ => 0, // Domain-less endpoints → gap 0.
+        };
+
+        let src_nl = &node_layouts[src_node_id.index()];
+        let tgt_nl = &node_layouts[tgt_node_id.index()];
+        let y_min = src_nl.y.min(tgt_nl.y);
+        let y_max = (src_nl.y + src_nl.height).max(tgt_nl.y + tgt_nl.height);
+        gap_extents[gap_idx].push((y_min, y_max));
     }
 
-    gap_counts
+    // Sweep-line: for each gap, find the maximum number of overlapping extents.
+    gap_extents
+        .iter()
+        .map(|extents| {
+            if extents.is_empty() {
+                return 0;
+            }
+            // Collect events: +1 at y_min, -1 at y_max.
+            let mut events: Vec<(f64, i32)> = Vec::with_capacity(extents.len() * 2);
+            for &(y_min, y_max) in extents {
+                events.push((y_min, 1));
+                events.push((y_max, -1));
+            }
+            events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
+
+            let mut max_concurrent = 0usize;
+            let mut current = 0i32;
+            for (_, delta) in events {
+                current += delta;
+                max_concurrent = max_concurrent.max(current as usize);
+            }
+            max_concurrent
+        })
+        .collect()
 }
 
 /// Compute column widths and gap widths.
@@ -440,10 +504,13 @@ fn reposition_to_columns(
     let lr_pad = DOMAIN_PADDING + CORRIDOR_PAD * 2.0;
 
     // Compute column x-starts.
+    // Outer corridor on the left edge for edges exiting leftward.
+    let outer_corridor = CORRIDOR_PAD * 2.0;
+
     let mut col_x: Vec<f64> = Vec::with_capacity(columns.len());
     for i in 0..columns.len() {
         if i == 0 {
-            col_x.push(0.0);
+            col_x.push(outer_corridor);
         } else {
             col_x.push(col_x[i - 1] + col_widths[i - 1] + gap_widths[i - 1]);
         }
@@ -500,7 +567,181 @@ fn reposition_to_columns(
     }
 }
 
-/// Vertical separation pass for domains.
+/// A vertical element in a column: either a domain block, a free node, or a
+/// cross-domain derivation.
+#[derive(Debug, Clone, Copy)]
+enum ColumnElement {
+    Domain(usize), // index into domain_layouts
+    FreeNode(NodeId),
+    CrossDomainDeriv(DerivId),
+}
+
+/// Compact vertical separation for all column elements.
+///
+/// After compound layer assignment + Brandes-Köpf, nodes are correctly ordered
+/// but the vertical spacing is inflated by empty gap layers. This pass walks
+/// each column top-to-bottom and places elements (domains, free nodes,
+/// cross-domain derivations) with tight `INTER_NODE_GAP` spacing.
+///
+/// Replaces the old `separate_domains_vertically` + `reposition_cross_domain_derivations`.
+pub fn separate_column_elements_vertically(
+    node_layouts: &mut [NodeLayout],
+    deriv_layouts: &mut [DerivLayout],
+    domain_layouts: &mut [DomainLayout],
+    graph: &Graph,
+) {
+    if domain_layouts.is_empty() && deriv_layouts.is_empty() {
+        return;
+    }
+
+    // Step 1: Identify which column each domain belongs to by x-center.
+    // Use a simple clustering: elements within the same column share similar x.
+    // Collect column x-centers from domain_layouts.
+    let mut col_centers: Vec<f64> = Vec::new();
+    for dl in domain_layouts.iter() {
+        let cx = dl.x + dl.width / 2.0;
+        let found = col_centers.iter().any(|&c| (c - cx).abs() < 100.0);
+        if !found {
+            col_centers.push(cx);
+        }
+    }
+    col_centers.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let assign_column = |cx: f64| -> usize {
+        col_centers
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (cx - **a).abs().partial_cmp(&(cx - **b).abs()).unwrap()
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    };
+
+    // Step 2: Build per-column element lists.
+    let num_cols = col_centers.len().max(1);
+    let mut columns: Vec<Vec<(ColumnElement, f64)>> = vec![Vec::new(); num_cols];
+
+    // Add domains.
+    for (dl_idx, dl) in domain_layouts.iter().enumerate() {
+        let cx = dl.x + dl.width / 2.0;
+        let col = assign_column(cx);
+        let y_center = dl.y + dl.height / 2.0;
+        columns[col].push((ColumnElement::Domain(dl_idx), y_center));
+    }
+
+    // Add free nodes (domain-less).
+    for node in &graph.nodes {
+        if node.domain.is_none() {
+            let nl = &node_layouts[node.id.index()];
+            let cx = nl.x + nl.width / 2.0;
+            let col = assign_column(cx);
+            let y_center = nl.y + nl.height / 2.0;
+            columns[col].push((ColumnElement::FreeNode(node.id), y_center));
+        }
+    }
+
+    // Add cross-domain derivations.
+    for deriv in &graph.derivations {
+        let input_domains: Vec<Option<DomainId>> = deriv
+            .inputs
+            .iter()
+            .map(|&pid| graph.nodes[graph.properties[pid.index()].node.index()].domain)
+            .collect();
+        let output_domain =
+            graph.nodes[graph.properties[deriv.output_prop.index()].node.index()].domain;
+
+        let all_same_domain = {
+            let mut all_doms: Vec<Option<DomainId>> = input_domains.clone();
+            all_doms.push(output_domain);
+            all_doms.iter().all(|d| *d == all_doms[0]) && all_doms[0].is_some()
+        };
+
+        if !all_same_domain {
+            let dl = &deriv_layouts[deriv.id.index()];
+            let cx = dl.x + dl.width / 2.0;
+            let col = assign_column(cx);
+            let y_center = dl.y + dl.height / 2.0;
+            columns[col].push((ColumnElement::CrossDomainDeriv(deriv.id), y_center));
+        }
+    }
+
+    // Step 3: Sort each column by current y-center.
+    for col in &mut columns {
+        col.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    }
+
+    // Step 4: Walk top-to-bottom, placing elements with INTER_NODE_GAP between them.
+    let gap = INTER_NODE_GAP;
+
+    for col in &columns {
+        if col.is_empty() {
+            continue;
+        }
+
+        // First element keeps its current top position.
+        let mut cursor = match col[0].0 {
+            ColumnElement::Domain(dl_idx) => {
+                let dl = &domain_layouts[dl_idx];
+                dl.y + dl.height
+            }
+            ColumnElement::FreeNode(nid) => {
+                let nl = &node_layouts[nid.index()];
+                nl.y + nl.height
+            }
+            ColumnElement::CrossDomainDeriv(did) => {
+                let dl = &deriv_layouts[did.index()];
+                dl.y + dl.height
+            }
+        };
+
+        // Remaining elements: place each one at cursor + gap.
+        for &(elem, _) in col.iter().skip(1) {
+            let target_top = cursor + gap;
+
+            match elem {
+                ColumnElement::Domain(dl_idx) => {
+                    let current_top = domain_layouts[dl_idx].y;
+                    let shift = target_top - current_top;
+                    if shift.abs() > 0.01 {
+                        // Shift domain box and all member nodes.
+                        let did = domain_layouts[dl_idx].id;
+                        if let Some(domain) = graph.domains.iter().find(|d| d.id == did) {
+                            for &nid in &domain.members {
+                                node_layouts[nid.index()].y += shift;
+                            }
+                        }
+                        domain_layouts[dl_idx].y += shift;
+                    }
+                    cursor = domain_layouts[dl_idx].y + domain_layouts[dl_idx].height;
+                }
+                ColumnElement::FreeNode(nid) => {
+                    let nl = &mut node_layouts[nid.index()];
+                    nl.y = target_top;
+                    cursor = nl.y + nl.height;
+                }
+                ColumnElement::CrossDomainDeriv(did) => {
+                    let dl = &mut deriv_layouts[did.index()];
+                    dl.y = target_top;
+                    cursor = dl.y + dl.height;
+                }
+            }
+        }
+    }
+
+    // Step 5: Recompute domain bounds from shifted node positions.
+    let new_bounds = compute_domain_bounds(graph, node_layouts);
+    for dl in domain_layouts.iter_mut() {
+        if let Some(nb) = new_bounds.iter().find(|b| b.id == dl.id) {
+            dl.x = nb.x;
+            dl.y = nb.y;
+            dl.width = nb.width;
+            dl.height = nb.height;
+        }
+    }
+}
+
+/// Vertical separation pass for domains (legacy).
 ///
 /// Two concerns:
 /// 1. **Cross-domain anchor hierarchy**: When a node in domain A anchors a node

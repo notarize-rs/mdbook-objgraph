@@ -4,9 +4,12 @@
 //! collisions, and other layout defects. Used as a test gate and diagnostic
 //! tool during layout algorithm iteration.
 
-use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId};
+use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId};
 
-use super::{DomainLayout, EdgePath, LayoutResult, NodeLayout, NODE_H_SPACING};
+use super::{
+    DerivLayout, DomainLayout, EdgePath, LayoutResult, NodeLayout, CORRIDOR_PAD, DOMAIN_PADDING,
+    NODE_H_SPACING,
+};
 
 // ---------------------------------------------------------------------------
 // Report
@@ -31,14 +34,33 @@ pub struct QualityReport {
     /// Mean number of SVG path segments per intra-domain constraint edge.
     /// H-V-H bracket = 3 (good); H-V-H-V-H loop = 5 (spaghetti).
     pub mean_constraint_segments: f64,
+    /// Cross-domain derivation pills that overlap a domain they don't belong to.
+    pub derivs_inside_domains: Vec<(DerivId, DomainId)>,
+    /// Domain-less nodes that overlap any domain rect.
+    pub free_nodes_inside_domains: Vec<(NodeId, DomainId)>,
+    /// Foreign nodes whose y-range falls between a domain's topmost and
+    /// bottommost member nodes (domain contiguity violation).
+    pub domain_contiguity_violations: Vec<(DomainId, NodeId)>,
+    /// Cross-domain constraint edges whose vertical segments fall inside
+    /// an intra-domain corridor (between domain border and node area).
+    pub inter_domain_edges_in_intra_corridors: Vec<(EdgeId, DomainId)>,
+    /// Pairs of edges that share the same vertical channel x-coordinate
+    /// while their y-ranges overlap (channel collision).
+    pub channel_collisions: Vec<(EdgeId, EdgeId)>,
 }
 
 impl QualityReport {
-    /// True if there are hard errors (overlapping nodes/domains, nodes outside domains).
+    /// True if there are hard errors (overlapping nodes/domains, nodes outside domains,
+    /// elements inside foreign domains, contiguity violations, corridor violations).
     pub fn has_errors(&self) -> bool {
         !self.node_overlaps.is_empty()
             || !self.domain_overlaps.is_empty()
             || !self.nodes_outside_domain.is_empty()
+            || !self.derivs_inside_domains.is_empty()
+            || !self.free_nodes_inside_domains.is_empty()
+            || !self.domain_contiguity_violations.is_empty()
+            || !self.inter_domain_edges_in_intra_corridors.is_empty()
+            || !self.channel_collisions.is_empty()
     }
 
     /// True if there are warnings (node-edge overlaps, tight spacing).
@@ -108,6 +130,36 @@ impl QualityReport {
                 n.0, d.0
             ));
         }
+        for &(d, dom) in &self.derivs_inside_domains {
+            lines.push(format!(
+                "  ERROR: Derivation {} inside foreign domain {}",
+                d.0, dom.0
+            ));
+        }
+        for &(n, dom) in &self.free_nodes_inside_domains {
+            lines.push(format!(
+                "  ERROR: Free node {} inside domain {}",
+                n.0, dom.0
+            ));
+        }
+        for &(dom, n) in &self.domain_contiguity_violations {
+            lines.push(format!(
+                "  ERROR: Domain {} contiguity violated by foreign node {}",
+                dom.0, n.0
+            ));
+        }
+        for &(eid, did) in &self.inter_domain_edges_in_intra_corridors {
+            lines.push(format!(
+                "  ERROR: Inter-domain edge {} routes through intra-domain corridor of domain {}",
+                eid.0, did.0
+            ));
+        }
+        for &(a, b) in &self.channel_collisions {
+            lines.push(format!(
+                "  ERROR: Channel collision between edge {} and edge {}",
+                a.0, b.0
+            ));
+        }
 
         lines.join("\n")
     }
@@ -116,6 +168,11 @@ impl QualityReport {
         self.node_overlaps.len()
             + self.domain_overlaps.len()
             + self.nodes_outside_domain.len()
+            + self.derivs_inside_domains.len()
+            + self.free_nodes_inside_domains.len()
+            + self.domain_contiguity_violations.len()
+            + self.inter_domain_edges_in_intra_corridors.len()
+            + self.channel_collisions.len()
     }
 
     fn warning_count(&self) -> usize {
@@ -173,6 +230,15 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
     let node_width_delta = compute_node_width_delta(&layout.nodes);
     let max_parent_misalignment = compute_max_parent_misalignment(graph, &layout.nodes);
     let mean_constraint_segments = compute_mean_constraint_segments(&layout.intra_domain_constraints);
+    let derivs_inside_domains =
+        find_derivs_inside_domains(graph, &layout.derivations, &layout.domains);
+    let free_nodes_inside_domains =
+        find_free_nodes_inside_domains(graph, &layout.nodes, &layout.domains);
+    let domain_contiguity_violations =
+        find_domain_contiguity_violations(graph, &layout.nodes, &layout.domains);
+    let inter_domain_edges_in_intra_corridors =
+        find_inter_domain_edges_in_intra_corridors(graph, &layout.domains, &parsed);
+    let channel_collisions = find_channel_collisions(graph, &parsed);
 
     QualityReport {
         node_overlaps,
@@ -186,6 +252,11 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         node_width_delta,
         max_parent_misalignment,
         mean_constraint_segments,
+        derivs_inside_domains,
+        free_nodes_inside_domains,
+        domain_contiguity_violations,
+        inter_domain_edges_in_intra_corridors,
+        channel_collisions,
     }
 }
 
@@ -229,6 +300,15 @@ impl Aabb {
     }
 
     fn from_domain(dl: &DomainLayout) -> Self {
+        Self {
+            x: dl.x,
+            y: dl.y,
+            w: dl.width,
+            h: dl.height,
+        }
+    }
+
+    fn from_deriv(dl: &DerivLayout) -> Self {
         Self {
             x: dl.x,
             y: dl.y,
@@ -449,6 +529,121 @@ fn find_nodes_outside_domain(
     violations
 }
 
+/// Find cross-domain derivation pills that overlap a domain they don't belong to.
+fn find_derivs_inside_domains(
+    graph: &Graph,
+    derivs: &[DerivLayout],
+    domains: &[DomainLayout],
+) -> Vec<(DerivId, DomainId)> {
+    let mut violations = Vec::new();
+    for deriv in &graph.derivations {
+        // Collect input/output domains.
+        let mut involved: std::collections::HashSet<DomainId> = std::collections::HashSet::new();
+        for &pid in &deriv.inputs {
+            if let Some(did) = graph.nodes[graph.properties[pid.index()].node.index()].domain {
+                involved.insert(did);
+            }
+        }
+        if let Some(did) = graph.nodes[graph.properties[deriv.output_prop.index()].node.index()].domain {
+            involved.insert(did);
+        }
+        let is_cross_domain = involved.len() > 1
+            || deriv.inputs.iter().any(|&pid| {
+                graph.nodes[graph.properties[pid.index()].node.index()].domain.is_none()
+            });
+        if !is_cross_domain {
+            continue;
+        }
+        let dl = &derivs[deriv.id.index()];
+        let deriv_box = Aabb::from_deriv(dl);
+        for domain_dl in domains {
+            let domain_box = Aabb::from_domain(domain_dl);
+            if deriv_box.intersects(&domain_box) {
+                violations.push((deriv.id, domain_dl.id));
+            }
+        }
+    }
+    violations
+}
+
+/// Find domain-less nodes that overlap any domain rect.
+fn find_free_nodes_inside_domains(
+    graph: &Graph,
+    nodes: &[NodeLayout],
+    domains: &[DomainLayout],
+) -> Vec<(NodeId, DomainId)> {
+    let mut violations = Vec::new();
+    for node in &graph.nodes {
+        if node.domain.is_some() {
+            continue; // Not a free node.
+        }
+        if let Some(nl) = nodes.iter().find(|n| n.id == node.id) {
+            let node_box = Aabb::from_node(nl);
+            for dl in domains {
+                let domain_box = Aabb::from_domain(dl);
+                if node_box.intersects(&domain_box) {
+                    violations.push((node.id, dl.id));
+                }
+            }
+        }
+    }
+    violations
+}
+
+/// Find domains whose vertical contiguity is violated by a foreign node.
+/// A violation occurs when a node NOT in the domain has a y-range that falls
+/// between the domain's topmost and bottommost member nodes.
+fn find_domain_contiguity_violations(
+    graph: &Graph,
+    nodes: &[NodeLayout],
+    domains: &[DomainLayout],
+) -> Vec<(DomainId, NodeId)> {
+    let mut violations = Vec::new();
+    for domain in &graph.domains {
+        // Compute the y-range of member nodes.
+        let member_set: std::collections::HashSet<NodeId> =
+            domain.members.iter().copied().collect();
+        let min_y = domain
+            .members
+            .iter()
+            .filter_map(|&nid| nodes.iter().find(|n| n.id == nid))
+            .map(|nl| nl.y)
+            .fold(f64::INFINITY, f64::min);
+        let max_y = domain
+            .members
+            .iter()
+            .filter_map(|&nid| nodes.iter().find(|n| n.id == nid))
+            .map(|nl| nl.y + nl.height)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if !min_y.is_finite() || !max_y.is_finite() {
+            continue;
+        }
+        // Find the x-range of this domain for column check.
+        let dl = match domains.iter().find(|d| d.id == domain.id) {
+            Some(d) => d,
+            None => continue,
+        };
+        // Check every non-member node.
+        for nl in nodes {
+            if member_set.contains(&nl.id) {
+                continue;
+            }
+            // Only check nodes in the same column (x-range overlaps domain).
+            let overlaps_x = nl.x < dl.x + dl.width && nl.x + nl.width > dl.x;
+            if !overlaps_x {
+                continue;
+            }
+            // Check if node's y-range falls within the domain's member y-range.
+            let node_top = nl.y;
+            let node_bottom = nl.y + nl.height;
+            if node_bottom > min_y && node_top < max_y {
+                violations.push((domain.id, nl.id));
+            }
+        }
+    }
+    violations
+}
+
 fn find_node_edge_overlaps(
     graph: &Graph,
     nodes: &[NodeLayout],
@@ -570,6 +765,188 @@ fn compute_mean_constraint_segments(constraints: &[EdgePath]) -> f64 {
         .map(|ep| parse_svg_path(&ep.svg_path).len())
         .sum();
     total_segs as f64 / constraints.len() as f64
+}
+
+/// Find cross-domain constraint edges whose vertical segments fall inside
+/// an intra-domain corridor zone of a domain they are NOT connected to.
+///
+/// The intra-domain corridor is the strip between a domain's border and its
+/// node area: `[domain.x, domain.x + lr_pad]` on the left and
+/// `[domain.x + domain.width - lr_pad, domain.x + domain.width]` on the right.
+///
+/// A cross-domain edge is allowed to traverse through the corridor of a domain
+/// one of its endpoints belongs to (necessary for same-column cross-domain
+/// edges). It must NOT traverse through the corridor of an unrelated domain.
+fn find_inter_domain_edges_in_intra_corridors(
+    graph: &Graph,
+    domains: &[DomainLayout],
+    edges: &[(EdgeId, Vec<LineSeg>)],
+) -> Vec<(EdgeId, DomainId)> {
+    let lr_pad = DOMAIN_PADDING + CORRIDOR_PAD * 2.0;
+    let mut violations = Vec::new();
+
+    // Pre-compute corridor zones for each domain.
+    struct CorridorZone {
+        id: DomainId,
+        left_x_start: f64,
+        left_x_end: f64,
+        right_x_start: f64,
+        right_x_end: f64,
+        y_start: f64,
+        y_end: f64,
+    }
+
+    let zones: Vec<CorridorZone> = domains
+        .iter()
+        .map(|dl| CorridorZone {
+            id: dl.id,
+            left_x_start: dl.x,
+            left_x_end: dl.x + lr_pad,
+            right_x_start: dl.x + dl.width - lr_pad,
+            right_x_end: dl.x + dl.width,
+            y_start: dl.y,
+            y_end: dl.y + dl.height,
+        })
+        .collect();
+
+    for &(edge_id, ref segs) in edges {
+        let edge = &graph.edges[edge_id.index()];
+        // Only check cross-domain constraint edges.
+        match edge {
+            Edge::Constraint {
+                source_prop,
+                dest_prop,
+                ..
+            } => {
+                let src_node = graph.properties[source_prop.index()].node;
+                let dst_node = graph.properties[dest_prop.index()].node;
+                let sd = graph.nodes[src_node.index()].domain;
+                let td = graph.nodes[dst_node.index()].domain;
+                if sd == td {
+                    continue; // Not cross-domain.
+                }
+            }
+            _ => continue,
+        };
+
+        // Check each vertical segment.
+        for seg in segs {
+            let (x, y_min, y_max) = match seg {
+                LineSeg {
+                    x1, y1, x2, y2, ..
+                } if (x1 - x2).abs() < 0.5 => (*x1, y1.min(*y2), y1.max(*y2)),
+                _ => continue, // Not a vertical segment.
+            };
+
+            for zone in &zones {
+                // Cross-domain edges must never use any intra-domain corridor,
+                // including corridors of their own endpoint domains.
+                // Check if vertical segment is inside either corridor zone
+                // and overlaps the domain's y-range.
+                let in_left = x >= zone.left_x_start && x <= zone.left_x_end;
+                let in_right = x >= zone.right_x_start && x <= zone.right_x_end;
+                if !in_left && !in_right {
+                    continue;
+                }
+                let y_overlap = y_max > zone.y_start && y_min < zone.y_end;
+                if y_overlap {
+                    violations.push((edge_id, zone.id));
+                    break; // One violation per edge per domain is enough.
+                }
+            }
+        }
+    }
+    violations
+}
+
+/// Find pairs of edges that share the same vertical channel x-coordinate
+/// while their y-ranges overlap (channel collision).
+///
+/// Consecutive center-port edges (anchors in a chain) that share a common
+/// node are exempt — their vertical segments naturally overlap at the shared
+/// node's center x.
+fn find_channel_collisions(
+    graph: &Graph,
+    edges: &[(EdgeId, Vec<LineSeg>)],
+) -> Vec<(EdgeId, EdgeId)> {
+    // Extract all vertical segments with their edge_id.
+    let mut verticals: Vec<(EdgeId, f64, f64, f64)> = Vec::new(); // (edge_id, x, y_min, y_max)
+    for &(edge_id, ref segs) in edges {
+        for seg in segs {
+            if (seg.x1 - seg.x2).abs() < 0.5 {
+                let y_min = seg.y1.min(seg.y2);
+                let y_max = seg.y1.max(seg.y2);
+                if (y_max - y_min) > 1.0 {
+                    // Only non-trivial vertical segments.
+                    verticals.push((edge_id, seg.x1, y_min, y_max));
+                }
+            }
+        }
+    }
+
+    // Helper: get the set of node IDs involved in an edge.
+    let edge_nodes = |eid: EdgeId| -> Vec<NodeId> {
+        match &graph.edges[eid.index()] {
+            Edge::Anchor { parent, child, .. } => vec![*parent, *child],
+            Edge::Constraint { source_prop, dest_prop, .. } => {
+                vec![
+                    graph.properties[source_prop.index()].node,
+                    graph.properties[dest_prop.index()].node,
+                ]
+            }
+            Edge::DerivInput { source_prop, .. } => {
+                vec![graph.properties[source_prop.index()].node]
+            }
+        }
+    };
+
+    // Two edges share a common endpoint (node or derivation).
+    let shares_endpoint = |a: EdgeId, b: EdgeId| -> bool {
+        let nodes_a = edge_nodes(a);
+        let nodes_b = edge_nodes(b);
+        if nodes_a.iter().any(|n| nodes_b.contains(n)) {
+            return true;
+        }
+        // Also check shared target derivation for DerivInput pairs.
+        let deriv_a = match &graph.edges[a.index()] {
+            Edge::DerivInput { target_deriv, .. } => Some(target_deriv),
+            _ => None,
+        };
+        let deriv_b = match &graph.edges[b.index()] {
+            Edge::DerivInput { target_deriv, .. } => Some(target_deriv),
+            _ => None,
+        };
+        deriv_a.is_some() && deriv_a == deriv_b
+    };
+
+    // Both edges use center-port routing at the shared node.
+    // Anchors use center top/bottom; DerivInputs use center on the
+    // derivation end. Pairs of these edge types naturally share the
+    // center x of their common node/derivation.
+    let both_center_port = |a: EdgeId, b: EdgeId| -> bool {
+        let is_center = |e: &Edge| matches!(e, Edge::Anchor { .. } | Edge::DerivInput { .. });
+        is_center(&graph.edges[a.index()]) && is_center(&graph.edges[b.index()])
+    };
+
+    let mut collisions = Vec::new();
+    for i in 0..verticals.len() {
+        for j in (i + 1)..verticals.len() {
+            let (eid_a, x_a, y_min_a, y_max_a) = verticals[i];
+            let (eid_b, x_b, y_min_b, y_max_b) = verticals[j];
+            if eid_a == eid_b {
+                continue; // Same edge, different segments.
+            }
+            // Same x (within tolerance) and overlapping y-ranges.
+            if (x_a - x_b).abs() < 0.5 && y_max_a > y_min_b + 0.5 && y_max_b > y_min_a + 0.5 {
+                // Exempt consecutive center-port edges that share a node.
+                if both_center_port(eid_a, eid_b) && shares_endpoint(eid_a, eid_b) {
+                    continue;
+                }
+                collisions.push((eid_a, eid_b));
+            }
+        }
+    }
+    collisions
 }
 
 fn compute_min_node_gap(nodes: &[NodeLayout]) -> f64 {

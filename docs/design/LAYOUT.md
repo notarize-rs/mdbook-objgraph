@@ -114,6 +114,59 @@ Odd  (Deriv) Layer 3:              [D3]           ← D3 depends on D1
 Even (Node) Layer 4:     [Node C]
 ```
 
+##### Compound Graph Layering (Domain Contiguity)
+
+Domains are **first-class participants** in layer assignment. The key invariant:
+
+> **Domain Contiguity**: All member nodes of a domain occupy a contiguous
+> range of layers. No foreign node or derivation may be interleaved between
+> a domain's topmost and bottommost members.
+
+This is enforced by `compound_network_simplex`, which runs a two-phase
+approach:
+
+**Phase A — Base assignment**: Run standard `network_simplex` to produce an
+initial feasible layer assignment respecting edge constraints and parity.
+
+**Phase B — Domain compaction**: Remap layers so that each domain's members
+form a contiguous block, with inter-domain gap layers between meta-elements.
+
+The meta-elements are:
+
+| Meta-element type | Description |
+| --- | --- |
+| `Domain(DomainId)` | A domain containing all its member nodes and intra-domain derivations |
+| `FreeNode(NodeId)` | A node not belonging to any domain |
+| `CrossDomainDeriv(DerivId)` | A derivation whose inputs/output span multiple domains |
+
+**Algorithm**:
+
+1. **Classify elements**: Each node maps to its domain or is a free node.
+   Each derivation is intra-domain (all inputs + output in same domain) or
+   cross-domain.
+
+2. **Compute domain internal layers**: For each domain, collect the sorted
+   distinct layers of its member nodes and intra-domain derivations from the
+   base assignment.
+
+3. **Build ordering constraints**: For each cross-domain edge, add a
+   meta-edge between the source and target meta-elements.
+
+4. **Topological sort**: Sort meta-elements using Kahn's algorithm, breaking
+   ties by the minimum base layer (preserving the network simplex ordering).
+
+5. **Assign contiguous ranges**: Walk the sorted meta-elements, assigning
+   contiguous layer ranges. Domains keep their internal layer structure
+   (relative offsets and parity preserved). An inter-domain gap of 2 layers
+   is inserted between each pair of adjacent meta-elements.
+
+6. **Normalize**: Shift all layers so the minimum is 0. Verify the parity
+   invariant (nodes on even layers, derivations on odd layers).
+
+The result is a `LayerAssignment` where same-domain nodes are contiguous
+and inter-domain elements (free nodes, cross-domain derivations) sit in
+dedicated gap layers between domains.
+
 ##### Network Simplex Pseudocode
 
 The network simplex algorithm for layer assignment (Gansner et al., 1993)
@@ -635,11 +688,15 @@ Intra-node edges are estimated at 1–3% of all constraints. They are handled as
 special case with forced opposite-side assignment. No iterative side-assignment
 refinement is needed at this frequency.
 
-#### 4.2.5 Phase 5: Domain Bounding Boxes and Columnar Layout
+#### 4.2.5 Phase 5: Domain Bounding Boxes, Columnar Layout, and Vertical Compaction
 
 After coordinate assignment, each domain's bounding box is computed from its
-member nodes with `DOMAIN_PADDING` top/bottom and `DOMAIN_PADDING + CORRIDOR_PAD * 2`
-left/right (to accommodate intra-domain routing corridors).
+member nodes with padding:
+
+- **Top**: `DOMAIN_TITLE_HEIGHT` (32px) for the title area
+- **Bottom**: `INTER_NODE_GAP` (28px) matching inter-node spacing
+- **Left/Right**: `DOMAIN_PADDING + CORRIDOR_PAD * 2` (26px) to accommodate
+  intra-domain routing corridors
 
 ##### Phase 5b: Columnar Domain Layout
 
@@ -655,22 +712,57 @@ creating dedicated gap corridors between columns for cross-domain edge routing.
    domains** (connected to exactly one other domain) join their sole neighbor's
    column rather than alternating. Unconnected domains go to column 0.
 
-3. **Size the gap corridor dynamically**: Count the number of cross-column
-   edges (`n`). Gap width = `CORRIDOR_PAD * 2 + max(0, n - 1) * CHANNEL_GAP`.
-   For a single edge: 16px. For 12 edges: 60px. This ensures enough vertical
-   channels for all cross-column routes.
+3. **Size the gap corridor dynamically**: Count the number of **cross-domain**
+   edges (`n`) — including same-column cross-domain edges, not just cross-column
+   ones. Same-column cross-domain edges route through corridor zones shared with
+   their endpoint domains and must be counted. The count uses a sweep-line over
+   vertical extents to find the maximum simultaneous overlap. Gap width =
+   `CORRIDOR_PAD * 2 + max(0, n - 1) * CHANNEL_GAP`. For a single edge: 16px.
+   For 12 edges: 60px.
 
-4. **Reposition nodes**: Shift each domain's member nodes so they fall within
+4. **Outer corridor**: Column 0 starts at `CORRIDOR_PAD * 2` (16px) instead
+   of x=0, creating a left-edge corridor for edges that exit leftward.
+
+5. **Reposition nodes**: Shift each domain's member nodes so they fall within
    their assigned column. Domains narrower than the column width are centered.
 
-5. **Recompute bounding boxes** from the repositioned node coordinates.
+6. **Recompute bounding boxes** from the repositioned node coordinates.
 
-##### Phase 5c: Vertical Domain Separation
+##### Phase 5c: Vertical Compaction
 
-Cross-domain anchor edges impose a vertical ordering: if a node in domain A
-anchors a node in domain B, domain B must appear below domain A. This pass
-shifts child domains (and their member nodes) downward until the required
-vertical gap (`CORRIDOR_PAD * 2`) is achieved.
+After compound layer assignment + Brandes-Köpf, nodes are correctly ordered
+but vertical spacing is inflated by empty gap layers between domains. The
+vertical compaction pass collapses this excess spacing.
+
+The structural model for vertical layout within each column is a flat
+sequence of elements separated by inter-domain corridors:
+
+```
+inter-domain corridor (gap)
+<domain A: title | node | gap | node | gap | derivation | gap | node>
+inter-domain corridor (gap = INTER_NODE_GAP)
+<cross-domain derivation pill>
+inter-domain corridor (gap = INTER_NODE_GAP)
+<domain B: title | node | gap | node>
+inter-domain corridor (gap)
+<free node>
+inter-domain corridor (gap)
+```
+
+**Algorithm**:
+
+1. Identify which column each element belongs to (by x-center proximity to
+   domain column centers).
+2. Collect all vertical elements per column: domains (as blocks), free nodes,
+   and cross-domain derivations.
+3. Sort each column's elements by current y-center.
+4. Walk top-to-bottom: the first element keeps its position; each subsequent
+   element is placed at `previous_bottom + INTER_NODE_GAP`.
+5. When shifting a domain, all its member nodes shift by the same delta.
+6. Recompute domain bounding boxes from final node positions.
+
+This replaces the previous pair-wise domain overlap resolution and
+cross-domain derivation repositioning passes.
 
 #### 4.2.6 Phase 6: Edge Routing — Orthogonal, Corridor-Based
 
@@ -700,6 +792,54 @@ The channel count for each corridor is the minimum needed to avoid edge
 collisions (overlapping vertical extents) within the corridor's y-range. Two
 edges may share a channel if their vertical extents do not overlap.
 
+##### Corridor Merging for Same-Column Domains
+
+When multiple domains occupy the same column, their left corridors share the
+same x-range (as do their right corridors). Rather than creating separate
+corridor objects with identical x-ranges — which would allow independent
+channel allocation and cause collisions — corridors at the same x-range are
+**merged** into a single corridor that tracks multiple domain owners.
+
+```rust
+struct Corridor {
+    x_start: f64,
+    x_end: f64,
+    domain_ids: Vec<DomainId>,  // all domains sharing this corridor
+    channels: Vec<Channel>,
+}
+```
+
+The `merge_or_create_corridor` function checks whether a corridor already
+exists at the given x-range. If so, the new domain is added to the existing
+corridor's `domain_ids` list. If not, a new corridor is created. This ensures
+that edges from different domains in the same column share channel state and
+never allocate the same vertical channel position.
+
+##### Corridor Routing Invariant
+
+> **No cross-domain edge may use an intra-domain corridor.** Cross-domain
+> edges must always route through the inter-column gap corridor, regardless
+> of whether the endpoints' domains are in the same column or different
+> columns.
+
+This invariant is absolute. Even when two domains are vertically adjacent
+in the same column and share a merged corridor, cross-domain edges between
+them must exit to the inter-column gap. The longer horizontal segments are
+the accepted cost of visual clarity.
+
+##### Channel Collision Invariant
+
+> **No two edges may share the same vertical channel x-coordinate with
+> overlapping y-ranges**, except for consecutive center-port edges (Anchor
+> or DerivInput) that share a common node or derivation endpoint.
+
+The center-port exemption covers two cases:
+
+1. **Anchor chains**: A parent→child→grandchild anchor chain naturally
+   overlaps at the child node's center x.
+2. **DerivInput convergence**: Multiple DerivInput edges targeting the same
+   derivation pill share the derivation's center x.
+
 ##### Routing Data Structures
 
 ```rust
@@ -716,6 +856,7 @@ enum Segment {
 struct Corridor {
     x_start: f64,            // left edge of corridor
     x_end: f64,              // right edge of corridor
+    domain_ids: Vec<DomainId>,  // owning domains (merged for same-column domains)
     channels: Vec<Channel>,  // vertical channels within this corridor
 }
 
@@ -838,9 +979,13 @@ function route_all_edges(graph, x, y, node_dims, domains) → Vec<Route>:
                 src_side = Some(port_side_assignment[e, Upstream])
                 tgt_side = Some(port_side_assignment[e, Downstream])
 
+        // 3. Determine domain affinity for corridor selection
+        (src_domain, tgt_domain) = domain_affinity(e, graph, domain_layouts)
+
         route = route_single_edge(
             src_x, src_y, src_side,
             tgt_x, tgt_y, tgt_side,
+            src_domain, tgt_domain,
             corridors
         )
         reserve_channel(route, e.id, corridors)
@@ -849,6 +994,33 @@ function route_all_edges(graph, x, y, node_dims, domains) → Vec<Route>:
     return routes
 ```
 
+##### Domain Affinity for Corridor Selection
+
+Each edge is assigned a **domain affinity** that determines which corridor
+it may use for its vertical segments. The `find_best_corridor_idx` function
+uses this affinity to select corridors whose `domain_ids` match the edge's
+affinity.
+
+```text
+function domain_affinity(edge, graph) → (Option<DomainId>, Option<DomainId>):
+    src_domain = domain of source node
+    tgt_domain = domain of target node
+
+    if src_domain == tgt_domain:
+        return (src_domain, tgt_domain)     // Intra-domain: use own corridors
+    else:
+        return (None, None)                 // Cross-domain: use inter-column gap corridor
+```
+
+Two cases:
+
+1. **Intra-domain**: Both endpoints in the same domain. The edge uses that
+   domain's own corridor channels.
+
+2. **Cross-domain**: Endpoints in different domains. The edge always routes
+   through the inter-column gap corridor, regardless of whether the domains
+   are in the same column or different columns.
+
 ##### Single Edge Routing
 
 Edges route as orthogonal doglegs: exit horizontally from a port, travel
@@ -856,7 +1028,7 @@ vertically along a corridor channel, then enter horizontally at the target
 port. The corridor side (left or right) is chosen to minimize crossings and
 avoid collisions.
 
-```
+```text
 function find_corridor_channel(port_x, port_side, corridors) → Channel:
     // Search in the direction the port faces — ensures edges exit horizontally
     // away from the node body before turning vertically.
@@ -872,6 +1044,7 @@ For a single edge between a source port and target port:
 ```
 function route_single_edge(src_x, src_y, src_side,
                            tgt_x, tgt_y, tgt_side,
+                           src_domain, tgt_domain,
                            corridors) → Route:
     // src_side and tgt_side are Option<Side>.
     // Anchors pass None (center top/bottom ports); Constraints/DerivInputs pass Some(Left|Right).
