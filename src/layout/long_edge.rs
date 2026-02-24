@@ -111,11 +111,17 @@ fn edge_endpoints(
 
 /// Compute the minimum span for an edge based on the vertex types of its
 /// endpoints.
+///
+/// Anchor edges between two nodes have a minimum span of 2 (one intermediate
+/// layer).  Constraint and DerivInput edges use min_span=1 so that every
+/// inter-node constraint gets an intermediate segment, enabling the crossing
+/// minimisation phase to reason about property-level crossings between
+/// adjacent layers.
 fn min_span_for_edge(edge: &Edge, _graph: &Graph) -> u32 {
     match edge {
         Edge::Anchor { .. } => 2,          // Node -> Node
-        Edge::Constraint { .. } => 2,    // Node -> Node
-        Edge::DerivInput { .. } => 1,    // Node -> Deriv
+        Edge::Constraint { .. } => 1,      // ensure intermediate segments
+        Edge::DerivInput { .. } => 1,      // Node -> Deriv
     }
 }
 

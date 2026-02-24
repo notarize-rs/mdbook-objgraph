@@ -560,6 +560,46 @@ fn weighted_mean(positions: &[(f64, u32)]) -> Option<f64> {
 }
 
 // ---------------------------------------------------------------------------
+// Property edge detection helper
+// ---------------------------------------------------------------------------
+
+/// Check if a property is an endpoint of an adjacent edge in layer `k`.
+/// Returns a reference to the *other* endpoint if the property matches.
+fn prop_touches_edge<'a>(
+    prop_id: PropId,
+    node_id: NodeId,
+    ae: &'a AdjacentEdge,
+    k: u32,
+    layer_map: &HashMap<LayerElement, u32>,
+) -> Option<&'a EdgeEndpoint> {
+    let touches_upper = match &ae.upper {
+        EdgeEndpoint { prop: Some(p), element } if *p == prop_id => {
+            layer_map.get(element) == Some(&k)
+        }
+        EdgeEndpoint { prop: None, element: LayerElement::Node(nid), .. }
+            if *nid == node_id =>
+        {
+            false
+        }
+        _ => false,
+    };
+    let touches_lower = match &ae.lower {
+        EdgeEndpoint { prop: Some(p), element } if *p == prop_id => {
+            layer_map.get(element) == Some(&k)
+        }
+        _ => false,
+    };
+
+    if touches_upper {
+        Some(&ae.lower)
+    } else if touches_lower {
+        Some(&ae.upper)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main algorithm
 // ---------------------------------------------------------------------------
 
@@ -580,14 +620,18 @@ pub fn minimize_crossings(
 
     let mut prop_order = PropertyOrder::from_graph(graph);
 
+    // Initialize long edge segment positions from their actual indices in
+    // each layer.  build_layers() sets all positions to 0.0 which makes
+    // every segment appear at the same coordinate, hiding real crossings.
+    update_long_edge_positions(layers, long_edges);
+
     let mut best_layers = layers.clone();
     let mut best_prop_order = prop_order.clone();
     let mut best_crossings = count_all_crossings(layers, graph, &prop_order, long_edges);
 
-    if best_crossings == 0 {
-        return prop_order;
-    }
-
+    // Always run the iteration loop: even when abstract crossings are zero,
+    // barycenter-based property reordering improves physical port placement
+    // and reduces visual edge collisions in the rendered output.
     for iteration in 0..MAX_ITERATIONS {
         let top_down = iteration % 2 == 0;
 
@@ -626,77 +670,109 @@ pub fn minimize_crossings(
 
             for &node_id in &nodes_in_layer {
                 let props = prop_order.props_of(node_id).to_vec();
-                let mut prop_barycenters: Vec<(PropId, f64, bool)> = Vec::new();
-
-                for (prop_idx, &prop_id) in props.iter().enumerate() {
-                    // Find edges incident on this property connecting to adj_layer
-                    let mut positions: Vec<(f64, u32)> = Vec::new();
-
-                    for ae in &adj_edges {
-                        // Check if this edge touches this property in layer k
-                        let touches_upper = match &ae.upper {
-                            EdgeEndpoint { prop: Some(p), element } if *p == prop_id => {
-                                // Verify this element is in layer k
-                                layer_map.get(element) == Some(&(k as u32))
-                            }
-                            EdgeEndpoint { prop: None, element: LayerElement::Node(nid), .. }
-                                if *nid == node_id =>
-                            {
-                                // Link edge: the node itself is the endpoint.
-                                // For link edges with no property, we associate
-                                // it with the node, not a specific property.
-                                false
-                            }
-                            _ => false,
-                        };
-                        let touches_lower = match &ae.lower {
-                            EdgeEndpoint { prop: Some(p), element } if *p == prop_id => {
-                                layer_map.get(element) == Some(&(k as u32))
-                            }
-                            _ => false,
-                        };
-
-                        if touches_upper {
-                            // The other end is in adj_layer (the lower side)
-                            let pos = resolve_position(
-                                &ae.lower,
-                                adj_layer,
-                                graph,
-                                &prop_order,
-                                long_edges,
-                            );
-                            positions.push((pos, ae.weight));
-                        } else if touches_lower {
-                            // The other end is in adj_layer (the upper side)
-                            let pos = resolve_position(
-                                &ae.upper,
-                                adj_layer,
-                                graph,
-                                &prop_order,
-                                long_edges,
-                            );
-                            positions.push((pos, ae.weight));
-                        }
-                    }
-
-                    if let Some(bc) = weighted_mean(&positions) {
-                        prop_barycenters.push((prop_id, bc, true));
-                    } else {
-                        // Keep current position
-                        let num = props.len();
-                        let current = prop_idx as f64 / (num as f64 + 1.0);
-                        prop_barycenters.push((prop_id, current, false));
-                    }
+                if props.len() <= 1 {
+                    continue;
                 }
 
-                // Sort properties by barycenter (stable sort to preserve order
-                // for equal barycenters)
-                prop_barycenters.sort_by(|a, b| {
-                    a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+                // Collect edges from BOTH adjacent layers to classify each
+                // property's connection direction and compute per-direction
+                // barycenters.
+                let above_idx = if k > 0 { Some(k - 1) } else { None };
+                let below_idx = if k + 1 < layers.len() { Some(k + 1) } else { None };
+
+                let edges_above = above_idx.map(|ai| {
+                    collect_adjacent_edges(
+                        k as u32, ai as u32, graph, long_edges, &layer_map,
+                    )
+                }).unwrap_or_default();
+                let edges_below = below_idx.map(|bi| {
+                    collect_adjacent_edges(
+                        k as u32, bi as u32, graph, long_edges, &layer_map,
+                    )
+                }).unwrap_or_default();
+
+                // For each property, determine if it connects above,
+                // below, or neither.  Compute a barycenter from the
+                // relevant adjacent layer.
+                //
+                // Direction encoding:
+                //   0 = connects above only  (should sort first / top)
+                //   1 = no edges or both     (middle)
+                //   2 = connects below only  (should sort last / bottom)
+                #[derive(Debug)]
+                struct PropInfo {
+                    prop_id: PropId,
+                    direction: u8,
+                    barycenter: f64,
+                }
+
+                let mut infos: Vec<PropInfo> = Vec::with_capacity(props.len());
+
+                for (prop_idx, &prop_id) in props.iter().enumerate() {
+                    let bc_above = {
+                        let mut positions: Vec<(f64, u32)> = Vec::new();
+                        if let Some(ai) = above_idx {
+                            let above_layer = &layers[ai];
+                            for ae in &edges_above {
+                                let touches = prop_touches_edge(
+                                    prop_id, node_id, ae, k as u32, &layer_map,
+                                );
+                                if let Some(other_ep) = touches {
+                                    let pos = resolve_position(
+                                        other_ep, above_layer, graph,
+                                        &prop_order, long_edges,
+                                    );
+                                    positions.push((pos, ae.weight));
+                                }
+                            }
+                        }
+                        weighted_mean(&positions)
+                    };
+
+                    let bc_below = {
+                        let mut positions: Vec<(f64, u32)> = Vec::new();
+                        if let Some(bi) = below_idx {
+                            let below_layer = &layers[bi];
+                            for ae in &edges_below {
+                                let touches = prop_touches_edge(
+                                    prop_id, node_id, ae, k as u32, &layer_map,
+                                );
+                                if let Some(other_ep) = touches {
+                                    let pos = resolve_position(
+                                        other_ep, below_layer, graph,
+                                        &prop_order, long_edges,
+                                    );
+                                    positions.push((pos, ae.weight));
+                                }
+                            }
+                        }
+                        weighted_mean(&positions)
+                    };
+
+                    let (direction, barycenter) = match (bc_above, bc_below) {
+                        (Some(a), None) => (0, a),
+                        (None, Some(b)) => (2, b),
+                        (Some(a), Some(b)) => (1, (a + b) / 2.0),
+                        (None, None) => {
+                            // Unconnected — keep current relative position
+                            (1, prop_idx as f64)
+                        }
+                    };
+
+                    infos.push(PropInfo { prop_id, direction, barycenter });
+                }
+
+                // Sort: first by direction (above=0, middle=1, below=2),
+                // then by barycenter within each group.
+                infos.sort_by(|a, b| {
+                    a.direction.cmp(&b.direction).then_with(|| {
+                        a.barycenter.partial_cmp(&b.barycenter)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                 });
 
                 let new_prop_order: Vec<PropId> =
-                    prop_barycenters.iter().map(|(pid, _, _)| *pid).collect();
+                    infos.iter().map(|i| i.prop_id).collect();
                 prop_order.set_order(node_id, new_prop_order);
             }
 
@@ -874,13 +950,16 @@ pub fn minimize_crossings(
 
         let current_crossings = count_all_crossings(layers, graph, &prop_order, long_edges);
 
-        if current_crossings < best_crossings {
+        if current_crossings < best_crossings || (current_crossings == 0 && iteration < 2) {
             best_layers = layers.clone();
             best_prop_order = prop_order.clone();
             best_crossings = current_crossings;
         }
 
-        if current_crossings == 0 {
+        // Stop early once crossings hit zero, but only after running at
+        // least two passes (one top-down + one bottom-up) so that property
+        // reordering benefits from both sweep directions.
+        if current_crossings == 0 && iteration >= 1 {
             break;
         }
     }
