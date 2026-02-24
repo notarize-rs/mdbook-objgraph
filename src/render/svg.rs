@@ -178,10 +178,11 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         )
         .unwrap();
         if let Some(lbl) = &ep.label {
+            let label_fill = if valid { "#22c55e" } else { "#ef4444" };
             writeln!(
                 out,
-                r##"        <text class="obgraph-anchor-label" x="{x}" y="{y}" fill="#22c55e" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
-                x = lbl.x, y = lbl.y, anchor = lbl.anchor, text = escape_xml(&lbl.text)
+                r##"        <text class="obgraph-anchor-label" x="{x}" y="{y}" fill="{fill}" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
+                x = lbl.x, y = lbl.y, fill = label_fill, anchor = lbl.anchor, text = escape_xml(&lbl.text)
             ).unwrap();
         }
     }
@@ -206,10 +207,11 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         )
         .unwrap();
         if let Some(lbl) = &ep.label {
+            let label_fill = if valid { "#60a5fa" } else { "#ef4444" };
             writeln!(
                 out,
-                r##"        <text class="obgraph-constraint-label" x="{x}" y="{y}" fill="#60a5fa" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
-                x = lbl.x, y = lbl.y, anchor = lbl.anchor, text = escape_xml(&lbl.text)
+                r##"        <text class="obgraph-constraint-label" x="{x}" y="{y}" fill="{fill}" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
+                x = lbl.x, y = lbl.y, fill = label_fill, anchor = lbl.anchor, text = escape_xml(&lbl.text)
             ).unwrap();
         }
     }
