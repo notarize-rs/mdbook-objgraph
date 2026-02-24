@@ -116,15 +116,14 @@ pub fn propagate(graph: &Graph) -> StateResult {
                         source_prop,
                         ..
                     } = &graph.edges[eid.index()]
+                        && *source_prop == p
                     {
-                        if *source_prop == p {
-                            let dest_entry =
-                                constrained_eff.entry(*dest_prop).or_insert(false);
-                            if !*dest_entry {
-                                *dest_entry = true;
-                                prop_worklist.push_back(*dest_prop);
-                                progress = true;
-                            }
+                        let dest_entry =
+                            constrained_eff.entry(*dest_prop).or_insert(false);
+                        if !*dest_entry {
+                            *dest_entry = true;
+                            prop_worklist.push_back(*dest_prop);
+                            progress = true;
                         }
                     }
                 }

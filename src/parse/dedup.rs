@@ -1,7 +1,7 @@
-/// Derivation expression normalization and deduplication (DESIGN.md §2.4).
-///
-/// Identical derivation expressions (by normalized string equality) are
-/// merged into a single graph node during graph construction.
+//! Derivation expression normalization and deduplication (DESIGN.md §2.4).
+//!
+//! Identical derivation expressions (by normalized string equality) are
+//! merged into a single graph node during graph construction.
 
 use crate::parse::ast::AstSourceExpr;
 use std::collections::HashMap;

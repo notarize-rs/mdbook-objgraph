@@ -234,13 +234,13 @@ fn build_cross_domain_adjacency(
             }
         };
 
-        if let (Some(sd), Some(td)) = (src_domain, tgt_domain) {
-            if sd != td {
-                let (si, ti) = (domain_idx(sd), domain_idx(td));
-                if let (Some(si), Some(ti)) = (si, ti) {
-                    adj.entry(si).or_default().insert(ti);
-                    adj.entry(ti).or_default().insert(si);
-                }
+        if let (Some(sd), Some(td)) = (src_domain, tgt_domain)
+            && sd != td
+        {
+            let (si, ti) = (domain_idx(sd), domain_idx(td));
+            if let (Some(si), Some(ti)) = (si, ti) {
+                adj.entry(si).or_default().insert(ti);
+                adj.entry(ti).or_default().insert(si);
             }
         }
     }
@@ -266,12 +266,11 @@ fn build_anchor_domain_pairs(
         if let Edge::Anchor { parent, child, .. } = edge {
             let parent_domain = graph.nodes[parent.index()].domain;
             let child_domain = graph.nodes[child.index()].domain;
-            if let (Some(pd), Some(cd)) = (parent_domain, child_domain) {
-                if pd != cd {
-                    if let (Some(pi), Some(ci)) = (domain_idx(pd), domain_idx(cd)) {
-                        pairs.insert((pi, ci));
-                    }
-                }
+            if let (Some(pd), Some(cd)) = (parent_domain, child_domain)
+                && pd != cd
+                && let (Some(pi), Some(ci)) = (domain_idx(pd), domain_idx(cd))
+            {
+                pairs.insert((pi, ci));
             }
         }
     }
@@ -279,14 +278,14 @@ fn build_anchor_domain_pairs(
 }
 
 /// Union-Find for merging domains into anchor groups.
-fn find_root(parent: &mut Vec<usize>, x: usize) -> usize {
+fn find_root(parent: &mut [usize], x: usize) -> usize {
     if parent[x] != x {
         parent[x] = find_root(parent, parent[x]);
     }
     parent[x]
 }
 
-fn union(parent: &mut Vec<usize>, rank: &mut Vec<usize>, a: usize, b: usize) {
+fn union(parent: &mut [usize], rank: &mut [usize], a: usize, b: usize) {
     let ra = find_root(parent, a);
     let rb = find_root(parent, b);
     if ra == rb {
@@ -438,12 +437,11 @@ fn assign_columns(
     let num_cols = 2; // We use a 2-column layout.
     let mut col_heights = vec![0.0_f64; num_cols];
     for gi in 0..num_groups {
-        if !satellite_groups.contains(&gi) {
-            if let Some(col) = group_col[gi] {
-                if col < num_cols {
-                    col_heights[col] += group_heights[gi];
-                }
-            }
+        if !satellite_groups.contains(&gi)
+            && let Some(col) = group_col[gi]
+            && col < num_cols
+        {
+            col_heights[col] += group_heights[gi];
         }
     }
 
@@ -952,15 +950,15 @@ pub fn separate_domains_vertically(
         if let Edge::Anchor { parent, child, .. } = edge {
             let parent_domain = graph.nodes[parent.index()].domain;
             let child_domain = graph.nodes[child.index()].domain;
-            if let (Some(pd), Some(cd)) = (parent_domain, child_domain) {
-                if pd != cd {
-                    let positions = domain_layouts
-                        .iter()
-                        .position(|d| d.id == pd)
-                        .zip(domain_layouts.iter().position(|d| d.id == cd));
-                    if let Some((pi, ci)) = positions {
-                        anchor_order.insert((pi, ci));
-                    }
+            if let (Some(pd), Some(cd)) = (parent_domain, child_domain)
+                && pd != cd
+            {
+                let positions = domain_layouts
+                    .iter()
+                    .position(|d| d.id == pd)
+                    .zip(domain_layouts.iter().position(|d| d.id == cd));
+                if let Some((pi, ci)) = positions {
+                    anchor_order.insert((pi, ci));
                 }
             }
         }

@@ -1,4 +1,4 @@
-/// Graph construction from AST (DESIGN.md §2.5, Appendix A.3).
+//! Graph construction from AST (DESIGN.md §2.5, Appendix A.3).
 
 use std::collections::HashMap;
 

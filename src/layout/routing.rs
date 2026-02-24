@@ -1,4 +1,4 @@
-/// Orthogonal channel-based edge routing (DESIGN.md §4.2.6).
+//! Orthogonal channel-based edge routing (DESIGN.md §4.2.6).
 
 use std::collections::HashMap;
 
@@ -338,7 +338,7 @@ fn find_best_corridor_idx(
 fn find_corridor_channel(
     port_x: f64,
     port_side: PortSide,
-    corridors: &mut Vec<Corridor>,
+    corridors: &mut [Corridor],
     edge_id: EdgeId,
     y_start: f64,
     y_end: f64,
@@ -366,15 +366,15 @@ fn prop_node(graph: &Graph, prop_id: PropId) -> NodeId {
 }
 
 /// Find the NodeLayout for a given NodeId.
-fn find_node_layout<'a>(node_layouts: &'a [NodeLayout], node_id: NodeId) -> Option<&'a NodeLayout> {
+fn find_node_layout(node_layouts: &[NodeLayout], node_id: NodeId) -> Option<&NodeLayout> {
     node_layouts.iter().find(|nl| nl.id == node_id)
 }
 
 /// Find the DerivLayout for a given DerivId.
-fn find_deriv_layout<'a>(
-    deriv_layouts: &'a [DerivLayout],
+fn find_deriv_layout(
+    deriv_layouts: &[DerivLayout],
     deriv_id: crate::model::types::DerivId,
-) -> Option<&'a DerivLayout> {
+) -> Option<&DerivLayout> {
     deriv_layouts.iter().find(|dl| dl.id == deriv_id)
 }
 
@@ -525,7 +525,7 @@ pub fn assign_port_sides(
                     // Same column: use per-node counter for the source,
                     // and mirror the side on the derivation.
                     let cnt = node_side_counter.entry(src_node_id).or_insert(0);
-                    let side = if *cnt % 2 == 0 {
+                    let side = if (*cnt).is_multiple_of(2) {
                         PortSide::Right
                     } else {
                         PortSide::Left
@@ -551,7 +551,7 @@ pub fn assign_port_sides(
             // Self-loop: use per-node counter so it alternates with other
             // constraints on the same node.
             let cnt = node_side_counter.entry(src_node_id).or_insert(0);
-            let side = if *cnt % 2 == 0 {
+            let side = if (*cnt).is_multiple_of(2) {
                 PortSide::Right
             } else {
                 PortSide::Left
@@ -577,7 +577,7 @@ pub fn assign_port_sides(
             } else {
                 // Same center x: use per-node counter for both endpoints.
                 let cnt = node_side_counter.entry(src_node_id).or_insert(0);
-                let side = if *cnt % 2 == 0 {
+                let side = if (*cnt).is_multiple_of(2) {
                     PortSide::Right
                 } else {
                     PortSide::Left
@@ -730,6 +730,7 @@ impl PortDistributor {
 ///
 /// Returns `(x, y, Option<PortSide>)`. The side is `None` for link center ports.
 /// When `distributor` is provided, property ports use distributed y placement.
+#[allow(clippy::too_many_arguments)]
 fn port_position(
     graph: &Graph,
     edge_id: EdgeId,
@@ -867,6 +868,7 @@ fn find_h_channel_between(h_channels: &[Channel], src_y: f64, tgt_y: f64) -> Opt
 }
 
 /// Route a single edge using corridor-based vertical channels.
+#[allow(clippy::too_many_arguments)]
 fn route_single_edge(
     edge_id: EdgeId,
     src_x: f64,
@@ -876,7 +878,7 @@ fn route_single_edge(
     tgt_y: f64,
     tgt_side: Option<PortSide>,
     h_channels: &mut [Channel],
-    corridors: &mut Vec<Corridor>,
+    corridors: &mut [Corridor],
     src_domain: Option<DomainId>,
     tgt_domain: Option<DomainId>,
 ) -> Vec<Segment> {
@@ -918,8 +920,10 @@ fn route_single_edge(
     }
 
     // Case 2a: Intra-column bracket — both same side, same x → H-V-H through corridor.
-    if src_side == tgt_side && src_side.is_some() && (src_x - tgt_x).abs() < 0.5 {
-        let side = src_side.unwrap();
+    if let Some(side) = src_side
+        && src_side == tgt_side
+        && (src_x - tgt_x).abs() < 0.5
+    {
         let v_x = find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y, src_domain);
         return collapse_zero_length(vec![
             Segment::Horizontal {
@@ -1386,7 +1390,7 @@ pub fn route_label_position(route: &Route) -> (f64, f64, &'static str) {
             // Determine which side to offset based on horizontal context.
             // If there's a preceding horizontal segment going right-to-left (x_end < x_start),
             // the label goes to the right of the channel; otherwise to the left.
-            let offset_right = route.segments.first().map_or(true, |first| {
+            let offset_right = route.segments.first().is_none_or(|first| {
                 match first {
                     Segment::Horizontal { x_start, x_end, .. } => x_end > x_start,
                     _ => true,

@@ -1,4 +1,4 @@
-/// Validation rules (DESIGN.md §7.2).
+//! Validation rules (DESIGN.md §7.2).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 

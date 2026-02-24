@@ -1,4 +1,4 @@
-/// Inline JavaScript for hover/click visibility toggling (DESIGN.md §5.4).
+//! Inline JavaScript for hover/click visibility toggling (DESIGN.md §5.4).
 
 /// Returns the complete inline JavaScript for an obgraph SVG.
 pub fn js() -> &'static str {

@@ -1,9 +1,9 @@
-/// Unvalidated AST types produced by the parser.
-///
-/// These types mirror the input syntax exactly. No semantic validation
-/// has been performed — references may be dangling, derivations may be
-/// duplicated, etc. The model layer consumes these and produces a
-/// validated `Graph`.
+//! Unvalidated AST types produced by the parser.
+//!
+//! These types mirror the input syntax exactly. No semantic validation
+//! has been performed — references may be dangling, derivations may be
+//! duplicated, etc. The model layer consumes these and produces a
+//! validated `Graph`.
 
 /// A complete parsed obgraph definition.
 #[derive(Debug, Clone)]

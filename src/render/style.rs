@@ -1,4 +1,4 @@
-/// Inline CSS for obgraph SVG elements (RENDERING.md §6.8).
+//! Inline CSS for obgraph SVG elements (RENDERING.md §6.8).
 
 /// Returns the complete inline CSS for an obgraph SVG.
 pub fn css() -> &'static str {

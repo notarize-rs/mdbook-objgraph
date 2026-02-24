@@ -1,10 +1,10 @@
-/// Eiglsperger implicit long edge segments (DESIGN.md §4.2.2).
-///
-/// After layer assignment, edges whose actual span exceeds the minimum span
-/// are "long edges".  Rather than inserting explicit dummy nodes (as in
-/// classical Sugiyama), we use implicit segment entries in each intermediate
-/// layer.  This module builds the per-layer item lists and identifies all
-/// long edges.
+//! Eiglsperger implicit long edge segments (DESIGN.md §4.2.2).
+//!
+//! After layer assignment, edges whose actual span exceeds the minimum span
+//! are "long edges".  Rather than inserting explicit dummy nodes (as in
+//! classical Sugiyama), we use implicit segment entries in each intermediate
+//! layer.  This module builds the per-layer item lists and identifies all
+//! long edges.
 
 use std::collections::HashMap;
 

@@ -1,4 +1,4 @@
-/// SVG element generation (DESIGN.md §6.2).
+//! SVG element generation (DESIGN.md §6.2).
 
 use std::fmt::Write;
 

@@ -1,4 +1,4 @@
-/// Weighted port-aware nested barycenter crossing minimization (DESIGN.md §4.2.3).
+//! Weighted port-aware nested barycenter crossing minimization (DESIGN.md §4.2.3).
 
 use std::collections::HashMap;
 

@@ -1,4 +1,4 @@
-/// Tokenizer for the obgraph DSL (DESIGN.md §3.2).
+//! Tokenizer for the obgraph DSL (DESIGN.md §3.2).
 
 /// Token types produced by the lexer.
 #[derive(Debug, Clone, PartialEq, Eq)]

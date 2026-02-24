@@ -1,10 +1,10 @@
-/// Network simplex layer assignment with typed layers (DESIGN.md §4.2.2).
-///
-/// Both nodes and derivations are treated as vertices in a unified graph.
-/// Nodes are assigned to even layers (0, 2, 4, ...); derivations are assigned
-/// to odd layers (1, 3, 5, ...).  The network simplex algorithm minimizes
-/// total weighted edge length subject to minimum-span constraints that encode
-/// the layer parity requirement.
+//! Network simplex layer assignment with typed layers (DESIGN.md §4.2.2).
+//!
+//! Both nodes and derivations are treated as vertices in a unified graph.
+//! Nodes are assigned to even layers (0, 2, 4, ...); derivations are assigned
+//! to odd layers (1, 3, 5, ...).  The network simplex algorithm minimizes
+//! total weighted edge length subject to minimum-span constraints that encode
+//! the layer parity requirement.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -851,10 +851,10 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
         }
         // Include intra-domain derivations.
         for (&did, &maybe_dom) in &deriv_domain {
-            if maybe_dom == Some(domain.id) {
-                if let Some(&l) = base.deriv_layers.get(&did) {
-                    layers.push(l);
-                }
+            if maybe_dom == Some(domain.id)
+                && let Some(&l) = base.deriv_layers.get(&did)
+            {
+                layers.push(l);
             }
         }
         layers.sort();
@@ -915,10 +915,9 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
     let sg = build_simplex_graph(graph);
     for edge in &sg.edges {
         if let (Some(src_me), Some(tgt_me)) = (vertex_meta(&edge.source), vertex_meta(&edge.target))
+            && src_me != tgt_me
         {
-            if src_me != tgt_me {
-                meta_order.insert((src_me, tgt_me));
-            }
+            meta_order.insert((src_me, tgt_me));
         }
     }
 
@@ -1000,7 +999,7 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
         if i > 0 {
             cursor += inter_domain_gap;
             // Ensure cursor is on even boundary for consistency.
-            if cursor % 2 != 0 {
+            if !cursor.is_multiple_of(2) {
                 cursor += 1;
             }
         }
@@ -1047,13 +1046,13 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
                 // Advance cursor past the domain's compacted range.
                 cursor = local_cursor;
                 // Advance cursor to next even layer after the domain.
-                if cursor % 2 != 0 {
+                if !cursor.is_multiple_of(2) {
                     cursor += 1;
                 }
             }
             MetaElement::FreeNode(nid) => {
                 // Free node on an even layer.
-                if cursor % 2 != 0 {
+                if !cursor.is_multiple_of(2) {
                     cursor += 1;
                 }
                 new_node_layers.insert(*nid, cursor);
@@ -1061,7 +1060,7 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
             }
             MetaElement::CrossDomainDeriv(did) => {
                 // Cross-domain derivation on an odd layer.
-                if cursor % 2 == 0 {
+                if cursor.is_multiple_of(2) {
                     cursor += 1;
                 }
                 new_deriv_layers.insert(*did, cursor);
