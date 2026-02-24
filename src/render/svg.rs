@@ -2,7 +2,10 @@
 
 use std::fmt::Write;
 
-use crate::layout::{LayoutResult, DOT_RADIUS, HEADER_HEIGHT, PILL_HEIGHT, ROW_HEIGHT};
+use crate::layout::{
+    LayoutResult, CONTENT_PAD, DOMAIN_TITLE_HEIGHT, DOT_RADIUS, HEADER_HEIGHT, PILL_HEIGHT,
+    ROW_HEIGHT,
+};
 use crate::model::state::StateResult;
 use crate::model::types::{Edge, EdgeId, Graph, NodeId};
 
@@ -105,12 +108,12 @@ fn write_domains(out: &mut String, layout: &LayoutResult) {
         )
         .unwrap();
 
-        // Label centered at the top of the domain box
+        // Label centered in the domain title area (DOMAIN_TITLE_HEIGHT / 2 from top)
         let label_x = domain.x + domain.width / 2.0;
-        let label_y = domain.y + 14.0;
+        let label_y = domain.y + DOMAIN_TITLE_HEIGHT / 2.0;
         writeln!(
             out,
-            r#"        <text class="obgraph-domain-label" x="{x}" y="{y}" text-anchor="middle">{name}</text>"#,
+            r#"        <text class="obgraph-domain-label" x="{x}" y="{y}" text-anchor="middle" dominant-baseline="central">{name}</text>"#,
             x = label_x,
             y = label_y,
             name = escape_xml(&domain.display_name)
@@ -416,12 +419,12 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         )
         .unwrap();
 
-        // Title text — centered in header area
-        let title_x = nl.x + nl.width / 2.0;
+        // Title text — left-aligned at CONTENT_PAD, vertically centered in header
+        let title_x = nl.x + CONTENT_PAD;
         let title_y = nl.y + HEADER_HEIGHT / 2.0;
         writeln!(
             out,
-            r#"        <text class="obgraph-node-title" x="{x}" y="{y}" text-anchor="middle" dominant-baseline="central" data-trust="{trust}">{label}</text>"#,
+            r#"        <text class="obgraph-node-title" x="{x}" y="{y}" dominant-baseline="central" data-trust="{trust}">{label}</text>"#,
             x = title_x,
             y = title_y,
             trust = node_trust_attr,
@@ -431,7 +434,7 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
 
         // Problem dot on header for unanchored nodes
         if !node_anchored {
-            let dot_x = nl.x + nl.width - 8.0;
+            let dot_x = nl.x + nl.width - CONTENT_PAD - DOT_RADIUS;
             let dot_y = nl.y + HEADER_HEIGHT / 2.0;
             writeln!(
                 out,
@@ -493,8 +496,8 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
             )
             .unwrap();
 
-            // Property name text — left-aligned with small indent
-            let text_x = nl.x + 4.0;
+            // Property name text — left-aligned at CONTENT_PAD from node left edge
+            let text_x = nl.x + CONTENT_PAD;
             let text_y = port_y;
             writeln!(
                 out,
@@ -507,7 +510,7 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
 
             // Problem dot for critical + unconstrained properties
             if prop.critical && !prop_constrained {
-                let dot_x = nl.x + nl.width - 8.0;
+                let dot_x = nl.x + nl.width - CONTENT_PAD - DOT_RADIUS;
                 let dot_y = port_y;
                 writeln!(
                     out,

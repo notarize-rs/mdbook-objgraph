@@ -37,7 +37,10 @@ pub const LAYER_V_SPACING: f64 = 48.0;
 pub const DERIV_V_SPACING: f64 = 24.0;
 /// Domain title area height (pad 12 + cap-height 8 + pad 12).
 pub const DOMAIN_TITLE_HEIGHT: f64 = 32.0;
-pub const DOMAIN_PADDING: f64 = 10.0;
+/// Extra domain padding beyond corridor space.
+/// Per the design spec, corridors (CORRIDOR_PAD * 2 per side) ARE the
+/// domain-to-node gap — no additional padding is specified.
+pub const DOMAIN_PADDING: f64 = 0.0;
 /// Padding from corridor edge to channel center.
 pub const CORRIDOR_PAD: f64 = 8.0;
 /// Padding between adjacent channels in a corridor.

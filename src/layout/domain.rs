@@ -46,8 +46,8 @@ pub fn compute_domain_bounds(graph: &Graph, node_layouts: &[NodeLayout]) -> Vec<
                 .map(|nl| nl.y + nl.height)
                 .fold(f64::NEG_INFINITY, f64::max);
 
-            // Left/right padding includes corridor space (CORRIDOR_PAD * 2 = 16px
-            // for a single-channel corridor) plus DOMAIN_PADDING.
+            // Left/right padding is the corridor space (CORRIDOR_PAD * 2 = 16px
+            // for a single-channel corridor) plus any extra DOMAIN_PADDING (0px).
             // Top: DOMAIN_TITLE_HEIGHT (32px) for title area (12+8+12).
             // Bottom: INTER_NODE_GAP (28px) matching inter-node spacing.
             let lr_pad = DOMAIN_PADDING + CORRIDOR_PAD * 2.0;

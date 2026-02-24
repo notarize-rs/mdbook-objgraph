@@ -1989,21 +1989,21 @@ mod tests {
         };
 
         // Node A in D0 zone, node B in D1 zone.
-        // Domain padding (lr_pad) = DOMAIN_PADDING + CORRIDOR_PAD*2 = 10 + 16 = 26px per side.
-        // D0: x=0, nodes at x=26, domain width = 80 + 2*26 = 132, right edge = 132
-        // Gap: 132..148 = 16px inter-domain corridor
-        // D1: x=148, nodes at x=174, domain width = 132, right edge = 280
+        // Domain padding (lr_pad) = DOMAIN_PADDING + CORRIDOR_PAD*2 = 0 + 16 = 16px per side.
+        // D0: x=0, nodes at x=16, domain width = 80 + 2*16 = 112, right edge = 112
+        // Gap: 112..128 = 16px inter-domain corridor
+        // D1: x=128, nodes at x=144, domain width = 112, right edge = 240
         let node_layouts = vec![
             NodeLayout {
                 id: NodeId(0),
-                x: 26.0, // inside D0 (domain x=0 + lr_pad=26)
+                x: 16.0, // inside D0 (domain x=0 + lr_pad=16)
                 y: 0.0,
                 width: 80.0,
                 height: 52.0,
             },
             NodeLayout {
                 id: NodeId(1),
-                x: 174.0, // inside D1 (domain x=148 + lr_pad=26)
+                x: 144.0, // inside D1 (domain x=128 + lr_pad=16)
                 y: 100.0,
                 width: 80.0,
                 height: 52.0,
@@ -2016,15 +2016,15 @@ mod tests {
                 display_name: "D0".into(),
                 x: 0.0,
                 y: -10.0,
-                width: 132.0, // 80 + 2*26
+                width: 112.0, // 80 + 2*16
                 height: 72.0,
             },
             DomainLayout {
                 id: DomainId(1),
                 display_name: "D1".into(),
-                x: 148.0, // gap: 132..148 = 16px inter-domain corridor
+                x: 128.0, // gap: 112..128 = 16px inter-domain corridor
                 y: 80.0,
-                width: 132.0,
+                width: 112.0,
                 height: 72.0,
             },
         ];
@@ -2059,12 +2059,12 @@ mod tests {
             "Route should have at least one vertical segment"
         );
 
-        // Inter-domain corridor: x_start=132, x_end=148, first channel at x_start + CORRIDOR_PAD = 140
-        let inter_domain_first_channel = 140.0;
-        // D0 right corridor center: 124
-        let d0_right_corridor = 124.0;
-        // D1 left corridor center: 156
-        let d1_left_corridor = 156.0;
+        // Inter-domain corridor: x_start=112, x_end=128, first channel at x_start + CORRIDOR_PAD = 120
+        let inter_domain_first_channel = 120.0;
+        // D0 right corridor center: 104 (node_right=96, domain_right=112, center=96+8)
+        let d0_right_corridor = 104.0;
+        // D1 left corridor center: 136 (domain_left=128, node_left=144, center=128+8)
+        let d1_left_corridor = 136.0;
 
         // All vertical segments should be in the inter-domain corridor,
         // not in domain-specific corridors.
