@@ -89,14 +89,14 @@ domain "AMD SEV-SNP" {
     measurement                      @critical
     host_data
     chip_id                          @critical
-    committed_tcb.bootloader         @critical
-    committed_tcb.tee                @critical
-    committed_tcb.snp                @critical
-    committed_tcb.microcode          @critical
-    current_tcb.bootloader           @critical
-    current_tcb.tee                  @critical
-    current_tcb.snp                  @critical
-    current_tcb.microcode            @critical
+    tcb.committed.bootloader         @critical
+    tcb.committed.tee                @critical
+    tcb.committed.snp                @critical
+    tcb.committed.microcode          @critical
+    tcb.current.bootloader           @critical
+    tcb.current.tee                  @critical
+    tcb.current.snp                  @critical
+    tcb.current.microcode            @critical
   }
 }
 
@@ -255,17 +255,28 @@ VCEK::not_after <= System::current_time : time_valid
 
 Report::chip_id <= VCEK::extensions.hw_id
 
-# current_tcb must be >= VCEK-certified TCB (firmware only goes up)
-Report::current_tcb.bootloader <= VCEK::extensions.tcb.bootloader : ge
-Report::current_tcb.tee <= VCEK::extensions.tcb.tee : ge
-Report::current_tcb.snp <= VCEK::extensions.tcb.snp : ge
-Report::current_tcb.microcode <= VCEK::extensions.tcb.microcode : ge
+# TCB layered constraints:
+#   VCEK extensions.tcb <= committed_tcb <= current_tcb
+# committed_tcb is the minimum the chip will boot; current_tcb is what's running.
+# VCEK can express older values (until committed), so each layer must be >=.
 
-# committed_tcb components must match known-good versions
-Report::committed_tcb.bootloader <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-Report::committed_tcb.tee <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-Report::committed_tcb.snp <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-Report::committed_tcb.microcode <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
+# committed_tcb >= VCEK-certified TCB
+Report::tcb.committed.bootloader <= VCEK::extensions.tcb.bootloader : ge
+Report::tcb.committed.tee <= VCEK::extensions.tcb.tee : ge
+Report::tcb.committed.snp <= VCEK::extensions.tcb.snp : ge
+Report::tcb.committed.microcode <= VCEK::extensions.tcb.microcode : ge
+
+# current_tcb >= committed_tcb
+Report::tcb.current.bootloader <= Report::tcb.committed.bootloader : ge
+Report::tcb.current.tee <= Report::tcb.committed.tee : ge
+Report::tcb.current.snp <= Report::tcb.committed.snp : ge
+Report::tcb.current.microcode <= Report::tcb.committed.microcode : ge
+
+# committed_tcb components must be >= known-good versions (post-CVE)
+Report::tcb.committed.bootloader <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
+Report::tcb.committed.tee <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
+Report::tcb.committed.snp <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
+Report::tcb.committed.microcode <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
 
 Report::guest_svn <= filter(KDS::tcb_versions, NVD::cve_entries) : in
 
