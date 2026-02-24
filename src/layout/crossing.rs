@@ -691,6 +691,38 @@ pub fn minimize_crossings(
                     )
                 }).unwrap_or_default();
 
+                // Collect same-node constraint edges: constraints where both
+                // source_prop and dest_prop belong to this node.  These are
+                // invisible to the adjacent-layer machinery but should still
+                // influence intra-node property ordering.
+                let same_node_edges: Vec<(PropId, PropId, u32)> = graph
+                    .edges
+                    .iter()
+                    .filter_map(|edge| match edge {
+                        Edge::Constraint {
+                            source_prop,
+                            dest_prop,
+                            ..
+                        } => {
+                            let src_node = graph.properties[source_prop.index()].node;
+                            let dst_node = graph.properties[dest_prop.index()].node;
+                            if src_node == node_id && dst_node == node_id {
+                                Some((*source_prop, *dest_prop, edge.weight()))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    })
+                    .collect();
+
+                // Build a quick index: prop_idx within current ordering
+                let prop_position: HashMap<PropId, usize> = props
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &pid)| (pid, i))
+                    .collect();
+
                 // For each property, determine if it connects above,
                 // below, or neither.  Compute a barycenter from the
                 // relevant adjacent layer.
@@ -749,11 +781,45 @@ pub fn minimize_crossings(
                         weighted_mean(&positions)
                     };
 
-                    let (direction, barycenter) = match (bc_above, bc_below) {
-                        (Some(a), None) => (0, a),
-                        (None, Some(b)) => (2, b),
-                        (Some(a), Some(b)) => (1, (a + b) / 2.0),
-                        (None, None) => {
+                    // Compute same-node constraint contribution.
+                    // For a constraint (source -> dest), source should be
+                    // above (lower index than) dest.  We use the midpoint
+                    // of the two endpoints' current positions as a grouping
+                    // barycenter, then offset source down and dest up by
+                    // 0.25 to break the tie in favor of source-before-dest.
+                    // This clusters related properties together AND
+                    // establishes the correct relative ordering.
+                    let bc_same_node = {
+                        let mut positions: Vec<(f64, u32)> = Vec::new();
+                        for &(src_prop, dst_prop, weight) in &same_node_edges {
+                            if let (Some(&src_pos), Some(&dst_pos)) = (
+                                prop_position.get(&src_prop),
+                                prop_position.get(&dst_prop),
+                            ) {
+                                let midpoint = (src_pos as f64 + dst_pos as f64) / 2.0;
+                                if prop_id == src_prop {
+                                    // Source: slightly below midpoint
+                                    positions.push((midpoint - 0.25, weight));
+                                } else if prop_id == dst_prop {
+                                    // Dest: slightly above midpoint
+                                    positions.push((midpoint + 0.25, weight));
+                                }
+                            }
+                        }
+                        weighted_mean(&positions)
+                    };
+
+                    let (direction, barycenter) = match (bc_above, bc_below, bc_same_node) {
+                        // Cross-layer edges present: blend with same-node
+                        (Some(a), None, Some(s)) => (0, (a + s) / 2.0),
+                        (Some(a), None, None) => (0, a),
+                        (None, Some(b), Some(s)) => (2, (b + s) / 2.0),
+                        (None, Some(b), None) => (2, b),
+                        (Some(a), Some(b), Some(s)) => (1, (a + b + s) / 3.0),
+                        (Some(a), Some(b), None) => (1, (a + b) / 2.0),
+                        // Only same-node edges: use same-node barycenter
+                        (None, None, Some(s)) => (1, s),
+                        (None, None, None) => {
                             // Unconnected — keep current relative position
                             (1, prop_idx as f64)
                         }
@@ -771,8 +837,83 @@ pub fn minimize_crossings(
                     })
                 });
 
-                let new_prop_order: Vec<PropId> =
+                let mut new_prop_order: Vec<PropId> =
                     infos.iter().map(|i| i.prop_id).collect();
+
+                // Post-sort: resolve remaining same-node constraint crossings
+                // using adjacent swaps (bubble-sort style).  The barycenter
+                // sort above handles grouping and source-before-dest ordering
+                // but may leave crossings when multiple constraints share the
+                // same midpoint.  This pass detects and eliminates them.
+                if !same_node_edges.is_empty() {
+                    let max_passes = new_prop_order.len();
+                    for _ in 0..max_passes {
+                        let mut swapped = false;
+                        for i in 0..new_prop_order.len().saturating_sub(1) {
+                            // Count crossings that would be eliminated vs
+                            // created by swapping positions i and i+1.
+                            let mut cost_current: i64 = 0;
+                            let mut cost_swapped: i64 = 0;
+
+                            // Build position map for the current ordering
+                            let pos: HashMap<PropId, usize> = new_prop_order
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, &pid)| (pid, idx))
+                                .collect();
+
+                            // For each pair of same-node
+                            // constraints, check if swapping i and i+1 reduces
+                            // the total number of crossings.
+                            for e1_idx in 0..same_node_edges.len() {
+                                for e2_idx in (e1_idx + 1)..same_node_edges.len() {
+                                    let (s1, d1, w1) = same_node_edges[e1_idx];
+                                    let (s2, d2, w2) = same_node_edges[e2_idx];
+
+                                    if let (
+                                        Some(&s1p), Some(&d1p),
+                                        Some(&s2p), Some(&d2p),
+                                    ) = (
+                                        pos.get(&s1), pos.get(&d1),
+                                        pos.get(&s2), pos.get(&d2),
+                                    ) {
+                                        // Current crossing?
+                                        let crosses_now =
+                                            (s1p < s2p) != (d1p < d2p)
+                                            && s1p != s2p && d1p != d2p;
+
+                                        // After swapping positions i and i+1:
+                                        let swap_pos = |p: usize| -> usize {
+                                            if p == i { i + 1 }
+                                            else if p == i + 1 { i }
+                                            else { p }
+                                        };
+                                        let s1ps = swap_pos(s1p);
+                                        let d1ps = swap_pos(d1p);
+                                        let s2ps = swap_pos(s2p);
+                                        let d2ps = swap_pos(d2p);
+                                        let crosses_after =
+                                            (s1ps < s2ps) != (d1ps < d2ps)
+                                            && s1ps != s2ps && d1ps != d2ps;
+
+                                        let w = (w1 + w2) as i64;
+                                        if crosses_now { cost_current += w; }
+                                        if crosses_after { cost_swapped += w; }
+                                    }
+                                }
+                            }
+
+                            if cost_swapped < cost_current {
+                                new_prop_order.swap(i, i + 1);
+                                swapped = true;
+                            }
+                        }
+                        if !swapped {
+                            break;
+                        }
+                    }
+                }
+
                 prop_order.set_order(node_id, new_prop_order);
             }
 
@@ -1563,5 +1704,257 @@ mod tests {
             }
             _ => panic!("Expected two nodes in layer 1"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: same-node constraint edges reorder properties
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_same_node_constraint_reorders_properties() {
+        // A single node with 4 properties, connected by same-node constraints.
+        // The constraints form a chain:
+        //   p2 -> p0  (source p2 should be above dest p0)
+        //   p3 -> p1  (source p3 should be above dest p1)
+        //
+        // Initial order: [p0, p1, p2, p3]
+        // Expected after: sources (p2, p3) should move above their targets,
+        // producing an ordering like [p2, p3, p0, p1] or [p3, p2, p1, p0]
+        // — the key invariant is that p2 appears before p0 and p3 before p1.
+        //
+        // We need at least 2 layers so the sweep runs, but the node only
+        // appears in one layer.  The second layer is a dummy.
+
+        let nodes = vec![
+            make_node(0, "Report", vec![0, 1, 2, 3]),
+            make_node(1, "Dummy", vec![]),
+        ];
+        let properties = vec![
+            make_prop(0, 0, "dest_a"),
+            make_prop(1, 0, "dest_b"),
+            make_prop(2, 0, "src_a"),
+            make_prop(3, 0, "src_b"),
+        ];
+        let edges = vec![
+            // Anchor to give us two layers
+            Edge::Anchor {
+                parent: NodeId(0),
+                child: NodeId(1),
+                operation: None,
+            },
+            // Same-node constraints: src_a(p2) -> dest_a(p0)
+            Edge::Constraint {
+                source_prop: PropId(2),
+                dest_prop: PropId(0),
+                operation: Some("ge".to_string()),
+            },
+            // Same-node constraints: src_b(p3) -> dest_b(p1)
+            Edge::Constraint {
+                source_prop: PropId(3),
+                dest_prop: PropId(1),
+                operation: Some("ge".to_string()),
+            },
+        ];
+        let graph = make_graph(nodes, properties, vec![], edges);
+
+        let mut layers = vec![
+            LayerEntry {
+                items: vec![LayerItem::Node(NodeId(0))],
+            },
+            LayerEntry {
+                items: vec![LayerItem::Node(NodeId(1))],
+            },
+        ];
+        let mut long_edges = vec![];
+
+        let prop_order = minimize_crossings(&mut layers, &mut long_edges, &graph);
+
+        let final_order = prop_order.props_of(NodeId(0));
+
+        // Source properties should appear before their corresponding targets
+        let pos_of = |pid: PropId| -> usize {
+            final_order.iter().position(|&p| p == pid).unwrap()
+        };
+
+        assert!(
+            pos_of(PropId(2)) < pos_of(PropId(0)),
+            "src_a (p2) should be before dest_a (p0), got order: {:?}",
+            final_order
+        );
+        assert!(
+            pos_of(PropId(3)) < pos_of(PropId(1)),
+            "src_b (p3) should be before dest_b (p1), got order: {:?}",
+            final_order
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: parallel same-node constraints minimize crossings
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_same_node_parallel_constraints_no_crossings() {
+        // A node with 4 properties and two parallel same-node constraints:
+        //   p0 -> p2  and  p1 -> p3
+        // These are "parallel" (non-crossing) when sources and targets
+        // maintain the same relative order.  Initial order [p0, p1, p2, p3]
+        // already has p0 before p2 and p1 before p3 — should be preserved
+        // or improved.
+        //
+        // Crossing would occur if the result had p0 after p2 or p1 after p3
+        // in positions that cause the constraint edges to visually cross.
+
+        let nodes = vec![
+            make_node(0, "Node", vec![0, 1, 2, 3]),
+            make_node(1, "Dummy", vec![]),
+        ];
+        let properties = vec![
+            make_prop(0, 0, "a"),
+            make_prop(1, 0, "b"),
+            make_prop(2, 0, "c"),
+            make_prop(3, 0, "d"),
+        ];
+        let edges = vec![
+            Edge::Anchor {
+                parent: NodeId(0),
+                child: NodeId(1),
+                operation: None,
+            },
+            Edge::Constraint {
+                source_prop: PropId(0),
+                dest_prop: PropId(2),
+                operation: None,
+            },
+            Edge::Constraint {
+                source_prop: PropId(1),
+                dest_prop: PropId(3),
+                operation: None,
+            },
+        ];
+        let graph = make_graph(nodes, properties, vec![], edges);
+
+        let mut layers = vec![
+            LayerEntry {
+                items: vec![LayerItem::Node(NodeId(0))],
+            },
+            LayerEntry {
+                items: vec![LayerItem::Node(NodeId(1))],
+            },
+        ];
+        let mut long_edges = vec![];
+
+        let prop_order = minimize_crossings(&mut layers, &mut long_edges, &graph);
+        let final_order = prop_order.props_of(NodeId(0));
+
+        let pos_of = |pid: PropId| -> usize {
+            final_order.iter().position(|&p| p == pid).unwrap()
+        };
+
+        // Sources should be before their targets
+        assert!(
+            pos_of(PropId(0)) < pos_of(PropId(2)),
+            "a (p0) should be before c (p2), got order: {:?}",
+            final_order
+        );
+        assert!(
+            pos_of(PropId(1)) < pos_of(PropId(3)),
+            "b (p1) should be before d (p3), got order: {:?}",
+            final_order
+        );
+
+        // Parallel constraints should not cross: the relative order of
+        // sources should match the relative order of targets.
+        // If p0 is before p1, then p2 should be before p3 (or vice versa).
+        let sources_order = pos_of(PropId(0)) < pos_of(PropId(1));
+        let targets_order = pos_of(PropId(2)) < pos_of(PropId(3));
+        assert_eq!(
+            sources_order, targets_order,
+            "Parallel same-node constraints should not cross: order {:?}",
+            final_order
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: crossing same-node constraints get uncrossed
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_same_node_crossing_constraints_uncrossed() {
+        // A node with 4 properties and two CROSSING same-node constraints:
+        //   p0 -> p3  and  p1 -> p2
+        // Initial order: [p0, p1, p2, p3]
+        //   - p0 (pos 0) -> p3 (pos 3): edge goes down
+        //   - p1 (pos 1) -> p2 (pos 2): edge goes down
+        //   These cross!
+        //
+        // After reordering, the algorithm should produce an order where
+        // these constraints do NOT cross (sources maintain same relative
+        // order as targets).
+
+        let nodes = vec![
+            make_node(0, "Node", vec![0, 1, 2, 3]),
+            make_node(1, "Dummy", vec![]),
+        ];
+        let properties = vec![
+            make_prop(0, 0, "a"),
+            make_prop(1, 0, "b"),
+            make_prop(2, 0, "c"),
+            make_prop(3, 0, "d"),
+        ];
+        let edges = vec![
+            Edge::Anchor {
+                parent: NodeId(0),
+                child: NodeId(1),
+                operation: None,
+            },
+            // Crossing constraints: p0 -> p3 and p1 -> p2
+            Edge::Constraint {
+                source_prop: PropId(0),
+                dest_prop: PropId(3),
+                operation: None,
+            },
+            Edge::Constraint {
+                source_prop: PropId(1),
+                dest_prop: PropId(2),
+                operation: None,
+            },
+        ];
+        let graph = make_graph(nodes, properties, vec![], edges);
+
+        let mut layers = vec![
+            LayerEntry {
+                items: vec![LayerItem::Node(NodeId(0))],
+            },
+            LayerEntry {
+                items: vec![LayerItem::Node(NodeId(1))],
+            },
+        ];
+        let mut long_edges = vec![];
+
+        let prop_order = minimize_crossings(&mut layers, &mut long_edges, &graph);
+        let final_order = prop_order.props_of(NodeId(0));
+
+        let pos_of = |pid: PropId| -> usize {
+            final_order.iter().position(|&p| p == pid).unwrap()
+        };
+
+        // The key invariant: sources should be before their targets
+        assert!(
+            pos_of(PropId(0)) < pos_of(PropId(3)),
+            "a (p0) should be before d (p3), got order: {:?}",
+            final_order
+        );
+        assert!(
+            pos_of(PropId(1)) < pos_of(PropId(2)),
+            "b (p1) should be before c (p2), got order: {:?}",
+            final_order
+        );
+
+        // The constraints should not cross each other:
+        // relative order of sources matches relative order of targets.
+        let sources_order = pos_of(PropId(0)) < pos_of(PropId(1));
+        let targets_order = pos_of(PropId(3)) < pos_of(PropId(2));
+        assert_eq!(
+            sources_order, targets_order,
+            "Same-node constraints should be uncrossed: order {:?}",
+            final_order
+        );
     }
 }
