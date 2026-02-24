@@ -25,7 +25,7 @@ domain "Verifier" {
 
 domain "AMD SEV-SNP" {
   # Self-signed ECDSA P-384 root CA (AMD VCEK Certificate Spec §3)
-  node ARK "AMD Root Key (TBS)" @anchored {
+  node ARK "AMD Root Key" @anchored {
     serial_number
     issuer                           @critical
     not_before                       @critical
@@ -39,7 +39,7 @@ domain "AMD SEV-SNP" {
   }
 
   # Intermediate CA signed by ARK
-  node ASK "AMD Signing Key (TBS)" {
+  node ASK "AMD Signing Key" {
     serial_number
     issuer                           @critical
     not_before                       @critical
@@ -53,7 +53,7 @@ domain "AMD SEV-SNP" {
   }
 
   # Leaf certificate with SEV-SNP custom OID extensions (1.3.6.1.4.1.3704.1.*)
-  node VCEK "VCEK (TBS)" {
+  node VCEK "VCEK" {
     serial_number
     issuer                           @critical
     not_before                       @critical
@@ -102,7 +102,7 @@ domain "NIST" {
 
 domain "TPM" {
   # TPM manufacturer root CA
-  node MfgCA "Manufacturer CA (TBS)" @anchored {
+  node MfgCA "Manufacturer CA" @anchored {
     serial_number
     issuer                           @critical
     not_before                       @critical
@@ -116,7 +116,7 @@ domain "TPM" {
   }
 
   # EK credential per TCG EK Credential Profile 2.0
-  node EK "Endorsement Key (TBS)" {
+  node EK "Endorsement Key" {
     serial_number
     issuer                           @critical
     not_before                       @critical
@@ -134,7 +134,7 @@ domain "TPM" {
   }
 
   # TPMS_ATTEST structure (TPM 2.0 Part 2: Structures)
-  node Quote "TPM Quote (TPMS_ATTEST)" {
+  node Quote "TPM Quote" {
     magic
     type
     qualified_signer                 @critical
@@ -162,7 +162,7 @@ domain "Guest vTPM" {
   }
 
   # vTPM endorsement key certificate
-  node vEK "vTPM EK (TBS)" {
+  node vEK "vTPM EK" {
     serial_number
     issuer                           @constrained
     subject                          @constrained
@@ -176,7 +176,7 @@ domain "Guest vTPM" {
   }
 
   # vTPM TPMS_ATTEST structure
-  node vQuote "vTPM Quote (TPMS_ATTEST)" {
+  node vQuote "vTPM Quote" {
     magic
     extra_data
     qualified_signer                 @critical

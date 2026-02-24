@@ -283,11 +283,11 @@ fn sev_snp_realistic_full_pipeline() {
     );
     let svg = result.unwrap();
     assert!(svg.contains("obgraph-container"), "Output should contain SVG container");
-    assert!(svg.contains("AMD Root Key (TBS)"), "Output should contain ARK label");
-    assert!(svg.contains("VCEK (TBS)"), "Output should contain VCEK label");
+    assert!(svg.contains("AMD Root Key"), "Output should contain ARK label");
+    assert!(svg.contains("VCEK"), "Output should contain VCEK label");
     assert!(svg.contains("Attestation Report"), "Output should contain Report label");
     assert!(
-        svg.contains("TPM Quote (TPMS_ATTEST)"),
+        svg.contains("TPM Quote"),
         "Output should contain Quote label"
     );
     assert!(
