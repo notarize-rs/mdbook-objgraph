@@ -796,7 +796,9 @@ pub fn separate_column_elements_vertically(
         col.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
     }
 
-    // Step 4: Walk top-to-bottom, placing elements with INTER_NODE_GAP between them.
+    // Step 4: Walk top-to-bottom, placing elements with INTER_NODE_GAP between
+    // them.  Every column starts at y = 0 so that no column has wasted vertical
+    // space above its first element.
     let gap = INTER_NODE_GAP;
 
     for col in &columns {
@@ -804,25 +806,11 @@ pub fn separate_column_elements_vertically(
             continue;
         }
 
-        // First element keeps its current top position.
-        let mut cursor = match col[0].0 {
-            ColumnElement::Domain(dl_idx) => {
-                let dl = &domain_layouts[dl_idx];
-                dl.y + dl.height
-            }
-            ColumnElement::FreeNode(nid) => {
-                let nl = &node_layouts[nid.index()];
-                nl.y + nl.height
-            }
-            ColumnElement::CrossDomainDeriv(did) => {
-                let dl = &deriv_layouts[did.index()];
-                dl.y + dl.height
-            }
-        };
+        let mut cursor: f64 = 0.0;
 
-        // Remaining elements: place each one at cursor + gap.
-        for &(elem, _) in col.iter().skip(1) {
-            let target_top = cursor + gap;
+        for (i, &(elem, _)) in col.iter().enumerate() {
+            // First element starts at y=0; subsequent elements start after a gap.
+            let target_top = if i == 0 { 0.0 } else { cursor + gap };
 
             match elem {
                 ColumnElement::Domain(dl_idx) => {
