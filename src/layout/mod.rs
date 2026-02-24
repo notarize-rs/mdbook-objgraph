@@ -565,7 +565,7 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     normalize_positions(&mut node_layouts, &mut deriv_layouts, &mut domain_layouts);
 
     // Phase 6a: Port side assignment
-    let port_sides = routing::assign_port_sides(graph, &node_layouts, &deriv_layouts);
+    let port_sides = routing::assign_port_sides(graph, &node_layouts, &deriv_layouts, &domain_layouts);
 
     // Phase 6b: Edge routing (corridor-based)
     let routes = routing::route_all_edges(

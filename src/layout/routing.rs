@@ -378,15 +378,97 @@ fn find_deriv_layout<'a>(
     deriv_layouts.iter().find(|dl| dl.id == deriv_id)
 }
 
+
+/// Determine if two nodes' domains are in the same column and which side is "outer".
+///
+/// Two domains are in the same column if their x-ranges overlap significantly.
+/// The "outer" side is the side away from the column gap (i.e., away from other columns).
+/// Returns `Some(PortSide)` if both nodes are in same-column different domains,
+/// `None` if they're in different columns or same domain.
+fn same_column_outer_side(
+    graph: &Graph,
+    src_node_id: NodeId,
+    tgt_node_id: NodeId,
+    domain_layouts: &[DomainLayout],
+) -> Option<PortSide> {
+    let src_domain = graph.nodes[src_node_id.index()].domain?;
+    let tgt_domain = graph.nodes[tgt_node_id.index()].domain?;
+
+    // Same domain = not cross-domain; handled elsewhere.
+    if src_domain == tgt_domain {
+        return None;
+    }
+
+    let src_dl = domain_layouts.iter().find(|dl| dl.id == src_domain)?;
+    let tgt_dl = domain_layouts.iter().find(|dl| dl.id == tgt_domain)?;
+
+    // Check if domains overlap in x (same column).
+    let src_left = src_dl.x;
+    let src_right = src_dl.x + src_dl.width;
+    let tgt_left = tgt_dl.x;
+    let tgt_right = tgt_dl.x + tgt_dl.width;
+
+    let overlap = src_right.min(tgt_right) - src_left.max(tgt_left);
+    let min_width = src_dl.width.min(tgt_dl.width);
+    if overlap < min_width * 0.5 {
+        // Not same column (less than 50% overlap).
+        return None;
+    }
+
+    // Same column — determine which side is "outer" (away from other columns).
+    // Find the leftmost and rightmost domain x extents across all domains to
+    // determine if this column is on the left or right of the layout.
+    let col_left = src_left.min(tgt_left);
+    let col_right = src_right.max(tgt_right);
+    let col_center = (col_left + col_right) / 2.0;
+
+    // Check if there are other domains to the left or right.
+    let has_left_neighbor = domain_layouts.iter().any(|dl| {
+        dl.id != src_domain && dl.id != tgt_domain
+            && dl.x + dl.width < col_center
+    });
+    let has_right_neighbor = domain_layouts.iter().any(|dl| {
+        dl.id != src_domain && dl.id != tgt_domain
+            && dl.x > col_center
+    });
+
+    // Route away from the inter-column gap.
+    let proposed_side = match (has_left_neighbor, has_right_neighbor) {
+        (true, false) => PortSide::Right,   // Gap is left, route right.
+        (false, true) => PortSide::Left,    // Gap is right, route left.
+        (true, true) => PortSide::Right,    // Both sides have neighbors; prefer right.
+        (false, false) => PortSide::Right,  // No neighbors; default to right.
+    };
+
+    // When the source domain extends beyond the target domain on the proposed
+    // outer side, the inter-domain corridor between them is positioned at the
+    // target domain's boundary — "behind" the source node's port. Bracket
+    // routing through that corridor is impossible, so fall back to normal
+    // cross-column routing through the inter-column gap corridor.
+    let src_overhangs = match proposed_side {
+        PortSide::Right => src_right > tgt_right + 1.0,
+        PortSide::Left => src_left < tgt_left - 1.0,
+    };
+    if src_overhangs {
+        return None;
+    }
+
+    Some(proposed_side)
+}
+
 /// Assign port sides for all edges based on relative node positions.
 ///
 /// Links use center top/bottom ports so they get no side assignment.
 /// Constraints and DerivInputs get left/right side assignments based on
 /// the relative horizontal positions of their endpoint nodes.
+///
+/// Cross-domain edges between nodes in the same column use bracket routing
+/// through the outer corridor to avoid crossing the inter-column gap.
 pub fn assign_port_sides(
     graph: &Graph,
     node_layouts: &[NodeLayout],
     _deriv_layouts: &[DerivLayout],
+    domain_layouts: &[DomainLayout],
 ) -> PortSideAssignment {
     let mut sides = PortSideAssignment::new();
     // Per-node counter so that all constraints touching a node (self-loops,
@@ -481,7 +563,12 @@ pub fn assign_port_sides(
             let src_cx = src_nl.x + src_nl.width / 2.0;
             let tgt_cx = tgt_nl.x + tgt_nl.width / 2.0;
 
-            if src_cx < tgt_cx {
+            // For same-column cross-domain edges, use bracket routing through
+            // the outer corridor instead of crossing through the inter-column gap.
+            if let Some(outer_side) = same_column_outer_side(graph, src_node_id, tgt_node_id, domain_layouts) {
+                sides.insert((edge_id, EndpointRole::Upstream), outer_side);
+                sides.insert((edge_id, EndpointRole::Downstream), outer_side);
+            } else if src_cx < tgt_cx {
                 sides.insert((edge_id, EndpointRole::Upstream), PortSide::Right);
                 sides.insert((edge_id, EndpointRole::Downstream), PortSide::Left);
             } else if src_cx > tgt_cx {
@@ -1010,6 +1097,14 @@ pub fn route_all_edges(
 ) -> Vec<Route> {
     let mut h_channels = build_h_channels(node_layouts, deriv_layouts);
     let mut corridors = build_corridors(domain_layouts);
+
+    // DEBUG: print corridors
+    for (i, c) in corridors.iter().enumerate() {
+        eprintln!("Corridor {}: x={:.1}..{:.1} center={:.1} domains={:?} ch_x={:?}",
+            i, c.x_start, c.x_end, c.center_x(), c.domain_ids,
+            c.channels.iter().map(|ch| format!("{:.1}", ch.x)).collect::<Vec<_>>());
+    }
+
     let mut distributor = PortDistributor::new(graph, port_sides);
 
     // Build a priority-sorted list of edge indices.
@@ -1473,7 +1568,7 @@ mod tests {
             },
         ];
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
+        let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts, &[]);
 
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
         let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides, &prop_order);
@@ -1515,7 +1610,7 @@ mod tests {
         let graph = test_graph();
         let node_layouts = test_node_layouts();
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
+        let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts, &[]);
 
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
         let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides, &prop_order);
@@ -1564,7 +1659,7 @@ mod tests {
             },
         ];
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
+        let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts, &[]);
 
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
         let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides, &prop_order);
@@ -1618,7 +1713,7 @@ mod tests {
         let node_layouts = test_node_layouts(); // A at x=0, B at x=120
 
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
+        let sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts, &[]);
 
         // Edge 0 is a Link: no side assignments.
         assert!(!sides.contains_key(&(EdgeId(0), EndpointRole::Upstream)));
@@ -1662,7 +1757,7 @@ mod tests {
             },
         ];
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
+        let sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts, &[]);
 
         // Same center x: first same-column edge gets Right (alternating).
         assert_eq!(
@@ -1733,7 +1828,7 @@ mod tests {
         }];
 
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
+        let sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts, &[]);
 
         // Self-loop: both Right (route through right corridor).
         assert_eq!(
@@ -2239,7 +2334,7 @@ mod tests {
         ];
 
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts);
+        let port_sides = assign_port_sides(&graph, &node_layouts, &deriv_layouts, &domain_layouts);
 
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
         let routes = route_all_edges(
