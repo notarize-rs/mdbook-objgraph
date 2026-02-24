@@ -190,14 +190,24 @@ pub struct DerivChain {
     pub deriv_id: DerivId,
     pub participants: Vec<NodeId>,
     pub full_paths: Vec<EdgePath>,
-    pub stub_paths: Vec<EdgePath>,
+    pub stub_paths: Vec<StubPath>,
+}
+
+/// A single stub segment with solid (near port) and dotted (fading) parts.
+#[derive(Debug, Clone)]
+pub struct StubPath {
+    pub edge_id: EdgeId,
+    /// SVG path for the solid half (closest to the destination port).
+    pub solid_svg: String,
+    /// SVG path for the dotted half (fading away from the destination).
+    pub dotted_svg: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct CrossDomainPaths {
     pub participants: Vec<NodeId>,
     pub full_path: EdgePath,
-    pub stub_paths: Vec<EdgePath>,
+    pub stub_paths: Vec<StubPath>,
 }
 
 // ---------------------------------------------------------------------------
@@ -494,13 +504,14 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
                 let is_cross_domain = is_cross_domain_constraint(graph, src_node, dst_node);
 
                 if is_cross_domain {
-                    // Generate stub routes (no label on stubs)
-                    let stub_route = routing::generate_stub(route);
-                    let stub_svg = routing::route_to_svg_path(&stub_route);
-                    let stub_path = EdgePath {
+                    // Generate destination-end stub with solid+dotted halves
+                    let stub_parts = routing::generate_stub(route);
+                    let solid_svg = routing::route_to_svg_path(&stub_parts.solid);
+                    let dotted_svg = routing::route_to_svg_path(&stub_parts.dotted);
+                    let stub_path = StubPath {
                         edge_id: route.edge_id,
-                        svg_path: stub_svg,
-                        label: None,
+                        solid_svg,
+                        dotted_svg,
                     };
 
                     cross_domain_constraints.push(CrossDomainPaths {

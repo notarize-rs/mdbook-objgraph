@@ -249,16 +249,37 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         } else {
             "arrow-constraint-invalid"
         };
-        for ep in &cross.stub_paths {
-            writeln!(
-                out,
-                r#"        <path class="obgraph-constraint-stub" d="{d}" data-edge="{id}" data-participants="{p}" marker-end="url(#{marker})"/>"#,
-                d = ep.svg_path,
-                id = ep.edge_id.0,
-                p = participants_str,
-                marker = marker,
-            )
-            .unwrap();
+        let stub_class = if valid {
+            "obgraph-constraint-stub"
+        } else {
+            "obgraph-constraint-stub obgraph-constraint-stub-invalid"
+        };
+        for sp in &cross.stub_paths {
+            // Dotted half (fading away from destination) — no arrowhead
+            if !sp.dotted_svg.is_empty() {
+                writeln!(
+                    out,
+                    r#"        <path class="{cls} obgraph-stub-dotted" d="{d}" data-edge="{id}" data-participants="{p}"/>"#,
+                    cls = stub_class,
+                    d = sp.dotted_svg,
+                    id = sp.edge_id.0,
+                    p = participants_str,
+                )
+                .unwrap();
+            }
+            // Solid half (closest to destination port) — carries arrowhead
+            if !sp.solid_svg.is_empty() {
+                writeln!(
+                    out,
+                    r#"        <path class="{cls} obgraph-stub-solid" d="{d}" data-edge="{id}" data-participants="{p}" marker-end="url(#{marker})"/>"#,
+                    cls = stub_class,
+                    d = sp.solid_svg,
+                    id = sp.edge_id.0,
+                    p = participants_str,
+                    marker = marker,
+                )
+                .unwrap();
+            }
         }
     }
     writeln!(out, r#"      </g>"#).unwrap();
@@ -305,15 +326,29 @@ fn write_deriv_chains(out: &mut String, layout: &LayoutResult) {
         }
 
         // Stub paths (shown by default, hidden on hover/select)
-        for ep in &chain.stub_paths {
-            writeln!(
-                out,
-                r#"        <path class="obgraph-constraint-stub" d="{d}" data-edge="{id}" data-participants="{p}"/>"#,
-                d = ep.svg_path,
-                id = ep.edge_id.0,
-                p = participants_str,
-            )
-            .unwrap();
+        for sp in &chain.stub_paths {
+            // Dotted half (fading away from destination)
+            if !sp.dotted_svg.is_empty() {
+                writeln!(
+                    out,
+                    r#"        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="{d}" data-edge="{id}" data-participants="{p}"/>"#,
+                    d = sp.dotted_svg,
+                    id = sp.edge_id.0,
+                    p = participants_str,
+                )
+                .unwrap();
+            }
+            // Solid half (closest to destination port)
+            if !sp.solid_svg.is_empty() {
+                writeln!(
+                    out,
+                    r#"        <path class="obgraph-constraint-stub obgraph-stub-solid" d="{d}" data-edge="{id}" data-participants="{p}"/>"#,
+                    d = sp.solid_svg,
+                    id = sp.edge_id.0,
+                    p = participants_str,
+                )
+                .unwrap();
+            }
         }
 
         writeln!(out, r#"      </g>"#).unwrap();
@@ -673,7 +708,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::layout::{CrossDomainPaths, DomainLayout, EdgePath, NodeLayout};
+    use crate::layout::{CrossDomainPaths, DomainLayout, EdgePath, NodeLayout, StubPath};
     use crate::model::state;
     #[allow(unused_imports)]
     use crate::model::types::{
@@ -988,10 +1023,10 @@ mod tests {
                 svg_path: "M 100,50 L 200,150".to_string(),
                 label: None,
             },
-            stub_paths: vec![EdgePath {
+            stub_paths: vec![StubPath {
                 edge_id: EdgeId(0),
-                svg_path: "M 100,50 L 120,50".to_string(),
-                label: None,
+                solid_svg: "M 110,50 L 120,50".to_string(),
+                dotted_svg: "M 100,50 L 110,50".to_string(),
             }],
         }];
 
@@ -1052,18 +1087,35 @@ mod tests {
             "cross-domain full path must not use inline display:none (use CSS class instead)"
         );
         assert!(
-            svg.contains(r#"class="obgraph-constraint-stub""#),
+            svg.contains("obgraph-constraint-stub"),
             "missing obgraph-constraint-stub class"
         );
+        // Stub must have both solid and dotted halves.
+        assert!(
+            svg.contains("obgraph-stub-solid"),
+            "missing obgraph-stub-solid class on stub"
+        );
+        assert!(
+            svg.contains("obgraph-stub-dotted"),
+            "missing obgraph-stub-dotted class on stub"
+        );
 
-        // Stub path must carry participants attribute.
+        // Stub paths must carry participants attribute.
         let stub_line = svg
             .lines()
-            .find(|l| l.contains(r#"class="obgraph-constraint-stub""#))
-            .expect("no stub line found");
+            .find(|l| l.contains("<path") && l.contains("obgraph-stub-solid"))
+            .expect("no stub-solid path element found");
         assert!(
             stub_line.contains("data-participants="),
-            "stub path must carry data-participants"
+            "stub solid path must carry data-participants"
+        );
+        let stub_dotted_line = svg
+            .lines()
+            .find(|l| l.contains("<path") && l.contains("obgraph-stub-dotted"))
+            .expect("no stub-dotted path element found");
+        assert!(
+            stub_dotted_line.contains("data-participants="),
+            "stub dotted path must carry data-participants"
         );
     }
 

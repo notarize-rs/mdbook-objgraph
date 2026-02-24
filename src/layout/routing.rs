@@ -1087,42 +1087,60 @@ pub fn route_to_svg_path(route: &Route) -> String {
     parts.join(" ")
 }
 
-/// Generate a stub route from the first STUB_LENGTH pixels of a full route.
+/// Result of stub generation: two sub-routes forming a solid-to-dotted fade.
 ///
-/// Walks along the route's segments consuming up to STUB_LENGTH total distance,
-/// truncating the last segment as needed.
-pub fn generate_stub(route: &Route) -> Route {
-    let mut remaining = STUB_LENGTH;
-    let mut stub_segments = Vec::new();
+/// The solid portion is the half closest to the destination port (visually
+/// anchored to the node). The dotted portion is the trailing half that fades
+/// away from the destination.
+#[derive(Debug, Clone)]
+pub struct StubParts {
+    /// The solid segment closest to the destination port.
+    pub solid: Route,
+    /// The dotted segment trailing away from the destination.
+    pub dotted: Route,
+}
 
-    for seg in &route.segments {
+/// Generate a destination-end stub from the last STUB_LENGTH pixels of a full
+/// route, split into solid (near destination) and dotted (fading away) halves.
+///
+/// Walks backwards along the route's segments from the destination end,
+/// consuming up to STUB_LENGTH total distance, then splits that stub in half.
+pub fn generate_stub(route: &Route) -> StubParts {
+    // --- Step 1: Extract the last STUB_LENGTH pixels from the route. ---
+    // Walk segments in reverse, accumulating up to STUB_LENGTH of distance.
+    let mut remaining = STUB_LENGTH;
+    let mut tail_segments: Vec<Segment> = Vec::new();
+
+    for seg in route.segments.iter().rev() {
         let len = seg.length();
 
         if len <= remaining + 0.001 {
             // Include the full segment.
-            stub_segments.push(seg.clone());
+            tail_segments.push(seg.clone());
             remaining -= len;
             if remaining < 0.001 {
                 break;
             }
         } else {
-            // Truncate this segment.
+            // Truncate this segment from the destination end: keep only the
+            // last `remaining` pixels.
             let fraction = remaining / len;
             match seg {
                 Segment::Horizontal { y, x_start, x_end } => {
-                    let new_x_end = x_start + (x_end - x_start) * fraction;
-                    stub_segments.push(Segment::Horizontal {
+                    // Keep the end portion: new_x_start is (1-fraction) of the way.
+                    let new_x_start = x_start + (x_end - x_start) * (1.0 - fraction);
+                    tail_segments.push(Segment::Horizontal {
                         y: *y,
-                        x_start: *x_start,
-                        x_end: new_x_end,
+                        x_start: new_x_start,
+                        x_end: *x_end,
                     });
                 }
                 Segment::Vertical { x, y_start, y_end } => {
-                    let new_y_end = y_start + (y_end - y_start) * fraction;
-                    stub_segments.push(Segment::Vertical {
+                    let new_y_start = y_start + (y_end - y_start) * (1.0 - fraction);
+                    tail_segments.push(Segment::Vertical {
                         x: *x,
-                        y_start: *y_start,
-                        y_end: new_y_end,
+                        y_start: new_y_start,
+                        y_end: *y_end,
                     });
                 }
             }
@@ -1130,9 +1148,94 @@ pub fn generate_stub(route: &Route) -> Route {
         }
     }
 
-    Route {
-        edge_id: route.edge_id,
-        segments: stub_segments,
+    // Reverse to restore source-to-destination order.
+    tail_segments.reverse();
+
+    // --- Step 2: Split the stub in half (dotted first, then solid). ---
+    let total_len: f64 = tail_segments.iter().map(|s| s.length()).sum();
+    let half = total_len / 2.0;
+
+    split_route_at(route.edge_id, &tail_segments, half)
+}
+
+/// Split a segment list at a given arc-length distance from the start.
+///
+/// Returns `StubParts` where `dotted` contains the first `at` pixels
+/// (the portion farthest from the destination) and `solid` contains
+/// the remainder (closest to the destination port).
+fn split_route_at(edge_id: EdgeId, segments: &[Segment], at: f64) -> StubParts {
+    let mut dotted_segs = Vec::new();
+    let mut solid_segs = Vec::new();
+    let mut consumed = 0.0;
+    let mut split_done = false;
+
+    for seg in segments {
+        if split_done {
+            solid_segs.push(seg.clone());
+            continue;
+        }
+
+        let len = seg.length();
+        if consumed + len <= at + 0.001 {
+            dotted_segs.push(seg.clone());
+            consumed += len;
+            if (consumed - at).abs() < 0.001 {
+                split_done = true;
+            }
+        } else {
+            // Split this segment.
+            let remaining_in_dotted = at - consumed;
+            let fraction = remaining_in_dotted / len;
+
+            match seg {
+                Segment::Horizontal { y, x_start, x_end } => {
+                    let mid_x = x_start + (x_end - x_start) * fraction;
+                    if fraction > 0.001 {
+                        dotted_segs.push(Segment::Horizontal {
+                            y: *y,
+                            x_start: *x_start,
+                            x_end: mid_x,
+                        });
+                    }
+                    if fraction < 0.999 {
+                        solid_segs.push(Segment::Horizontal {
+                            y: *y,
+                            x_start: mid_x,
+                            x_end: *x_end,
+                        });
+                    }
+                }
+                Segment::Vertical { x, y_start, y_end } => {
+                    let mid_y = y_start + (y_end - y_start) * fraction;
+                    if fraction > 0.001 {
+                        dotted_segs.push(Segment::Vertical {
+                            x: *x,
+                            y_start: *y_start,
+                            y_end: mid_y,
+                        });
+                    }
+                    if fraction < 0.999 {
+                        solid_segs.push(Segment::Vertical {
+                            x: *x,
+                            y_start: mid_y,
+                            y_end: *y_end,
+                        });
+                    }
+                }
+            }
+            split_done = true;
+        }
+    }
+
+    StubParts {
+        dotted: Route {
+            edge_id,
+            segments: dotted_segs,
+        },
+        solid: Route {
+            edge_id,
+            segments: solid_segs,
+        },
     }
 }
 
@@ -1655,7 +1758,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_stub_generation_truncates() {
+    fn test_stub_generation_from_destination_end() {
+        // Route: 100px vertical. Stub should be the last STUB_LENGTH pixels
+        // (from y=80 to y=100 with STUB_LENGTH=20), split into solid+dotted halves.
         let route = Route {
             edge_id: EdgeId(0),
             segments: vec![Segment::Vertical {
@@ -1667,15 +1772,41 @@ mod tests {
 
         let stub = generate_stub(&route);
 
-        assert_eq!(stub.segments.len(), 1);
-        match &stub.segments[0] {
+        // Dotted half: farther from destination (y=80 to y=90)
+        assert_eq!(stub.dotted.segments.len(), 1);
+        match &stub.dotted.segments[0] {
             Segment::Vertical { x, y_start, y_end } => {
                 assert!((x - 40.0).abs() < 0.01);
-                assert!((y_start - 0.0).abs() < 0.01);
                 assert!(
-                    (y_end - STUB_LENGTH).abs() < 0.01,
-                    "Stub should truncate to STUB_LENGTH={}, got {}",
-                    STUB_LENGTH,
+                    (y_start - (100.0 - STUB_LENGTH)).abs() < 0.01,
+                    "Dotted start should be at y={}, got {}",
+                    100.0 - STUB_LENGTH,
+                    y_start
+                );
+                assert!(
+                    (y_end - (100.0 - STUB_LENGTH / 2.0)).abs() < 0.01,
+                    "Dotted end should be at y={}, got {}",
+                    100.0 - STUB_LENGTH / 2.0,
+                    y_end
+                );
+            }
+            other => panic!("Expected Vertical, got {:?}", other),
+        }
+
+        // Solid half: closest to destination (y=90 to y=100)
+        assert_eq!(stub.solid.segments.len(), 1);
+        match &stub.solid.segments[0] {
+            Segment::Vertical { x, y_start, y_end } => {
+                assert!((x - 40.0).abs() < 0.01);
+                assert!(
+                    (y_start - (100.0 - STUB_LENGTH / 2.0)).abs() < 0.01,
+                    "Solid start should be at y={}, got {}",
+                    100.0 - STUB_LENGTH / 2.0,
+                    y_start
+                );
+                assert!(
+                    (y_end - 100.0).abs() < 0.01,
+                    "Solid end should be at destination y=100, got {}",
                     y_end
                 );
             }
@@ -1685,7 +1816,8 @@ mod tests {
 
     #[test]
     fn test_stub_generation_short_route() {
-        // A route shorter than STUB_LENGTH should be preserved entirely.
+        // A route shorter than STUB_LENGTH should be preserved entirely,
+        // split in half.
         let route = Route {
             edge_id: EdgeId(0),
             segments: vec![Segment::Vertical {
@@ -1697,9 +1829,21 @@ mod tests {
 
         let stub = generate_stub(&route);
 
-        assert_eq!(stub.segments.len(), 1);
-        match &stub.segments[0] {
-            Segment::Vertical { y_end, .. } => {
+        // Dotted half: y=0 to y=5
+        assert_eq!(stub.dotted.segments.len(), 1);
+        match &stub.dotted.segments[0] {
+            Segment::Vertical { y_start, y_end, .. } => {
+                assert!((y_start - 0.0).abs() < 0.01);
+                assert!((y_end - 5.0).abs() < 0.01);
+            }
+            other => panic!("Expected Vertical, got {:?}", other),
+        }
+
+        // Solid half: y=5 to y=10
+        assert_eq!(stub.solid.segments.len(), 1);
+        match &stub.solid.segments[0] {
+            Segment::Vertical { y_start, y_end, .. } => {
+                assert!((y_start - 5.0).abs() < 0.01);
                 assert!((y_end - 10.0).abs() < 0.01);
             }
             other => panic!("Expected Vertical, got {:?}", other),
@@ -1708,9 +1852,11 @@ mod tests {
 
     #[test]
     fn test_stub_generation_multi_segment() {
-        // Two segments: first is STUB_LENGTH/2 px, second is STUB_LENGTH*3 px.
-        // Stub should take all of the first and STUB_LENGTH/2 px of the second.
-        let seg1_len = STUB_LENGTH / 2.0;
+        // Route with two segments: short vertical then long horizontal.
+        // Stub extracts the last STUB_LENGTH pixels from the destination end
+        // and splits into solid + dotted halves.
+        let seg1_len = STUB_LENGTH / 2.0; // 10px vertical
+        let horiz_len = STUB_LENGTH * 3.0; // 60px horizontal
         let route = Route {
             edge_id: EdgeId(0),
             segments: vec![
@@ -1722,38 +1868,56 @@ mod tests {
                 Segment::Horizontal {
                     y: seg1_len,
                     x_start: 40.0,
-                    x_end: 40.0 + STUB_LENGTH * 3.0,
+                    x_end: 40.0 + horiz_len,
                 },
             ],
         };
 
         let stub = generate_stub(&route);
 
-        assert_eq!(stub.segments.len(), 2);
+        // The last STUB_LENGTH (20px) is entirely within the 60px horizontal
+        // segment. So the stub is a horizontal segment from x=(40+60-20)=80
+        // to x=(40+60)=100. Split at midpoint x=90.
+        let horiz_end = 40.0 + horiz_len;
+        let stub_start = horiz_end - STUB_LENGTH;
+        let stub_mid = horiz_end - STUB_LENGTH / 2.0;
 
-        // First segment: full seg1_len px vertical.
-        match &stub.segments[0] {
-            Segment::Vertical { y_start, y_end, .. } => {
-                assert!((y_start - 0.0).abs() < 0.01);
-                assert!((y_end - seg1_len).abs() < 0.01);
+        // Dotted half: x=80 to x=90
+        assert_eq!(stub.dotted.segments.len(), 1);
+        match &stub.dotted.segments[0] {
+            Segment::Horizontal { y, x_start, x_end } => {
+                assert!((y - seg1_len).abs() < 0.01);
+                assert!(
+                    (x_start - stub_start).abs() < 0.01,
+                    "Dotted x_start should be {}, got {}",
+                    stub_start,
+                    x_start
+                );
+                assert!(
+                    (x_end - stub_mid).abs() < 0.01,
+                    "Dotted x_end should be {}, got {}",
+                    stub_mid,
+                    x_end
+                );
             }
-            other => panic!("Expected Vertical, got {:?}", other),
+            other => panic!("Expected Horizontal, got {:?}", other),
         }
 
-        // Second segment: truncated horizontal, STUB_LENGTH/2 px out of STUB_LENGTH*3.
-        let expected_x_end = 40.0 + (STUB_LENGTH - seg1_len);
-        match &stub.segments[1] {
-            Segment::Horizontal {
-                y,
-                x_start,
-                x_end,
-            } => {
+        // Solid half: x=90 to x=100
+        assert_eq!(stub.solid.segments.len(), 1);
+        match &stub.solid.segments[0] {
+            Segment::Horizontal { y, x_start, x_end } => {
                 assert!((y - seg1_len).abs() < 0.01);
-                assert!((x_start - 40.0).abs() < 0.01);
                 assert!(
-                    (x_end - expected_x_end).abs() < 0.01,
-                    "Should go {}px into the long segment, got x_end={}",
-                    STUB_LENGTH - seg1_len,
+                    (x_start - stub_mid).abs() < 0.01,
+                    "Solid x_start should be {}, got {}",
+                    stub_mid,
+                    x_start
+                );
+                assert!(
+                    (x_end - horiz_end).abs() < 0.01,
+                    "Solid x_end should be at destination {}, got {}",
+                    horiz_end,
                     x_end
                 );
             }

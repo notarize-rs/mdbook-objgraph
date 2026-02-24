@@ -46,9 +46,12 @@ This means:
 | Derivation pill               | Visible        | Visible          | Visible            |
 | Intra-domain derivation edge  | Visible        | Visible          | Visible            |
 
-Cross-domain constraint stub arrows are short arrow segments leaving the port,
-truncated after a fixed length, pointing in the direction the full route would
-go. They indicate to the reader that additional edges exist without showing the
+Cross-domain constraint stubs are short arrow segments arriving at the
+destination port, extracted from the last STUB_LENGTH pixels of the full route.
+Each stub is split into two visual halves: a solid segment nearest the
+destination port and a dotted segment that fades away. This solid-to-dotted
+transition is visually distinct from the dashed styling used for invalid edges.
+Stubs indicate to the reader that additional edges exist without showing the
 full route.
 
 #### 5.2.1 Derivation Chain Visibility
@@ -240,8 +243,11 @@ first (behind later groups).
         </g>
       </g>
       <!-- Stubs (visible by default, hidden when full path is shown) -->
+      <!-- Each stub has two paths: dotted (fading) and solid (near destination port) -->
       <g class="obgraph-constraint-stubs">
-        <path class="obgraph-constraint-stub" d="M... L..."
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M... L..."
+              data-edge="{id}" data-participants="{node_id},{node_id}"/>
+        <path class="obgraph-constraint-stub obgraph-stub-solid" d="M... L..."
               data-edge="{id}" data-participants="{node_id},{node_id}"
               marker-end="url(#arrow-constraint-valid)"/>
       </g>
@@ -472,7 +478,9 @@ the rect boundary.
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `.obgraph-constraint-full`                | Cross-domain full path. `opacity: 0` by default; `transition: opacity 0.15s ease` for smooth animation. |
 | `.obgraph-constraint-full.obgraph-active` | Added by JS when a participating node is hovered or selected. Sets `opacity: 1`.                        |
-| `.obgraph-constraint-stub`                | Stub arrow. Visible by default; `transition: opacity 0.15s ease` for smooth animation.                  |
+| `.obgraph-constraint-stub`                | Base stub class. Visible by default; `transition: opacity 0.15s ease` for smooth animation.             |
+| `.obgraph-constraint-stub.obgraph-stub-solid`  | Solid half of stub (nearest destination port). No dash array. Carries arrowhead marker.            |
+| `.obgraph-constraint-stub.obgraph-stub-dotted` | Dotted half of stub (fading away). Uses `stroke-dasharray: 2 2`.                                  |
 | `.obgraph-constraint-stub.obgraph-hidden` | Added by JS when a participating node is hovered or selected. Sets `opacity: 0`.                        |
 | `.obgraph-deriv-chain`                    | Derivation chain group (all edges in a cross-domain derivation). Toggled atomically.                    |
 

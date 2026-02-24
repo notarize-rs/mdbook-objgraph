@@ -111,13 +111,28 @@ pub fn css() -> &'static str {
   pointer-events: auto;
 }
 
-/* Cross-domain constraint stub */
+/* Cross-domain constraint stub — base (no dash by default) */
 .obgraph-constraint-stub {
   fill: none;
   stroke: var(--obg-constraint-valid);
   stroke-width: 1px;
-  stroke-dasharray: 4 3;
   transition: opacity 0.15s ease;
+}
+
+/* Solid half of stub (closest to destination port) */
+.obgraph-constraint-stub.obgraph-stub-solid {
+  stroke-dasharray: none;
+}
+
+/* Dotted half of stub (fading away from destination) */
+.obgraph-constraint-stub.obgraph-stub-dotted {
+  stroke-dasharray: 2 2;
+}
+
+/* Invalid stubs — red dashed (same dash pattern as other invalid edges) */
+.obgraph-constraint-stub.obgraph-constraint-stub-invalid {
+  stroke: var(--obg-problem);
+  stroke-dasharray: 4 2;
 }
 
 .obgraph-constraint-stub.obgraph-hidden {

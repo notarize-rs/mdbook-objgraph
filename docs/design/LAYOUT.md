@@ -1103,16 +1103,24 @@ vertical-horizontal-vertical jog if the edge must navigate around obstacles.
 Visibility semantics for stubs: see [RENDERING.md](RENDERING.md).
 
 ```
-function generate_stub(route, direction) → Route:
-    // Take the first STUB_LENGTH pixels of the route from the source port
-    first_segment = route.segments[0]
-    stub_segment = truncate(first_segment, STUB_LENGTH)
-    return Route { segments: [stub_segment], arrowhead: true }
+function generate_stub(route) → StubParts:
+    // Extract the last STUB_LENGTH pixels from the destination end of the route
+    tail_segments = extract_tail(route.segments, STUB_LENGTH)
+    half = total_length(tail_segments) / 2
+    // Split into dotted (fading, farther from dest) and solid (near dest port)
+    (dotted, solid) = split_at(tail_segments, half)
+    return StubParts { solid, dotted }
 ```
 
-The full route and the stub route are both emitted as SVG paths. The full route
-has `display: none` by default; the stub has `display: block`. JavaScript
-toggles between them.
+The stub appears at the **destination** end of the edge, split into two SVG
+paths: a solid segment closest to the destination port and a dotted segment
+that fades away from it. This solid-to-dotted transition creates a visual
+"fading" effect that is distinct from the dashed styling used for invalid edges.
+The solid half carries the arrowhead marker.
+
+The full route and the stub parts are all emitted as SVG paths. The full route
+has `opacity: 0` by default; stubs are visible. JavaScript toggles between
+them.
 
 ##### Edge Bundling (Deferred)
 
@@ -1145,7 +1153,7 @@ bleeding past the arrowhead.
 | Derivation edge                | Solid / Dashed | 1px   | State-based (blue/red)  | Always visible     |
 | Intra-domain constraint        | Solid / Dashed | 1px   | State-based (blue/red)  | Always visible     |
 | Cross-domain constraint (full) | Solid / Dashed | 1px   | State-based (blue/red)  | Hidden             |
-| Cross-domain constraint (stub) | Solid / Dashed | 1px   | State-based (blue/red)  | Always visible     |
+| Cross-domain constraint (stub) | Solid→Dotted fade / Dashed (invalid) | 1px | State-based (blue/red) | Always visible |
 
 Derivation edges use the same valid/invalid visual language as constraints:
 blue solid when valid, red dashed when invalid. Valid edges are always solid;
@@ -1201,13 +1209,20 @@ struct DomainLayout {
     height: f64,
 }
 
+/// A single stub with solid (near destination) and dotted (fading) halves.
+struct StubPath {
+    edge_id: EdgeId,
+    solid_svg: String,            // SVG path for the solid half near destination
+    dotted_svg: String,           // SVG path for the dotted half fading away
+}
+
 /// A derivation chain groups the full derivation path (all input edges +
 /// output edge) for atomic visibility toggling.
 struct DerivChain {
     deriv_id: DerivId,
     participants: Vec<NodeId>,    // all nodes with properties in this chain
     full_paths: Vec<EdgePath>,    // all input edges + output edge
-    stub_paths: Vec<EdgePath>,    // stubs at source/target property ports
+    stub_paths: Vec<StubPath>,    // stubs at destination property ports
 }
 
 struct LayoutResult {
@@ -1223,7 +1238,7 @@ struct LayoutResult {
 struct CrossDomainPaths {
     participants: Vec<NodeId>,    // source + target node IDs
     full_path: EdgePath,
-    stub_paths: Vec<EdgePath>,    // one stub per endpoint
+    stub_paths: Vec<StubPath>,    // one stub per endpoint
 }
 ```
 
