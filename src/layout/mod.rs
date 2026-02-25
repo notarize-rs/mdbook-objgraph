@@ -534,7 +534,7 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     let (mut layers, mut long_edges) = long_edge::build_layers(&assignment, graph);
 
     // Phase 3b: Crossing minimization (also computes edge port ordering + port sides)
-    let (prop_order, edge_port_order, layer_port_sides) =
+    let (prop_order, _edge_port_order, _layer_port_sides) =
         crossing::minimize_crossings(&mut layers, &mut long_edges, graph);
 
     // Phase 4: Coordinate assignment (Brandes-Köpf)
@@ -572,15 +572,16 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // final node/domain positions.
     normalize_positions(&mut node_layouts, &mut deriv_layouts, &mut domain_layouts);
 
-    // Phase 6a: Refine port sides for cross-domain bracket routing.
-    // Layer-space port sides from Phase 3b are co-optimized with property ordering.
-    // This pass only overrides cross-domain bracket routing and DerivInput cases
-    // that require coordinate-space domain geometry.
+    // Phase 6a: Assign port sides from coordinate-space geometry.
+    // Layer-space port sides from Phase 3b feed the sweep's crossing detection
+    // but are not used here — coordinate-space positions are more accurate for
+    // physical routing decisions.
     let port_sides = routing::refine_port_sides(
-        graph, &node_layouts, &deriv_layouts, &domain_layouts, &layer_port_sides,
+        graph, &node_layouts, &deriv_layouts, &domain_layouts,
+        &PortSideAssignment::new(),
     );
 
-    // Phase 6b: Edge routing (corridor-based, with integrated port ordering)
+    // Phase 6b: Edge routing (corridor-based, with coordinate-space port ordering)
     let routes = routing::route_all_edges(
         graph,
         &node_layouts,
@@ -588,7 +589,6 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         &domain_layouts,
         &port_sides,
         &prop_order,
-        &edge_port_order,
     );
 
     // Classify edges into anchors, derivation edges, and constraints

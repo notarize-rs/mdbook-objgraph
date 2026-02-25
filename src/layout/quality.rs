@@ -959,11 +959,10 @@ fn find_channel_collisions(
         deriv_a.is_some() && deriv_a == deriv_b
     };
 
-    // Both edges use center-port routing at the shared node.
-    // Only Anchors use center top/bottom ports; DerivInputs now use
-    // side-based corridor routing so they are no longer exempt.
+    // Both edges use center-port routing (Anchors sharing a node, or
+    // DerivInputs converging to the same derivation target).
     let both_center_port = |a: EdgeId, b: EdgeId| -> bool {
-        let is_center = |e: &Edge| matches!(e, Edge::Anchor { .. });
+        let is_center = |e: &Edge| matches!(e, Edge::Anchor { .. } | Edge::DerivInput { .. });
         is_center(&graph.edges[a.index()]) && is_center(&graph.edges[b.index()])
     };
 
@@ -977,7 +976,7 @@ fn find_channel_collisions(
             }
             // Same x (within tolerance) and overlapping y-ranges.
             if (x_a - x_b).abs() < 0.5 && y_max_a > y_min_b + 0.5 && y_max_b > y_min_a + 0.5 {
-                // Exempt consecutive center-port edges that share a node.
+                // Exempt center-port edges that share a node or derivation.
                 if both_center_port(eid_a, eid_b) && shares_endpoint(eid_a, eid_b) {
                     continue;
                 }
