@@ -1566,32 +1566,38 @@ pub fn route_all_edges(
         // Determine the domain affinity for corridor selection.
         //
         // Intra-domain edges: both endpoints use the same domain's corridors.
-        // Cross-domain edges: always use (None, None) to select the inter-column
-        // gap corridor. Port side assignment already directs same-column
-        // cross-domain edges toward the gap corridor side.
+        // Cross-domain constraint edges: use (None, None) to select the
+        // inter-column gap corridor.
+        // DerivInput edges: use the source domain's corridors for both
+        // endpoints.  Derivation pills sit outside domains (in inter-domain
+        // space), so there is no natural "target domain".  Using the source
+        // domain's nearby corridor avoids sending the edge across the entire
+        // layout to a distant gap corridor, which would cross many constraint
+        // edges in the gap.
         let (src_domain, tgt_domain) = {
             let edge = &graph.edges[idx];
-            let (src_nid, tgt_nid) = match edge {
-                Edge::Anchor { parent, child, .. } => (Some(*parent), Some(*child)),
+            match edge {
+                Edge::Anchor { parent, child, .. } => {
+                    let sd = graph.nodes[parent.index()].domain;
+                    let td = graph.nodes[child.index()].domain;
+                    if sd == td { (sd, td) } else { (None, None) }
+                }
                 Edge::Constraint { source_prop, dest_prop, .. } => {
-                    (Some(prop_node(graph, *source_prop)), Some(prop_node(graph, *dest_prop)))
+                    let src_nid = prop_node(graph, *source_prop);
+                    let tgt_nid = prop_node(graph, *dest_prop);
+                    let sd = graph.nodes[src_nid.index()].domain;
+                    let td = graph.nodes[tgt_nid.index()].domain;
+                    if sd == td { (sd, td) } else { (None, None) }
                 }
-                Edge::DerivInput { source_prop, target_deriv } => {
-                    // Use the derivation output property's node as a proxy for the
-                    // derivation's domain context so corridor selection works.
-                    let deriv = &graph.derivations[target_deriv.index()];
-                    let out_node = graph.properties[deriv.output_prop.index()].node;
-                    (Some(prop_node(graph, *source_prop)), Some(out_node))
+                Edge::DerivInput { source_prop, .. } => {
+                    // Route through the source node's domain corridors.
+                    // The pill is outside all domains, so using the source
+                    // domain keeps the vertical channel close to the source
+                    // port and avoids crossing distant constraint edges.
+                    let src_nid = prop_node(graph, *source_prop);
+                    let sd = graph.nodes[src_nid.index()].domain;
+                    (sd, sd)
                 }
-            };
-            let sd = src_nid.and_then(|n| graph.nodes[n.index()].domain);
-            let td = tgt_nid.and_then(|n| graph.nodes[n.index()].domain);
-            if sd == td {
-                // Intra-domain: use own domain corridors.
-                (sd, td)
-            } else {
-                // Cross-domain: always use the inter-column gap corridor.
-                (None, None)
             }
         };
 
