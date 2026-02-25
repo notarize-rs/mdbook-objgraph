@@ -8,7 +8,8 @@ use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId};
 
 use super::{
     DerivLayout, DomainLayout, EdgeLabel, EdgePath, LayoutResult, NodeLayout, StubPath,
-    ARROWHEAD_SIZE, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT, NODE_H_SPACING,
+    ARROWHEAD_SIZE, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT, GLOBAL_MARGIN,
+    NODE_H_SPACING,
 };
 
 // ---------------------------------------------------------------------------
@@ -545,18 +546,37 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         find_connected_edge_occlusion(graph, &layout.nodes, &parsed);
 
     // ── Canvas overflow ────────────────────────────────────────────────
+    // All layout coordinates are in content space.  The SVG renderer applies
+    // a translate(margin_x, margin_y) to shift content into the canvas.  We
+    // must account for this offset when checking whether elements overflow
+    // the canvas bounds.
+    let margin_x = GLOBAL_MARGIN + layout.content_offset_x;
+    let margin_y = GLOBAL_MARGIN;
 
-    let nodes_outside_canvas = find_nodes_outside_canvas(&layout.nodes, total_width, total_height);
+    let nodes_outside_canvas =
+        find_nodes_outside_canvas(&layout.nodes, total_width, total_height, margin_x, margin_y);
     let domains_outside_canvas =
-        find_domains_outside_canvas(&layout.domains, total_width, total_height);
-    let derivs_outside_canvas =
-        find_derivs_outside_canvas(&layout.derivations, total_width, total_height);
-    let edges_outside_canvas = find_edges_outside_canvas(&parsed, total_width, total_height);
+        find_domains_outside_canvas(&layout.domains, total_width, total_height, margin_x, margin_y);
+    let derivs_outside_canvas = find_derivs_outside_canvas(
+        &layout.derivations,
+        total_width,
+        total_height,
+        margin_x,
+        margin_y,
+    );
+    let edges_outside_canvas =
+        find_edges_outside_canvas(&parsed, total_width, total_height, margin_x, margin_y);
     let labels_outside_canvas =
-        find_labels_outside_canvas(&all_labels, total_width, total_height);
-    let arrowheads_outside_canvas =
-        find_arrowheads_outside_canvas(&all_arrowheads, total_width, total_height);
-    let stubs_outside_canvas = find_stubs_outside_canvas(&all_stubs, total_width, total_height);
+        find_labels_outside_canvas(&all_labels, total_width, total_height, margin_x, margin_y);
+    let arrowheads_outside_canvas = find_arrowheads_outside_canvas(
+        &all_arrowheads,
+        total_width,
+        total_height,
+        margin_x,
+        margin_y,
+    );
+    let stubs_outside_canvas =
+        find_stubs_outside_canvas(&all_stubs, total_width, total_height, margin_x, margin_y);
 
     // ── Domain corridor correctness ──────────────────────────────────
 
@@ -2254,6 +2274,42 @@ fn aabb_overflow(aabb: &Aabb, canvas_w: f64, canvas_h: f64) -> f64 {
     overflow
 }
 
+/// Shift a content-space AABB to canvas-space by applying the SVG translate
+/// offset `(margin_x, margin_y)`, then compute the canvas overflow.
+fn content_aabb_overflow(
+    aabb: &Aabb,
+    canvas_w: f64,
+    canvas_h: f64,
+    margin_x: f64,
+    margin_y: f64,
+) -> f64 {
+    let canvas_aabb = Aabb {
+        x: aabb.x + margin_x,
+        y: aabb.y + margin_y,
+        w: aabb.w,
+        h: aabb.h,
+    };
+    aabb_overflow(&canvas_aabb, canvas_w, canvas_h)
+}
+
+/// Shift a content-space segment to canvas-space by applying the SVG translate
+/// offset `(margin_x, margin_y)`, then compute the canvas overflow.
+fn content_segment_overflow(
+    seg: &LineSeg,
+    canvas_w: f64,
+    canvas_h: f64,
+    margin_x: f64,
+    margin_y: f64,
+) -> f64 {
+    let shifted = LineSeg {
+        x1: seg.x1 + margin_x,
+        y1: seg.y1 + margin_y,
+        x2: seg.x2 + margin_x,
+        y2: seg.y2 + margin_y,
+    };
+    segment_overflow(&shifted, canvas_w, canvas_h)
+}
+
 /// Compute how many pixels of a segment extend beyond the canvas bounds.
 /// For axis-aligned segments, returns the length of the portion outside.
 fn segment_overflow(seg: &LineSeg, canvas_w: f64, canvas_h: f64) -> f64 {
@@ -2272,11 +2328,14 @@ fn find_nodes_outside_canvas(
     nodes: &[NodeLayout],
     canvas_w: f64,
     canvas_h: f64,
+    margin_x: f64,
+    margin_y: f64,
 ) -> Vec<(NodeId, f64)> {
     nodes
         .iter()
         .filter_map(|n| {
-            let overflow = aabb_overflow(&Aabb::from_node(n), canvas_w, canvas_h);
+            let overflow =
+                content_aabb_overflow(&Aabb::from_node(n), canvas_w, canvas_h, margin_x, margin_y);
             if overflow > 0.5 { Some((n.id, overflow)) } else { None }
         })
         .collect()
@@ -2286,6 +2345,8 @@ fn find_domains_outside_canvas(
     domains: &[DomainLayout],
     canvas_w: f64,
     canvas_h: f64,
+    margin_x: f64,
+    margin_y: f64,
 ) -> Vec<(DomainId, f64)> {
     domains
         .iter()
@@ -2296,7 +2357,8 @@ fn find_domains_outside_canvas(
                 w: d.width,
                 h: d.height,
             };
-            let overflow = aabb_overflow(&ab, canvas_w, canvas_h);
+            let overflow =
+                content_aabb_overflow(&ab, canvas_w, canvas_h, margin_x, margin_y);
             if overflow > 0.5 { Some((d.id, overflow)) } else { None }
         })
         .collect()
@@ -2306,6 +2368,8 @@ fn find_derivs_outside_canvas(
     derivs: &[DerivLayout],
     canvas_w: f64,
     canvas_h: f64,
+    margin_x: f64,
+    margin_y: f64,
 ) -> Vec<(DerivId, f64)> {
     derivs
         .iter()
@@ -2316,7 +2380,8 @@ fn find_derivs_outside_canvas(
                 w: d.width,
                 h: d.height,
             };
-            let overflow = aabb_overflow(&ab, canvas_w, canvas_h);
+            let overflow =
+                content_aabb_overflow(&ab, canvas_w, canvas_h, margin_x, margin_y);
             if overflow > 0.5 { Some((d.id, overflow)) } else { None }
         })
         .collect()
@@ -2326,11 +2391,16 @@ fn find_edges_outside_canvas(
     edges: &[(EdgeId, Vec<LineSeg>)],
     canvas_w: f64,
     canvas_h: f64,
+    margin_x: f64,
+    margin_y: f64,
 ) -> Vec<(EdgeId, f64)> {
     edges
         .iter()
         .filter_map(|(eid, segs)| {
-            let overflow: f64 = segs.iter().map(|s| segment_overflow(s, canvas_w, canvas_h)).sum();
+            let overflow: f64 = segs
+                .iter()
+                .map(|s| content_segment_overflow(s, canvas_w, canvas_h, margin_x, margin_y))
+                .sum();
             if overflow > 0.5 { Some((*eid, overflow)) } else { None }
         })
         .collect()
@@ -2340,11 +2410,19 @@ fn find_labels_outside_canvas(
     labels: &[(EdgeId, &EdgeLabel)],
     canvas_w: f64,
     canvas_h: f64,
+    margin_x: f64,
+    margin_y: f64,
 ) -> Vec<(EdgeId, f64)> {
     labels
         .iter()
         .filter_map(|&(eid, label)| {
-            let overflow = aabb_overflow(&Aabb::from_label(label), canvas_w, canvas_h);
+            let overflow = content_aabb_overflow(
+                &Aabb::from_label(label),
+                canvas_w,
+                canvas_h,
+                margin_x,
+                margin_y,
+            );
             if overflow > 0.5 { Some((eid, overflow)) } else { None }
         })
         .collect()
@@ -2354,11 +2432,14 @@ fn find_arrowheads_outside_canvas(
     arrowheads: &[(EdgeId, Aabb)],
     canvas_w: f64,
     canvas_h: f64,
+    margin_x: f64,
+    margin_y: f64,
 ) -> Vec<(EdgeId, f64)> {
     arrowheads
         .iter()
         .filter_map(|(eid, ab)| {
-            let overflow = aabb_overflow(ab, canvas_w, canvas_h);
+            let overflow =
+                content_aabb_overflow(ab, canvas_w, canvas_h, margin_x, margin_y);
             if overflow > 0.5 { Some((*eid, overflow)) } else { None }
         })
         .collect()
@@ -2368,11 +2449,16 @@ fn find_stubs_outside_canvas(
     stubs: &[(EdgeId, Vec<LineSeg>)],
     canvas_w: f64,
     canvas_h: f64,
+    margin_x: f64,
+    margin_y: f64,
 ) -> Vec<(EdgeId, f64)> {
     stubs
         .iter()
         .filter_map(|(eid, segs)| {
-            let overflow: f64 = segs.iter().map(|s| segment_overflow(s, canvas_w, canvas_h)).sum();
+            let overflow: f64 = segs
+                .iter()
+                .map(|s| content_segment_overflow(s, canvas_w, canvas_h, margin_x, margin_y))
+                .sum();
             if overflow > 0.5 { Some((*eid, overflow)) } else { None }
         })
         .collect()
