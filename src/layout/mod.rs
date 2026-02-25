@@ -782,7 +782,7 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // physical routing decisions.
     let port_sides = routing::refine_port_sides(
         graph, &node_layouts, &deriv_layouts, &domain_layouts,
-        &PortSideAssignment::new(),
+        &PortSideAssignment::new(), &prop_order,
     );
 
     // Phase 6a2: Expand intra-domain corridors where many bracket edges overlap.

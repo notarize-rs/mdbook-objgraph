@@ -1075,7 +1075,9 @@ pub fn minimize_crossings(
                                             ).unwrap_or(0);
                                             if r1 == r2 { continue; }
 
-                                            let w = (w1 + w2) as i64;
+                                            // 2x weight: inter-node consistency
+                                            // should dominate over same-node span.
+                                            let w = (w1 + w2) as i64 * 2;
                                             let crosses_now =
                                                 (l1 < l2) != (r1 < r2);
                                             let (l1s, l2s) = (swap_pos(l1), swap_pos(l2));
@@ -1084,6 +1086,38 @@ pub fn minimize_crossings(
                                             if crosses_now { cost_current += w; }
                                             if crosses_after { cost_swapped += w; }
                                         }
+                                    }
+                                }
+                            }
+
+                            // Edge-length proximity cost: pull properties toward
+                            // their cross-node endpoints.  Properties connecting
+                            // above should be near the top; below near the bottom.
+                            // Acts as a tiebreaker when crossing costs are equal.
+                            for edges in inter_node_edges_by_target.values() {
+                                for &(local_prop, remote_prop, w) in edges {
+                                    if let Some(&lp) = pos.get(&local_prop) {
+                                        // Only evaluate if involved in the swap.
+                                        if lp != i && lp != i + 1 { continue; }
+
+                                        let remote_node =
+                                            graph.properties[remote_prop.index()].node;
+                                        let remote_layer = layer_map
+                                            .get(&LayerElement::Node(remote_node))
+                                            .copied()
+                                            .unwrap_or(k as u32);
+                                        let target_pos = if remote_layer < k as u32 {
+                                            0.0 // Remote is above → pull toward top.
+                                        } else {
+                                            (props.len() - 1) as f64 // → pull toward bottom.
+                                        };
+
+                                        let dist_now = (lp as f64 - target_pos).abs();
+                                        let lp_s = swap_pos(lp);
+                                        let dist_swap = (lp_s as f64 - target_pos).abs();
+                                        // Fractional weight so this is a tiebreaker.
+                                        cost_current += (dist_now * 0.5 * w as f64) as i64;
+                                        cost_swapped += (dist_swap * 0.5 * w as f64) as i64;
                                     }
                                 }
                             }

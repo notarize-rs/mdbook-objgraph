@@ -127,6 +127,14 @@ pub struct QualityReport {
     pub edge_length_cv: f64,
     pub segment_complexity_distribution: [usize; 3],
     pub routing_direction_balance: f64,
+
+    // ── Constraint side consistency ───────────────────────────────────
+    /// Contiguous groups of same-node bracket pairs that use mixed port sides.
+    /// (node_id, group_size, left_count, right_count)
+    pub bracket_group_side_inconsistency: Vec<(NodeId, usize, usize, usize)>,
+    /// Constraint edge pairs between the same two nodes that use different port
+    /// sides. (src_node, dst_node, left_count, right_count)
+    pub node_pair_side_inconsistency: Vec<(NodeId, NodeId, usize, usize)>,
 }
 
 impl QualityReport {
@@ -321,6 +329,30 @@ impl QualityReport {
         lines.push(format!("    Edge length CV:          {:.3} (ideal: 0)", self.edge_length_cv));
         lines.push(format!("    Routing dir balance:     {:.3} (ideal: 1.0)", self.routing_direction_balance));
         lines.push(format!("    Column height imbalance: {:.0}px (ideal: 0)", self.column_height_imbalance));
+        if !self.bracket_group_side_inconsistency.is_empty() {
+            lines.push(format!(
+                "    Bracket group inconsistency: {} groups",
+                self.bracket_group_side_inconsistency.len()
+            ));
+            for &(nid, size, left, right) in &self.bracket_group_side_inconsistency {
+                lines.push(format!(
+                    "      Node {}: {} brackets, {}L/{}R",
+                    nid.0, size, left, right
+                ));
+            }
+        }
+        if !self.node_pair_side_inconsistency.is_empty() {
+            lines.push(format!(
+                "    Node-pair side inconsistency: {} pairs",
+                self.node_pair_side_inconsistency.len()
+            ));
+            for &(src, dst, left, right) in &self.node_pair_side_inconsistency {
+                lines.push(format!(
+                    "      {} <-> {}: {}L/{}R",
+                    src.0, dst.0, left, right
+                ));
+            }
+        }
 
         // ═══════════════════════════════════════════════════════════════
         // INFORMATIONAL — dimensions & complexity
@@ -585,6 +617,12 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
     let segment_complexity_distribution = compute_segment_complexity_distribution(&parsed);
     let routing_direction_balance = compute_routing_direction_balance(&parsed);
 
+    // ── Constraint side consistency ─────────────────────────────────
+    let bracket_group_side_inconsistency =
+        find_bracket_group_side_inconsistency(graph, &layout.property_order, &parsed);
+    let node_pair_side_inconsistency =
+        find_node_pair_side_inconsistency(graph, &parsed);
+
     QualityReport {
         node_overlaps,
         domain_overlaps,
@@ -655,6 +693,8 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         edge_length_cv,
         segment_complexity_distribution,
         routing_direction_balance,
+        bracket_group_side_inconsistency,
+        node_pair_side_inconsistency,
     }
 }
 
@@ -2727,6 +2767,170 @@ fn compute_routing_direction_balance(edges: &[(EdgeId, Vec<LineSeg>)]) -> f64 {
     } else {
         min / max
     }
+}
+
+// ---------------------------------------------------------------------------
+// Constraint side consistency metrics
+// ---------------------------------------------------------------------------
+
+/// Determine the port side of an edge from its first parsed segment.
+/// Returns Left if first segment goes leftward, Right if rightward, None if ambiguous.
+fn edge_port_side(segs: &[LineSeg]) -> Option<PortSide> {
+    let first = segs.first()?;
+    let dx = first.x2 - first.x1;
+    if dx.abs() < 0.5 {
+        // Vertical first segment — check second segment.
+        let second = segs.get(1)?;
+        let dx2 = second.x2 - second.x1;
+        if dx2 < -0.5 {
+            Some(PortSide::Left)
+        } else if dx2 > 0.5 {
+            Some(PortSide::Right)
+        } else {
+            None
+        }
+    } else if dx < 0.0 {
+        Some(PortSide::Left)
+    } else {
+        Some(PortSide::Right)
+    }
+}
+
+use super::crossing::PropertyOrder;
+use super::PortSide;
+
+/// Find contiguous groups of same-node bracket pairs that use mixed port sides.
+fn find_bracket_group_side_inconsistency(
+    graph: &Graph,
+    prop_order: &PropertyOrder,
+    parsed: &[(EdgeId, Vec<LineSeg>)],
+) -> Vec<(NodeId, usize, usize, usize)> {
+    use std::collections::HashMap;
+
+    // Build a lookup from EdgeId to parsed segments.
+    let edge_segs: HashMap<EdgeId, &[LineSeg]> = parsed
+        .iter()
+        .map(|(eid, segs)| (*eid, segs.as_slice()))
+        .collect();
+
+    // Collect same-node constraints per node with their bracket span in property order.
+    let mut per_node: HashMap<NodeId, Vec<(EdgeId, usize, usize)>> = HashMap::new();
+    for (idx, edge) in graph.edges.iter().enumerate() {
+        if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+            let src_node = graph.properties[source_prop.index()].node;
+            let dst_node = graph.properties[dest_prop.index()].node;
+            if src_node == dst_node {
+                let si = prop_order.prop_index(src_node, *source_prop).unwrap_or(0);
+                let di = prop_order.prop_index(src_node, *dest_prop).unwrap_or(0);
+                let (lo, hi) = if si < di { (si, di) } else { (di, si) };
+                per_node
+                    .entry(src_node)
+                    .or_default()
+                    .push((EdgeId(idx as u32), lo, hi));
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    for (node_id, mut brackets) in per_node {
+        if brackets.len() < 2 {
+            continue;
+        }
+        // Sort by start position in property order.
+        brackets.sort_by_key(|&(_, lo, _)| lo);
+
+        // Group into contiguous ladders: brackets B1 and B2 are adjacent if
+        // B2.lo <= B1.hi + 1 (at most 1 gap between bracket end and next start).
+        let mut groups: Vec<Vec<EdgeId>> = Vec::new();
+        let mut current_group = vec![brackets[0].0];
+        let mut current_end = brackets[0].2;
+        for &(eid, lo, hi) in &brackets[1..] {
+            if lo <= current_end + 1 {
+                current_group.push(eid);
+                current_end = current_end.max(hi);
+            } else {
+                groups.push(std::mem::take(&mut current_group));
+                current_group.push(eid);
+                current_end = hi;
+            }
+        }
+        groups.push(current_group);
+
+        // For each group of size >= 2, count L vs R from parsed edge direction.
+        for group in &groups {
+            if group.len() < 2 {
+                continue;
+            }
+            let mut left = 0usize;
+            let mut right = 0usize;
+            for eid in group {
+                if let Some(segs) = edge_segs.get(eid) {
+                    match edge_port_side(segs) {
+                        Some(PortSide::Left) => left += 1,
+                        Some(PortSide::Right) => right += 1,
+                        None => {}
+                    }
+                }
+            }
+            if left > 0 && right > 0 {
+                result.push((node_id, group.len(), left, right));
+            }
+        }
+    }
+    result
+}
+
+/// Find constraint edge pairs between the same two nodes that use different port sides.
+fn find_node_pair_side_inconsistency(
+    graph: &Graph,
+    parsed: &[(EdgeId, Vec<LineSeg>)],
+) -> Vec<(NodeId, NodeId, usize, usize)> {
+    use std::collections::HashMap;
+
+    let edge_segs: HashMap<EdgeId, &[LineSeg]> = parsed
+        .iter()
+        .map(|(eid, segs)| (*eid, segs.as_slice()))
+        .collect();
+
+    // Group cross-node constraints by (src_node, dst_node) pair.
+    let mut per_pair: HashMap<(NodeId, NodeId), Vec<EdgeId>> = HashMap::new();
+    for (idx, edge) in graph.edges.iter().enumerate() {
+        if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+            let src_node = graph.properties[source_prop.index()].node;
+            let dst_node = graph.properties[dest_prop.index()].node;
+            if src_node != dst_node {
+                // Normalize pair ordering so (A, B) == (B, A).
+                let key = if src_node.0 <= dst_node.0 {
+                    (src_node, dst_node)
+                } else {
+                    (dst_node, src_node)
+                };
+                per_pair.entry(key).or_default().push(EdgeId(idx as u32));
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    for ((src, dst), edges) in &per_pair {
+        if edges.len() < 2 {
+            continue;
+        }
+        let mut left = 0usize;
+        let mut right = 0usize;
+        for eid in edges {
+            if let Some(segs) = edge_segs.get(eid) {
+                match edge_port_side(segs) {
+                    Some(PortSide::Left) => left += 1,
+                    Some(PortSide::Right) => right += 1,
+                    None => {}
+                }
+            }
+        }
+        if left > 0 && right > 0 {
+            result.push((*src, *dst, left, right));
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------

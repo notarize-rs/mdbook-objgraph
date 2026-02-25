@@ -545,31 +545,69 @@ fn same_column_outer_side(
     Some(proposed_side)
 }
 
+/// Determine the port side for a cross-node constraint based on coordinate-space
+/// geometry. Encapsulates the cascade: same_column_outer_side → center-x
+/// comparison → intra_domain_corridor_side fallback.
+fn determine_constraint_side(
+    graph: &Graph,
+    src_node: NodeId,
+    dst_node: NodeId,
+    node_layouts: &[NodeLayout],
+    domain_layouts: &[DomainLayout],
+) -> PortSide {
+    // Cross-domain same-column: bracket routing through outer corridor.
+    if let Some(outer_side) = same_column_outer_side(graph, src_node, dst_node, domain_layouts) {
+        return outer_side;
+    }
+
+    // Use coordinate-space horizontal positions.
+    let src_nl = find_node_layout(node_layouts, src_node);
+    let tgt_nl = find_node_layout(node_layouts, dst_node);
+    match (src_nl, tgt_nl) {
+        (Some(src_nl), Some(tgt_nl)) => {
+            let src_cx = src_nl.x + src_nl.width / 2.0;
+            let tgt_cx = tgt_nl.x + tgt_nl.width / 2.0;
+            if src_cx < tgt_cx {
+                PortSide::Right
+            } else if src_cx > tgt_cx {
+                PortSide::Left
+            } else {
+                // Same center x: use domain geometry.
+                intra_domain_corridor_side(graph, src_node, domain_layouts)
+            }
+        }
+        _ => PortSide::Right,
+    }
+}
+
 /// Refine port side assignments from layer-space using coordinate-space geometry.
 ///
 /// Takes the layer-space `PortSideAssignment` produced by crossing minimization
 /// and overrides entries that require coordinate-space information:
+///   - Same-node constraints: grouped into contiguous bracket ladders,
+///     each group routed to the opposite side from cross-node constraints.
 ///   - Cross-domain same-column edges: use bracket routing through the outer corridor.
 ///   - DerivInput edges: use coordinate-space horizontal positions.
 ///
-/// All other assignments (same-node constraints, same-layer different-position
-/// constraints) are preserved from the layer-space computation, which was
-/// co-optimized with property ordering during the sweep.
+/// All other assignments (same-layer different-position constraints) are
+/// preserved from the layer-space computation, which was co-optimized with
+/// property ordering during the sweep.
 pub fn refine_port_sides(
     graph: &Graph,
     node_layouts: &[NodeLayout],
     deriv_layouts: &[DerivLayout],
     domain_layouts: &[DomainLayout],
     layer_sides: &PortSideAssignment,
+    prop_order: &super::crossing::PropertyOrder,
 ) -> PortSideAssignment {
+    use std::collections::HashMap;
+
     let mut sides = layer_sides.clone();
-    let mut node_side_counter: std::collections::HashMap<NodeId, usize> =
-        std::collections::HashMap::new();
 
     // Pre-compute same-column bracket edge counts per (source_node, outer_side)
     // so we can split overloaded corridors across both sides.
-    let mut bracket_counts: std::collections::HashMap<(NodeId, PortSide), Vec<(EdgeId, NodeId)>> =
-        std::collections::HashMap::new();
+    let mut bracket_counts: HashMap<(NodeId, PortSide), Vec<(EdgeId, NodeId)>> =
+        HashMap::new();
     for (idx, edge) in graph.edges.iter().enumerate() {
         if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
             let src_node = prop_node(graph, *source_prop);
@@ -593,16 +631,14 @@ pub fn refine_port_sides(
     let mut bracket_flip: std::collections::HashSet<EdgeId> = std::collections::HashSet::new();
     for ((_src_node, _outer_side), edges) in &bracket_counts {
         if edges.len() <= 2 {
-            continue; // Not overloaded — keep all on the outer side.
+            continue;
         }
-        // Collect unique destination nodes in order of first appearance.
         let mut seen_dst: Vec<NodeId> = Vec::new();
         for &(_, dst) in edges {
             if !seen_dst.contains(&dst) {
                 seen_dst.push(dst);
             }
         }
-        // Flip every other destination node's edges to the inner (opposite) corridor.
         for (i, dst_node) in seen_dst.iter().enumerate() {
             if i % 2 == 1 {
                 for &(eid, dst) in edges {
@@ -614,6 +650,104 @@ pub fn refine_port_sides(
         }
     }
 
+    // ── Pre-compute cross-node dominant side per node ────────────────
+    // For each node, determine which side cross-node constraints predominantly
+    // use. Same-node constraints should route on the opposite side to avoid
+    // mixing corridors.
+    let cross_node_dominant: HashMap<NodeId, PortSide> = {
+        let mut counts: HashMap<NodeId, (usize, usize)> = HashMap::new(); // (left, right)
+        for edge in &graph.edges {
+            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                let src = prop_node(graph, *source_prop);
+                let dst = prop_node(graph, *dest_prop);
+                if src != dst {
+                    let side = determine_constraint_side(
+                        graph, src, dst, node_layouts, domain_layouts,
+                    );
+                    let e = counts.entry(src).or_default();
+                    match side {
+                        PortSide::Left => e.0 += 1,
+                        PortSide::Right => e.1 += 1,
+                    }
+                    // For the destination node, the edge arrives from the opposite
+                    // direction.
+                    let e2 = counts.entry(dst).or_default();
+                    match side {
+                        PortSide::Left => e2.0 += 1,
+                        PortSide::Right => e2.1 += 1,
+                    }
+                }
+            }
+        }
+        counts
+            .into_iter()
+            .map(|(nid, (l, r))| {
+                (nid, if l >= r { PortSide::Left } else { PortSide::Right })
+            })
+            .collect()
+    };
+
+    // ── Pre-compute same-node group sides ────────────────────────────
+    // Group same-node constraints into contiguous bracket ladders using
+    // property order. Each group gets a consistent side based on data
+    // (opposite of cross-node dominant side).
+    let same_node_group_sides: HashMap<EdgeId, PortSide> = {
+        let mut per_node: HashMap<NodeId, Vec<(EdgeId, usize, usize)>> = HashMap::new();
+        for (idx, edge) in graph.edges.iter().enumerate() {
+            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                let src_node = prop_node(graph, *source_prop);
+                let dst_node = prop_node(graph, *dest_prop);
+                if src_node == dst_node {
+                    let si = prop_order.prop_index(src_node, *source_prop).unwrap_or(0);
+                    let di = prop_order.prop_index(src_node, *dest_prop).unwrap_or(0);
+                    let (lo, hi) = if si < di { (si, di) } else { (di, si) };
+                    per_node
+                        .entry(src_node)
+                        .or_default()
+                        .push((EdgeId(idx as u32), lo, hi));
+                }
+            }
+        }
+
+        let mut result = HashMap::new();
+        for (node_id, mut brackets) in per_node {
+            brackets.sort_by_key(|&(_, lo, _)| lo);
+
+            // Group into contiguous ladders.
+            let mut groups: Vec<Vec<EdgeId>> = Vec::new();
+            let mut current_group = vec![brackets[0].0];
+            let mut current_end = brackets[0].2;
+            for &(eid, lo, hi) in &brackets[1..] {
+                if lo <= current_end + 1 {
+                    current_group.push(eid);
+                    current_end = current_end.max(hi);
+                } else {
+                    groups.push(std::mem::take(&mut current_group));
+                    current_group.push(eid);
+                    current_end = hi;
+                }
+            }
+            groups.push(current_group);
+
+            // Choose side per group: opposite of cross-node dominant side.
+            // When no cross-node constraints exist, use intra-domain corridor side.
+            let cross_side = cross_node_dominant.get(&node_id).copied();
+            for group in &groups {
+                let side = match cross_side {
+                    Some(s) => match s {
+                        PortSide::Left => PortSide::Right,
+                        PortSide::Right => PortSide::Left,
+                    },
+                    None => intra_domain_corridor_side(graph, node_id, domain_layouts),
+                };
+                for &eid in group {
+                    result.insert(eid, side);
+                }
+            }
+        }
+        result
+    };
+
     for (idx, edge) in graph.edges.iter().enumerate() {
         let edge_id = EdgeId(idx as u32);
 
@@ -623,17 +757,12 @@ pub fn refine_port_sides(
                 let src_node = prop_node(graph, *source_prop);
                 let dst_node = prop_node(graph, *dest_prop);
 
-                // Same-node constraints: alternate Left/Right using per-node
-                // counter to spread edges across both corridors. Layer-space
-                // assigns all same-node to Right, which overloads one corridor.
+                // Same-node constraints: use pre-computed group-aware side.
                 if src_node == dst_node {
-                    let cnt = node_side_counter.entry(src_node).or_insert(0);
-                    let side = if (*cnt).is_multiple_of(2) {
-                        PortSide::Right
-                    } else {
-                        PortSide::Left
-                    };
-                    *cnt += 1;
+                    let side = same_node_group_sides
+                        .get(&edge_id)
+                        .copied()
+                        .unwrap_or(PortSide::Right);
                     sides.insert((edge_id, EndpointRole::Upstream), side);
                     sides.insert((edge_id, EndpointRole::Downstream), side);
                     continue;
@@ -645,7 +774,6 @@ pub fn refine_port_sides(
                     same_column_outer_side(graph, src_node, dst_node, domain_layouts)
                 {
                     let side = if bracket_flip.contains(&edge_id) {
-                        // Route through the opposite (inner/gap) corridor.
                         match outer_side {
                             PortSide::Left => PortSide::Right,
                             PortSide::Right => PortSide::Left,
@@ -679,31 +807,10 @@ pub fn refine_port_sides(
                     sides.insert((edge_id, EndpointRole::Upstream), PortSide::Left);
                     sides.insert((edge_id, EndpointRole::Downstream), PortSide::Right);
                 } else {
-                    // Same center x: pick a consistent side based on domain
-                    // geometry. For same-domain constraints, use the intra-domain
-                    // corridor side. For cross-domain, alternate to spread load.
-                    let same_domain = {
-                        let sd = graph.nodes[src_node.index()].domain;
-                        let td = graph.nodes[dst_node.index()].domain;
-                        sd.is_some() && sd == td
-                    };
-                    let side = if same_domain {
-                        // Same domain: all edges go through same corridor to
-                        // minimize crossings between parallel edges.
-                        intra_domain_corridor_side(graph, src_node, domain_layouts)
-                    } else {
-                        // Cross-domain: alternate to spread across corridors.
-                        let cnt = node_side_counter.entry(src_node).or_insert(0);
-                        let s = if (*cnt).is_multiple_of(2) {
-                            PortSide::Right
-                        } else {
-                            PortSide::Left
-                        };
-                        *cnt += 1;
-                        let cnt2 = node_side_counter.entry(dst_node).or_insert(0);
-                        *cnt2 += 1;
-                        s
-                    };
+                    // Same center x: data-driven side selection.
+                    // For same-domain, use intra-domain corridor side.
+                    // For cross-domain, also use domain geometry (no alternation).
+                    let side = intra_domain_corridor_side(graph, src_node, domain_layouts);
                     sides.insert((edge_id, EndpointRole::Upstream), side);
                     sides.insert((edge_id, EndpointRole::Downstream), side);
                 }
@@ -731,24 +838,15 @@ pub fn refine_port_sides(
                     sides.insert((edge_id, EndpointRole::Downstream), PortSide::Right);
                 } else {
                     // Same center x — determine side from the derivation output
-                    // domain's position. Input edges enter the pill from the side
-                    // opposite the output (i.e. the side facing the source domains).
+                    // domain's position.
                     let deriv = &graph.derivations[target_deriv.index()];
                     let out_node = graph.properties[deriv.output_prop.index()].node;
                     let out_nl = find_node_layout(node_layouts, out_node);
                     let side = if let Some(out_nl) = out_nl {
                         let out_cx = out_nl.x + out_nl.width / 2.0;
                         if out_cx < tgt_cx {
-                            // Output is to the left — inputs enter from the right
-                            // (pill faces left toward output, right toward inputs).
-                            // Source exits left to reach the corridor between columns,
-                            // enters pill from left (same corridor side).
                             PortSide::Left
-                        } else if out_cx > tgt_cx {
-                            // Output is to the right — inputs enter from the left.
-                            PortSide::Right
                         } else {
-                            // All aligned — default to right.
                             PortSide::Right
                         }
                     } else {
@@ -1957,9 +2055,8 @@ mod tests {
             },
         ];
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &PortSideAssignment::new());
-
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
+        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &PortSideAssignment::new(), &prop_order);
         let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides, &prop_order);
 
         // Find the link route (edge 0).
@@ -1999,9 +2096,8 @@ mod tests {
         let graph = test_graph();
         let node_layouts = test_node_layouts();
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &PortSideAssignment::new());
-
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
+        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &PortSideAssignment::new(), &prop_order);
         let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides, &prop_order);
 
         // Find the constraint route (edge 1).
@@ -2048,9 +2144,8 @@ mod tests {
             },
         ];
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &PortSideAssignment::new());
-
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
+        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &PortSideAssignment::new(), &prop_order);
         let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides, &prop_order);
 
         // Find the link route (edge 0).
@@ -2108,7 +2203,8 @@ mod tests {
         layer_sides.insert((EdgeId(1), EndpointRole::Downstream), PortSide::Left);
 
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &layer_sides);
+        let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
+        let sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &layer_sides, &prop_order);
 
         // Edge 0 is a Link: no side assignments.
         assert!(!sides.contains_key(&(EdgeId(0), EndpointRole::Upstream)));
@@ -2156,7 +2252,8 @@ mod tests {
         layer_sides.insert((EdgeId(1), EndpointRole::Downstream), PortSide::Right);
 
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &layer_sides);
+        let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
+        let sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &layer_sides, &prop_order);
 
         // Same center x: layer-space assigned Right; no cross-domain override.
         assert_eq!(
@@ -2232,7 +2329,8 @@ mod tests {
         layer_sides.insert((EdgeId(0), EndpointRole::Downstream), PortSide::Right);
 
         let deriv_layouts: Vec<DerivLayout> = vec![];
-        let sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &layer_sides);
+        let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
+        let sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &layer_sides, &prop_order);
 
         // Self-loop: both Right (from layer-space, preserved by refinement).
         assert_eq!(
@@ -2709,9 +2807,9 @@ mod tests {
         layer_sides.insert((EdgeId(0), EndpointRole::Upstream), PortSide::Right);
         layer_sides.insert((EdgeId(0), EndpointRole::Downstream), PortSide::Left);
 
-        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &domain_layouts, &layer_sides);
-
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
+        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &domain_layouts, &layer_sides, &prop_order);
+
         let routes = route_all_edges(
             &graph,
             &node_layouts,
