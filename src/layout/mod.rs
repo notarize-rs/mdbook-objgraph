@@ -616,6 +616,16 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         &PortSideAssignment::new(),
     );
 
+    // Phase 6a2: Expand intra-domain corridors where many bracket edges overlap.
+    // This must happen after port side assignment (6a) so we know which side
+    // each edge exits, and before routing (6b) so corridors are wide enough.
+    domain::expand_corridors_for_edges(
+        &mut node_layouts,
+        &mut domain_layouts,
+        graph,
+        &port_sides,
+    );
+
     // Phase 6b: Edge routing (corridor-based, with coordinate-space port ordering)
     let routes = routing::route_all_edges(
         graph,

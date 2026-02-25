@@ -181,7 +181,11 @@ impl Corridor {
 ///
 /// The outer and inter-column corridors have empty `domain_ids` and are used
 /// exclusively by cross-domain edges.
-fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
+fn build_corridors(
+    domain_layouts: &[DomainLayout],
+    node_layouts: &[NodeLayout],
+    graph: &Graph,
+) -> Vec<Corridor> {
     let mut corridors = Vec::new();
 
     // Sort domains by x for inter-domain corridor detection.
@@ -189,11 +193,34 @@ fn build_corridors(domain_layouts: &[DomainLayout]) -> Vec<Corridor> {
     sorted_domains.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
 
     for dl in &sorted_domains {
-        let corridor_width = CORRIDOR_PAD * 2.0;
+        // Compute corridor width from the actual distance between the domain
+        // edge and the nearest member node. This handles domains that were
+        // expanded by `expand_corridors_for_edges` to fit more bracket edges.
+        let members: Vec<&NodeLayout> = graph
+            .domains
+            .iter()
+            .find(|d| d.id == dl.id)
+            .into_iter()
+            .flat_map(|d| d.members.iter())
+            .map(|nid| &node_layouts[nid.index()])
+            .collect();
+
+        let (left_corridor_width, right_corridor_width) = if members.is_empty() {
+            (CORRIDOR_PAD * 2.0, CORRIDOR_PAD * 2.0)
+        } else {
+            let min_node_x = members.iter().map(|nl| nl.x).fold(f64::INFINITY, f64::min);
+            let max_node_right = members
+                .iter()
+                .map(|nl| nl.x + nl.width)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let left_w = (min_node_x - dl.x).max(CORRIDOR_PAD * 2.0);
+            let right_w = ((dl.x + dl.width) - max_node_right).max(CORRIDOR_PAD * 2.0);
+            (left_w, right_w)
+        };
 
         let left_x_start = dl.x;
-        let left_x_end = dl.x + corridor_width;
-        let right_x_start = dl.x + dl.width - corridor_width;
+        let left_x_end = dl.x + left_corridor_width;
+        let right_x_start = dl.x + dl.width - right_corridor_width;
         let right_x_end = dl.x + dl.width;
 
         // Merge with existing corridor at same x-range, or create new.
@@ -1281,7 +1308,7 @@ pub fn route_all_edges(
     prop_order: &super::crossing::PropertyOrder,
 ) -> Vec<Route> {
     let mut h_channels = build_h_channels(node_layouts, deriv_layouts);
-    let mut corridors = build_corridors(domain_layouts);
+    let mut corridors = build_corridors(domain_layouts, node_layouts, graph);
 
     let distributor = PortDistributor::new(
         graph, port_sides, node_layouts, deriv_layouts, prop_order,
@@ -2228,7 +2255,30 @@ mod tests {
             },
         ];
 
-        let corridors = build_corridors(&domain_layouts);
+        // Create a minimal graph with two empty domains (no member nodes).
+        let graph = Graph {
+            nodes: vec![],
+            properties: vec![],
+            derivations: vec![],
+            edges: vec![],
+            domains: vec![
+                crate::model::types::Domain {
+                    id: DomainId(0),
+                    display_name: "D0".into(),
+                    members: vec![],
+                },
+                crate::model::types::Domain {
+                    id: DomainId(1),
+                    display_name: "D1".into(),
+                    members: vec![],
+                },
+            ],
+            prop_edges: HashMap::new(),
+            node_children: HashMap::new(),
+            node_parent: HashMap::new(),
+        };
+
+        let corridors = build_corridors(&domain_layouts, &[], &graph);
 
         // 2 domains at different x-ranges → 2 intra-domain corridors each +
         // 1 inter-column gap + 1 outer right corridor = 6 corridors.

@@ -435,7 +435,7 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
     let domain_contiguity_violations =
         find_domain_contiguity_violations(graph, &layout.nodes, &layout.domains);
     let inter_domain_edges_in_intra_corridors =
-        find_inter_domain_edges_in_intra_corridors(graph, &layout.domains, &parsed);
+        find_inter_domain_edges_in_intra_corridors(graph, &layout.domains, &layout.nodes, &parsed);
     let channel_collisions = find_channel_collisions(graph, &parsed);
 
     let total_height = layout.height;
@@ -1282,6 +1282,7 @@ fn compute_mean_constraint_segments(constraints: &[EdgePath]) -> f64 {
 fn find_inter_domain_edges_in_intra_corridors(
     graph: &Graph,
     domains: &[DomainLayout],
+    _node_layouts: &[NodeLayout],
     edges: &[(EdgeId, Vec<LineSeg>)],
 ) -> Vec<(EdgeId, DomainId)> {
     let lr_pad = DOMAIN_PADDING + CORRIDOR_PAD * 2.0;

@@ -5,11 +5,11 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::model::types::{DerivId, DomainId, Edge, Graph, NodeId};
+use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId};
 
 use super::{
-    DerivLayout, DomainLayout, NodeLayout, CHANNEL_GAP, CORRIDOR_PAD, DOMAIN_PADDING,
-    DOMAIN_TITLE_HEIGHT, INTER_NODE_GAP,
+    DerivLayout, DomainLayout, EndpointRole, NodeLayout, PortSide, PortSideAssignment,
+    CHANNEL_GAP, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT, INTER_NODE_GAP,
 };
 
 /// Compute bounding boxes for all domains from final node positions.
@@ -926,6 +926,228 @@ pub fn separate_column_elements_vertically(
             dl.height = nb.height;
         }
     }
+}
+
+/// Expand intra-domain corridors to fit the number of bracket-routed edges.
+///
+/// After port sides are assigned, some intra-domain constraint edges route as
+/// H-V-H brackets through a corridor on one side of the domain.  When many
+/// edges overlap vertically, each needs its own channel.  The default corridor
+/// width (`CORRIDOR_PAD * 2`) only fits a few channels; additional channels
+/// spill behind the node body, causing "connected-edge occlusion."
+///
+/// This pass counts the maximum number of simultaneously overlapping bracket
+/// edges per domain side, computes the required corridor width, and expands
+/// the domain bounds (shifting member nodes inward) when more space is needed.
+pub fn expand_corridors_for_edges(
+    node_layouts: &mut [NodeLayout],
+    domain_layouts: &mut [DomainLayout],
+    graph: &Graph,
+    port_sides: &PortSideAssignment,
+) {
+    let default_corridor = CORRIDOR_PAD * 2.0;
+
+    for domain in &graph.domains {
+        let did = domain.id;
+        if !domain_layouts.iter().any(|dl| dl.id == did) {
+            continue;
+        }
+
+        // Collect all intra-domain bracket edges per side.
+        // A bracket edge is one where both endpoints are in this domain,
+        // on the same side, with the same port x (same column of nodes).
+        let mut left_y_spans: Vec<(f64, f64)> = Vec::new();
+        let mut right_y_spans: Vec<(f64, f64)> = Vec::new();
+
+        for (idx, edge) in graph.edges.iter().enumerate() {
+            let edge_id = EdgeId(idx as u32);
+            let (src_prop, dst_prop) = match edge {
+                Edge::Constraint { source_prop, dest_prop, .. } => (*source_prop, *dest_prop),
+                _ => continue,
+            };
+
+            let src_node_id = graph.properties[src_prop.index()].node;
+            let dst_node_id = graph.properties[dst_prop.index()].node;
+
+            // Both nodes must be in this domain.
+            let src_in = graph.nodes[src_node_id.index()].domain == Some(did);
+            let dst_in = graph.nodes[dst_node_id.index()].domain == Some(did);
+            if !src_in || !dst_in {
+                continue;
+            }
+
+            // Check if both sides are the same (bracket routing).
+            let src_side = port_sides.get(&(edge_id, EndpointRole::Upstream)).copied();
+            let dst_side = port_sides.get(&(edge_id, EndpointRole::Downstream)).copied();
+            if src_side != dst_side || src_side.is_none() {
+                continue;
+            }
+
+            // Check same port x (same column).
+            let src_nl = &node_layouts[src_node_id.index()];
+            let dst_nl = &node_layouts[dst_node_id.index()];
+            let src_x = match src_side {
+                Some(PortSide::Left) => src_nl.x,
+                Some(PortSide::Right) => src_nl.x + src_nl.width,
+                None => continue,
+            };
+            let dst_x = match dst_side {
+                Some(PortSide::Left) => dst_nl.x,
+                Some(PortSide::Right) => dst_nl.x + dst_nl.width,
+                None => continue,
+            };
+            if (src_x - dst_x).abs() > 0.5 {
+                continue;
+            }
+
+            // This edge routes as a bracket through the corridor on this side.
+            let y_min = src_nl.y.min(dst_nl.y);
+            let y_max = (src_nl.y + src_nl.height).max(dst_nl.y + dst_nl.height);
+
+            match src_side {
+                Some(PortSide::Left) => left_y_spans.push((y_min, y_max)),
+                Some(PortSide::Right) => right_y_spans.push((y_min, y_max)),
+                None => {}
+            }
+        }
+
+        // Compute the max overlap count for each side.
+        let left_channels = max_overlap_count(&left_y_spans);
+        let right_channels = max_overlap_count(&right_y_spans);
+
+        // Compute the required corridor width for each side.
+        // Width needed: CORRIDOR_PAD (first channel offset from start) +
+        //               (num_channels - 1) * CHANNEL_GAP
+        let left_needed = if left_channels > 0 {
+            CORRIDOR_PAD + (left_channels as f64 - 1.0) * CHANNEL_GAP
+        } else {
+            0.0
+        };
+        let right_needed = if right_channels > 0 {
+            CORRIDOR_PAD + (right_channels as f64 - 1.0) * CHANNEL_GAP
+        } else {
+            0.0
+        };
+
+        // How much extra space is needed beyond the default corridor?
+        let left_extra = (left_needed - default_corridor).max(0.0);
+        let right_extra = (right_needed - default_corridor).max(0.0);
+
+        if left_extra < 0.01 && right_extra < 0.01 {
+            continue;
+        }
+
+        // Expand the domain boundary outward WITHOUT moving any nodes.
+        //
+        // Extend the domain's left edge leftward by left_extra and right
+        // edge rightward by right_extra.  build_corridors computes corridor
+        // widths from domain-edge-to-node distance, so the wider boundary
+        // automatically yields wider corridors.
+        //
+        // After expanding, push same-column domains (above or below) so
+        // their boundaries still encompass their nodes, and push other-column
+        // elements rightward to maintain the inter-column gap.
+
+        let dl_idx = domain_layouts.iter().position(|dl| dl.id == did).unwrap();
+        let old_domain_x = domain_layouts[dl_idx].x;
+        let old_domain_right = old_domain_x + domain_layouts[dl_idx].width;
+
+        // Expand this domain outward.
+        domain_layouts[dl_idx].x -= left_extra;
+        domain_layouts[dl_idx].width += left_extra + right_extra;
+
+        // Same-column domains (those with x-overlap) need their boundaries
+        // expanded on the same sides so corridors align.  All domains in the
+        // same column should share the same x extent.
+        let new_col_left = domain_layouts[dl_idx].x;
+        let new_col_right = domain_layouts[dl_idx].x + domain_layouts[dl_idx].width;
+        for (i, dl) in domain_layouts.iter_mut().enumerate() {
+            if i == dl_idx {
+                continue;
+            }
+            // Same column if the domain's center is within the old column range.
+            let cx = dl.x + dl.width / 2.0;
+            if cx >= old_domain_x && cx <= old_domain_right {
+                // Expand this same-column domain to match.
+                if dl.x > new_col_left {
+                    let shift = dl.x - new_col_left;
+                    dl.width += shift;
+                    dl.x = new_col_left;
+                }
+                let dl_right = dl.x + dl.width;
+                if dl_right < new_col_right {
+                    dl.width = new_col_right - dl.x;
+                }
+            }
+        }
+
+        // Push other-column domains (and their member nodes) rightward.
+        let total_extra = left_extra + right_extra;
+        for other_domain in &graph.domains {
+            if other_domain.id == did {
+                continue;
+            }
+            let odl = domain_layouts.iter().find(|dl| dl.id == other_domain.id);
+            if let Some(odl) = odl {
+                let cx = odl.x + odl.width / 2.0;
+                // Different column: to the right of the expanded domain.
+                if cx > old_domain_right {
+                    for &nid in &other_domain.members {
+                        node_layouts[nid.index()].x += total_extra;
+                    }
+                }
+            }
+        }
+        // Shift other-column domain layouts.
+        for (i, dl) in domain_layouts.iter_mut().enumerate() {
+            if i == dl_idx {
+                continue;
+            }
+            let cx = dl.x + dl.width / 2.0;
+            if cx > old_domain_right + total_extra / 2.0 {
+                dl.x += total_extra;
+            }
+        }
+        // Shift free nodes in other columns.
+        for nl in node_layouts.iter_mut() {
+            let node_domain = graph.nodes.get(nl.id.index()).and_then(|n| n.domain);
+            if node_domain.is_none() && nl.x > old_domain_right {
+                nl.x += total_extra;
+            }
+        }
+    }
+}
+
+/// Compute the maximum number of mutually overlapping spans in a set of y-ranges.
+///
+/// Uses a sweep-line approach: for each span, create start/end events, sort them,
+/// and track the maximum active count.
+fn max_overlap_count(spans: &[(f64, f64)]) -> usize {
+    if spans.is_empty() {
+        return 0;
+    }
+    // Sweep-line events: +1 for start, -1 for end.
+    let mut events: Vec<(f64, i32)> = Vec::with_capacity(spans.len() * 2);
+    for &(lo, hi) in spans {
+        let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+        events.push((lo, 1));
+        events.push((hi, -1));
+    }
+    // Sort by position; ties broken: ends (-1) before starts (+1) at same position
+    // to avoid overcounting when spans just touch.
+    events.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap()
+            .then(a.1.cmp(&b.1))
+    });
+
+    let mut max_count = 0usize;
+    let mut current = 0i32;
+    for (_, delta) in events {
+        current += delta;
+        max_count = max_count.max(current as usize);
+    }
+    max_count
 }
 
 /// Vertical separation pass for domains (legacy).
