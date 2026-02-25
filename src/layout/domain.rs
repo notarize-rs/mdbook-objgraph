@@ -1037,11 +1037,16 @@ pub fn expand_corridors_for_edges(
             continue;
         }
 
+        // Use the same expansion on both sides to keep the domain padding
+        // symmetric.  Each side still gets at least enough corridor space
+        // for its bracket edges, and the visual balance is preserved.
+        let symmetric_extra = left_extra.max(right_extra);
+
         // Expand the domain boundary outward WITHOUT moving any nodes.
         //
-        // Extend the domain's left edge leftward by left_extra and right
-        // edge rightward by right_extra.  build_corridors computes corridor
-        // widths from domain-edge-to-node distance, so the wider boundary
+        // Extend the domain's left edge leftward and right edge rightward
+        // by the same amount.  build_corridors computes corridor widths
+        // from domain-edge-to-node distance, so the wider boundary
         // automatically yields wider corridors.
         //
         // After expanding, push same-column domains (above or below) so
@@ -1052,9 +1057,9 @@ pub fn expand_corridors_for_edges(
         let old_domain_x = domain_layouts[dl_idx].x;
         let old_domain_right = old_domain_x + domain_layouts[dl_idx].width;
 
-        // Expand this domain outward.
-        domain_layouts[dl_idx].x -= left_extra;
-        domain_layouts[dl_idx].width += left_extra + right_extra;
+        // Expand this domain outward symmetrically.
+        domain_layouts[dl_idx].x -= symmetric_extra;
+        domain_layouts[dl_idx].width += symmetric_extra * 2.0;
 
         // Same-column domains (those with x-overlap) need their boundaries
         // expanded on the same sides so corridors align.  All domains in the
@@ -1082,7 +1087,7 @@ pub fn expand_corridors_for_edges(
         }
 
         // Push other-column domains (and their member nodes) rightward.
-        let total_extra = left_extra + right_extra;
+        let total_extra = symmetric_extra * 2.0;
         for other_domain in &graph.domains {
             if other_domain.id == did {
                 continue;
