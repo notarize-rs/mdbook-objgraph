@@ -58,8 +58,10 @@ pub const PILL_CONTENT_PAD: f64 = 12.0;
 /// Character width estimate for monospace text.
 pub const CHAR_WIDTH: f64 = 5.5;
 /// Character width factor for proportional (sans-serif) label text.
-/// Average character width ≈ font_size × this factor.
-pub const LABEL_CHAR_WIDTH_FACTOR: f64 = 0.55;
+/// Average character width ≈ font_size × this factor.  Tuned to match
+/// common system sans-serif fonts (Inter, Segoe UI, DejaVu Sans) which
+/// render wider than the previous 0.55 estimate.
+pub const LABEL_CHAR_WIDTH_FACTOR: f64 = 0.65;
 /// Extra horizontal padding added to each side of label bounding boxes when
 /// computing the SVG canvas dimensions.  This compensates for the inherent
 /// inaccuracy of the character-counting text width estimate -- proportional
@@ -862,6 +864,11 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // bounding box.  Labels placed near the canvas edge (especially the left
     // edge at x ≈ 0) can extend beyond the content area; clamping prevents
     // the quality check from flagging them as outside the canvas.
+    //
+    // We subtract LABEL_OVERFLOW_PAD from the max bounds to leave extra room
+    // for font-estimation error — the actual rendered text can be wider than
+    // our character-counting estimate, and this margin keeps labels safely
+    // inside the final canvas.
     {
         let mut content_max_x = 0.0_f64;
         let mut content_max_y = 0.0_f64;
@@ -878,16 +885,19 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
             content_max_y = content_max_y.max(dl.y + dl.height);
         }
 
+        let clamp_max_x = content_max_x - LABEL_OVERFLOW_PAD;
+        let clamp_max_y = content_max_y;
+
         for ep in anchors.iter_mut()
             .chain(intra_domain_constraints.iter_mut())
         {
             if let Some(ref mut label) = ep.label {
-                label.clamp_to_content_area(content_max_x, content_max_y);
+                label.clamp_to_content_area(clamp_max_x, clamp_max_y);
             }
         }
         for cdp in cross_domain_constraints.iter_mut() {
             if let Some(ref mut label) = cdp.full_path.label {
-                label.clamp_to_content_area(content_max_x, content_max_y);
+                label.clamp_to_content_area(clamp_max_x, clamp_max_y);
             }
         }
     }
@@ -1056,8 +1066,8 @@ mod tests {
         };
         let (left, right) = lbl.bounding_x();
         assert!((left - 100.0).abs() < 1e-9);
-        // 5 chars * 10px * 0.55 = 27.5
-        assert!((right - 127.5).abs() < 1e-9);
+        // 5 chars * 10px * 0.65 = 32.5
+        assert!((right - 132.5).abs() < 1e-9);
     }
 
     #[test]
@@ -1070,8 +1080,8 @@ mod tests {
             font_size: 10.0,
         };
         let (left, right) = lbl.bounding_x();
-        // 5 * 10 * 0.55 = 27.5 → left = 30 - 27.5 = 2.5
-        assert!((left - 2.5).abs() < 1e-9);
+        // 5 * 10 * 0.65 = 32.5 → left = 30 - 32.5 = -2.5
+        assert!((left - (-2.5)).abs() < 1e-9);
         assert!((right - 30.0).abs() < 1e-9);
     }
 
@@ -1085,9 +1095,9 @@ mod tests {
             font_size: 8.0,
         };
         let (left, right) = lbl.bounding_x();
-        // 4 * 8 * 0.55 = 17.6 → half = 8.8
-        assert!((left - 41.2).abs() < 1e-9);
-        assert!((right - 58.8).abs() < 1e-9);
+        // 4 * 8 * 0.65 = 20.8 → half = 10.4
+        assert!((left - 39.6).abs() < 1e-9);
+        assert!((right - 60.4).abs() < 1e-9);
     }
 
     #[test]
@@ -1115,8 +1125,8 @@ mod tests {
             width: 100.0,
             height: 50.0,
         }];
-        // Label at x=10, text-anchor="end", text width = 5*8*0.55 = 22
-        // Left edge = 10 - 22 = -12
+        // Label at x=10, text-anchor="end", text width = 5*8*0.65 = 26
+        // Left edge = 10 - 26 = -16
         let lbl = EdgeLabel {
             text: "hello".into(),
             x: 10.0,
@@ -1126,11 +1136,11 @@ mod tests {
         };
         let labels = vec![&lbl];
         let (w, h, offset) = compute_dimensions(&nodes, &[], &[], &labels);
-        // Label bounding_x = (-12, 10), padded = (-20, 18)
-        // content_offset_x = 20 (to compensate for -20 padded left overflow)
-        assert!((offset - 20.0).abs() < 1e-9);
-        // width = max(100, 100) + 20 + 40 = 160
-        assert!((w - 160.0).abs() < 1e-9);
+        // Label bounding_x = (-16, 10), padded = (-24, 18)
+        // content_offset_x = 24 (to compensate for -24 padded left overflow)
+        assert!((offset - 24.0).abs() < 1e-9);
+        // width = max(100, 100) + 24 + 40 = 164
+        assert!((w - 164.0).abs() < 1e-9);
         assert!((h - 90.0).abs() < 1e-9);
     }
 
@@ -1143,8 +1153,8 @@ mod tests {
             width: 100.0,
             height: 50.0,
         }];
-        // Label at x=90, text-anchor="start", text width = 10*6*0.55 = 33
-        // Right edge = 90 + 33 = 123 (exceeds content_max_x of 100)
+        // Label at x=90, text-anchor="start", text width = 10*6*0.65 = 39
+        // Right edge = 90 + 39 = 129 (exceeds content_max_x of 100)
         let lbl = EdgeLabel {
             text: "0123456789".into(),
             x: 90.0,
@@ -1154,11 +1164,11 @@ mod tests {
         };
         let labels = vec![&lbl];
         let (w, _h, offset) = compute_dimensions(&nodes, &[], &[], &labels);
-        // Label bounding_x = (90, 123), padded right = 131
+        // Label bounding_x = (90, 129), padded right = 137
         // No left overflow (padded left = 82 > 0), so offset = 0
         assert!((offset).abs() < 1e-9);
-        // width = max(131, 100) + 0 + 40 = 171
-        assert!((w - 171.0).abs() < 1e-9);
+        // width = max(137, 100) + 0 + 40 = 177
+        assert!((w - 177.0).abs() < 1e-9);
     }
 
     #[test]
@@ -1170,8 +1180,8 @@ mod tests {
             width: 100.0,
             height: 50.0,
         }];
-        // Left-overflow label: x=5, anchor="end", 10 chars * 6px * 0.55 = 33
-        // Left edge = 5 - 33 = -28
+        // Left-overflow label: x=5, anchor="end", 10 chars * 6px * 0.65 = 39
+        // Left edge = 5 - 39 = -34
         let lbl_left = EdgeLabel {
             text: "0123456789".into(),
             x: 5.0,
@@ -1179,8 +1189,8 @@ mod tests {
             anchor: "end",
             font_size: 6.0,
         };
-        // Right-overflow label: x=90, anchor="start", 10 chars * 6px * 0.55 = 33
-        // Right edge = 90 + 33 = 123
+        // Right-overflow label: x=90, anchor="start", 10 chars * 6px * 0.65 = 39
+        // Right edge = 90 + 39 = 129
         let lbl_right = EdgeLabel {
             text: "0123456789".into(),
             x: 90.0,
@@ -1190,10 +1200,10 @@ mod tests {
         };
         let labels = vec![&lbl_left, &lbl_right];
         let (w, _h, offset) = compute_dimensions(&nodes, &[], &[], &labels);
-        // Left label padded: (-36, 13), right label padded: (82, 131)
-        // content_offset_x = 36
-        assert!((offset - 36.0).abs() < 1e-9);
-        // width = max(131, 100) + 36 + 40 = 207
-        assert!((w - 207.0).abs() < 1e-9);
+        // Left label padded: (-42, 13), right label padded: (82, 137)
+        // content_offset_x = 42
+        assert!((offset - 42.0).abs() < 1e-9);
+        // width = max(137, 100) + 42 + 40 = 219
+        assert!((w - 219.0).abs() < 1e-9);
     }
 }
