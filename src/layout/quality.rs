@@ -8,7 +8,7 @@ use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId};
 
 use super::{
     DerivLayout, DomainLayout, EdgeLabel, EdgePath, LayoutResult, NodeLayout, StubPath,
-    ARROWHEAD_SIZE, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT,
+    ARROWHEAD_SIZE, CONTENT_PAD, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT, NODE_H_SPACING,
 };
 
 // ---------------------------------------------------------------------------
@@ -726,13 +726,21 @@ impl Aabb {
         Self { x, y, w, h }
     }
 
-    /// Conservative AABB for the domain title zone (full domain width,
-    /// DOMAIN_TITLE_HEIGHT tall).
+    /// Conservative AABB for the domain title zone (top-left corner).
+    /// The text is positioned at the top-left of the domain, starting at
+    /// CONTENT_PAD from the left edge. Width is estimated from the display
+    /// name length; height is DOMAIN_TITLE_HEIGHT.
     fn from_domain_title(dl: &DomainLayout) -> Self {
+        // Approximate the text width: ~6px per character for 10px semibold font,
+        // plus 3px stroke halo on each side.
+        let char_width = 6.0;
+        let text_w = dl.display_name.len() as f64 * char_width + 6.0; // +6 for halo
+        // Clamp to domain width minus padding.
+        let w = text_w.min(dl.width - CONTENT_PAD);
         Self {
-            x: dl.x,
+            x: dl.x + CONTENT_PAD,
             y: dl.y,
-            w: dl.width,
+            w,
             h: DOMAIN_TITLE_HEIGHT,
         }
     }

@@ -710,7 +710,7 @@ refinement is needed at this frequency.
 After coordinate assignment, each domain's bounding box is computed from its
 member nodes with padding:
 
-- **Top**: `DOMAIN_TITLE_HEIGHT` (32px) for the title area
+- **Top**: `DOMAIN_TITLE_HEIGHT` (32px) for the title area (label left-aligned)
 - **Bottom**: `INTER_NODE_GAP` (28px) matching inter-node spacing
 - **Left/Right**: `DOMAIN_PADDING + CORRIDOR_PAD * 2` (26px) to accommodate
   intra-domain routing corridors

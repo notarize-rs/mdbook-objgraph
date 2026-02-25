@@ -206,7 +206,7 @@ first (behind later groups).
     <g class="obgraph-domains">
       <g class="obgraph-domain" data-domain="{index}">
         <rect class="obgraph-domain-bg" x="" y="" width="" height="" rx="10"/>
-        <text class="obgraph-domain-label" x="" y="">{display_name}</text>
+        <text class="obgraph-domain-label" x="" y="" text-anchor="start">{display_name}</text>
       </g>
     </g>
 
@@ -393,9 +393,12 @@ under their input nodes when possible.
 Domains are rendered as labeled rounded rectangles (`rx="10"`,
 `stroke-width="2"`, `stroke: var(--obg-domain-border)`) drawn behind their
 member nodes. Each domain has a title area of `DOMAIN_TITLE_HEIGHT`
-(pad 12 + cap-height 8 + pad 12 = 32px) at the top. The gap after the last
-node to the domain bottom edge matches `INTER_NODE_GAP`. Corridors (the space
-between node edges and domain boundaries) provide routing channels for edges.
+(pad 12 + cap-height 8 + pad 12 = 32px) at the top. The domain title label
+is positioned at the **top-left corner** (left-aligned with `CONTENT_PAD`
+inset) to avoid collisions with anchor edges that pass through the top-center
+of the domain. The gap after the last node to the domain bottom edge matches
+`INTER_NODE_GAP`. Corridors (the space between node edges and domain
+boundaries) provide routing channels for edges.
 
 ### 6.8 Color Palette and State Visualization
 

@@ -113,12 +113,13 @@ fn write_domains(out: &mut String, layout: &LayoutResult) {
         )
         .unwrap();
 
-        // Label centered in the domain title area (DOMAIN_TITLE_HEIGHT / 2 from top)
-        let label_x = domain.x + domain.width / 2.0;
+        // Label at the top-left corner of the domain, with left padding.
+        // Positioned to avoid collisions with edges passing through the top-center.
+        let label_x = domain.x + CONTENT_PAD;
         let label_y = domain.y + DOMAIN_TITLE_HEIGHT / 2.0;
         writeln!(
             out,
-            r#"        <text class="obgraph-domain-label" x="{x}" y="{y}" text-anchor="middle" dominant-baseline="central">{name}</text>"#,
+            r#"        <text class="obgraph-domain-label" x="{x}" y="{y}" text-anchor="start" dominant-baseline="central">{name}</text>"#,
             x = label_x,
             y = label_y,
             name = escape_xml(&domain.display_name)
