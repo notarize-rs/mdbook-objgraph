@@ -144,14 +144,43 @@ pub struct Corridor {
 impl Corridor {
     /// Allocate a channel with no vertical overlap for the given edge extent.
     /// If all existing channels overlap, create a new one.
+    ///
+    /// Crossing-aware: when considering reusing an inner channel `i`, checks
+    /// whether any outer channel `j > i` has an occupant whose vertical extent
+    /// includes `y_start` (the horizontal entry point). If so, the new edge's
+    /// horizontal entry segment would cross that outer occupant's vertical
+    /// segment, so channel `i` is skipped.
     fn allocate_channel(&mut self, edge_id: EdgeId, y_start: f64, y_end: f64) -> f64 {
+        let entry_y = y_start.min(y_end);
+        let exit_y = y_start.max(y_end);
+
         // Try existing channels (non-overlapping extents can share).
-        for ch in &mut self.channels {
-            if !ch.overlaps(y_start, y_end) {
-                return ch.reserve(edge_id, y_start, y_end);
+        let n = self.channels.len();
+        for i in 0..n {
+            if !self.channels[i].overlaps(y_start, y_end) {
+                // Check whether any outer channel (j > i) has an occupant
+                // whose vertical extent includes the entry point y_start.
+                // If so, the horizontal segment from source to this inner
+                // channel would cross that outer occupant's vertical segment.
+                let outer_blocks = (i + 1..n).any(|j| {
+                    self.channels[j].occupants.iter().any(|&(_, os, oe)| {
+                        let (olo, ohi) = if os <= oe { (os, oe) } else { (oe, os) };
+                        // The outer occupant blocks reuse if its vertical extent
+                        // overlaps with any part of the new edge's entry range.
+                        // The entry range is the y_start horizontal segment, which
+                        // occurs at a single y value. But the vertical segment of
+                        // the outer occupant spans [olo, ohi]. If y_start (or y_end)
+                        // falls within that span, crossing occurs.
+                        (olo < entry_y + 0.5 && ohi > entry_y - 0.5)
+                            || (olo < exit_y + 0.5 && ohi > exit_y - 0.5)
+                    })
+                });
+                if !outer_blocks {
+                    return self.channels[i].reserve(edge_id, y_start, y_end);
+                }
             }
         }
-        // All channels overlap — create a new one with CHANNEL_GAP spacing.
+        // All channels overlap or would cause crossings — create a new one.
         let new_x = if self.channels.is_empty() {
             self.x_start + CORRIDOR_PAD
         } else {
@@ -533,6 +562,54 @@ pub fn refine_port_sides(
     let mut node_side_counter: std::collections::HashMap<NodeId, usize> =
         std::collections::HashMap::new();
 
+    // Pre-compute same-column bracket edge counts per (source_node, outer_side)
+    // so we can split overloaded corridors across both sides.
+    let mut bracket_counts: std::collections::HashMap<(NodeId, PortSide), Vec<(EdgeId, NodeId)>> =
+        std::collections::HashMap::new();
+    for (idx, edge) in graph.edges.iter().enumerate() {
+        if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+            let src_node = prop_node(graph, *source_prop);
+            let dst_node = prop_node(graph, *dest_prop);
+            if src_node != dst_node
+                && let Some(outer_side) =
+                    same_column_outer_side(graph, src_node, dst_node, domain_layouts)
+            {
+                bracket_counts
+                    .entry((src_node, outer_side))
+                    .or_default()
+                    .push((EdgeId(idx as u32), dst_node));
+            }
+        }
+    }
+
+    // For overloaded bracket corridors (>2 edges from same source), build a set
+    // of edge IDs that should route through the opposite (inner) corridor.
+    // We alternate by destination node: edges to the first target go outer,
+    // edges to the second target go inner, etc.
+    let mut bracket_flip: std::collections::HashSet<EdgeId> = std::collections::HashSet::new();
+    for ((_src_node, _outer_side), edges) in &bracket_counts {
+        if edges.len() <= 2 {
+            continue; // Not overloaded — keep all on the outer side.
+        }
+        // Collect unique destination nodes in order of first appearance.
+        let mut seen_dst: Vec<NodeId> = Vec::new();
+        for &(_, dst) in edges {
+            if !seen_dst.contains(&dst) {
+                seen_dst.push(dst);
+            }
+        }
+        // Flip every other destination node's edges to the inner (opposite) corridor.
+        for (i, dst_node) in seen_dst.iter().enumerate() {
+            if i % 2 == 1 {
+                for &(eid, dst) in edges {
+                    if dst == *dst_node {
+                        bracket_flip.insert(eid);
+                    }
+                }
+            }
+        }
+    }
+
     for (idx, edge) in graph.edges.iter().enumerate() {
         let edge_id = EdgeId(idx as u32);
 
@@ -558,12 +635,22 @@ pub fn refine_port_sides(
                     continue;
                 }
 
-                // Cross-domain same-column: bracket routing through outer corridor.
+                // Cross-domain same-column: bracket routing through outer corridor,
+                // with overloaded corridors split across both sides.
                 if let Some(outer_side) =
                     same_column_outer_side(graph, src_node, dst_node, domain_layouts)
                 {
-                    sides.insert((edge_id, EndpointRole::Upstream), outer_side);
-                    sides.insert((edge_id, EndpointRole::Downstream), outer_side);
+                    let side = if bracket_flip.contains(&edge_id) {
+                        // Route through the opposite (inner/gap) corridor.
+                        match outer_side {
+                            PortSide::Left => PortSide::Right,
+                            PortSide::Right => PortSide::Left,
+                        }
+                    } else {
+                        outer_side
+                    };
+                    sides.insert((edge_id, EndpointRole::Upstream), side);
+                    sides.insert((edge_id, EndpointRole::Downstream), side);
                     continue;
                 }
 
