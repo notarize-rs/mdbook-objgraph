@@ -1,7 +1,5 @@
 //! Orthogonal channel-based edge routing (DESIGN.md §4.2.6).
 
-use std::collections::HashMap;
-
 use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId, PropId};
 
 use super::{
@@ -390,24 +388,6 @@ fn find_best_corridor_idx(
 /// by its x-coordinate) so that subsequent channel allocations see the
 /// occupancy.  Used by bundle routing to keep the corridor model consistent
 /// after bypassing `find_corridor_channel`.
-fn register_corridor_occupant(
-    channel_x: f64,
-    corridors: &mut [Corridor],
-    edge_id: EdgeId,
-    y_start: f64,
-    y_end: f64,
-) {
-    for corridor in corridors.iter_mut() {
-        for ch in &mut corridor.channels {
-            if (ch.x - channel_x).abs() < 0.5 {
-                ch.occupants.push((edge_id, y_start, y_end));
-                return;
-            }
-        }
-    }
-    // Channel not found in any corridor — nothing to register.
-}
-
 /// Find the nearest corridor in the direction the port faces and allocate a channel.
 ///
 /// `edge_domain` constrains corridor selection: `Some(did)` means prefer only
@@ -1188,11 +1168,6 @@ fn route_single_edge(
     corridors: &mut [Corridor],
     src_domain: Option<DomainId>,
     tgt_domain: Option<DomainId>,
-    // When set, forces bracket routing (Case 2a) to use this corridor x
-    // instead of allocating a new channel.  Used to bundle parallel edges
-    // between the same node pair so their vertical segments share a single
-    // corridor channel, preventing horizontal-crosses-vertical crossings.
-    bundle_corridor_x: Option<f64>,
 ) -> Vec<Segment> {
     // Case 1: Center-port edges (Anchors) — no side assignment.
     if src_side.is_none() && tgt_side.is_none() {
@@ -1236,14 +1211,7 @@ fn route_single_edge(
         && src_side == tgt_side
         && (src_x - tgt_x).abs() < 0.5
     {
-        let v_x = if let Some(bx) = bundle_corridor_x {
-            // Register this edge in the corridor channel so that later edges
-            // see the occupancy and allocate to a different channel.
-            register_corridor_occupant(bx, corridors, edge_id, src_y, tgt_y);
-            bx
-        } else {
-            find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y, src_domain)
-        };
+        let v_x = find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y, src_domain);
         return collapse_zero_length(vec![
             Segment::Horizontal {
                 y: src_y,
@@ -1524,12 +1492,6 @@ pub fn route_all_edges(
 
     let mut routes = Vec::new();
 
-    // Bundle tracking: when multiple constraint edges connect the same node
-    // pair on the same side (bracket routing), they should share a single
-    // corridor channel to prevent horizontal-vs-vertical crossing artifacts.
-    // Key: (min_node, max_node, PortSide) → corridor x already allocated.
-    let mut bundle_channels: HashMap<(NodeId, NodeId, PortSide), f64> = HashMap::new();
-
     for idx in edge_indices {
         let edge_id = EdgeId(idx as u32);
 
@@ -1595,34 +1557,6 @@ pub fn route_all_edges(
             }
         };
 
-        // Check if this is a bracket-style constraint edge (same side, same x)
-        // between two different nodes. If so, look up or record the bundle
-        // channel so parallel edges share the same corridor x.
-        let bundle_corridor_x = if let Edge::Constraint { source_prop, dest_prop, .. } = &graph.edges[idx] {
-            let src_nid = prop_node(graph, *source_prop);
-            let dst_nid = prop_node(graph, *dest_prop);
-            if src_nid != dst_nid
-                && src_side == tgt_side
-                && (src_x - tgt_x).abs() < 0.5
-            {
-                if let Some(side) = src_side {
-                    // Canonical key: ordered pair so (A,B) == (B,A).
-                    let key = if src_nid.index() <= dst_nid.index() {
-                        (src_nid, dst_nid, side)
-                    } else {
-                        (dst_nid, src_nid, side)
-                    };
-                    bundle_channels.get(&key).copied()
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
         let segments = route_single_edge(
             edge_id,
             src_x,
@@ -1635,37 +1569,7 @@ pub fn route_all_edges(
             &mut corridors,
             src_domain,
             tgt_domain,
-            bundle_corridor_x,
         );
-
-        // If this was a bracket edge and we just allocated a new corridor
-        // channel (no bundle override), record it for future edges in the
-        // same bundle.
-        if bundle_corridor_x.is_none()
-            && let Edge::Constraint { source_prop, dest_prop, .. } = &graph.edges[idx]
-        {
-            let src_nid = prop_node(graph, *source_prop);
-            let dst_nid = prop_node(graph, *dest_prop);
-            if src_nid != dst_nid
-                && src_side == tgt_side
-                && (src_x - tgt_x).abs() < 0.5
-                && let Some(side) = src_side
-            {
-                let key = if src_nid.index() <= dst_nid.index() {
-                    (src_nid, dst_nid, side)
-                } else {
-                    (dst_nid, src_nid, side)
-                };
-                // Extract the corridor x from the route: it's the x of
-                // the first vertical segment (the corridor channel).
-                if let Some(v_x) = segments.iter().find_map(|s| match s {
-                    Segment::Vertical { x, .. } => Some(*x),
-                    _ => None,
-                }) {
-                    bundle_channels.entry(key).or_insert(v_x);
-                }
-            }
-        }
 
         let mut route = Route { edge_id, segments };
         shorten_route_for_arrowhead(&mut route);
@@ -1813,7 +1717,8 @@ pub fn route_label_candidates(route: &Route) -> Vec<(f64, f64, &'static str)> {
         }
     }
 
-    // Candidate E/F: Vertical segment at 25% and 50%.
+    // Candidate E/F/G: Vertical segment at 25%, 50%, and 75%.
+    // Also generate mirror candidates on the opposite side of the vertical segment.
     for (i, seg) in route.segments.iter().enumerate() {
         if let Segment::Vertical { x, y_start, y_end } = seg {
             let offset_right = if i > 0 {
@@ -1829,6 +1734,12 @@ pub fn route_label_candidates(route: &Route) -> Vec<(f64, f64, &'static str)> {
             } else {
                 (*x - 4.0, "end")
             };
+            // Mirror: opposite side of the vertical segment.
+            let (mirror_x, mirror_anchor) = if offset_right {
+                (*x - 4.0, "end")
+            } else {
+                (*x + 4.0, "start")
+            };
 
             // 25% position (near source junction).
             let y_25 = y_start + (y_end - y_start) * 0.25;
@@ -1837,6 +1748,15 @@ pub fn route_label_candidates(route: &Route) -> Vec<(f64, f64, &'static str)> {
             // 50% position (midpoint — original placement).
             let y_50 = (y_start + y_end) / 2.0;
             candidates.push((off_x, y_50, anchor));
+
+            // 75% position (near target junction).
+            let y_75 = y_start + (y_end - y_start) * 0.75;
+            candidates.push((off_x, y_75, anchor));
+
+            // Mirror candidates at 25%, 50%, 75% on the opposite side.
+            candidates.push((mirror_x, y_25, mirror_anchor));
+            candidates.push((mirror_x, y_50, mirror_anchor));
+            candidates.push((mirror_x, y_75, mirror_anchor));
 
             break; // Only use first vertical segment.
         }

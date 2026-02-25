@@ -203,6 +203,11 @@ fn sev_snp_realistic_quality_summary() {
             eprintln!("    {} x {}", describe_edge(&graph, *a), describe_edge(&graph, *b));
         }
     }
+    assert!(
+        !report.has_errors(),
+        "Realistic SEV-SNP should have no hard errors:\n{}",
+        report.summary()
+    );
 }
 
 fn describe_edge(graph: &model::types::Graph, eid: model::types::EdgeId) -> String {

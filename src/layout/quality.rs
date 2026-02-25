@@ -305,6 +305,12 @@ impl QualityReport {
         for &(eid, did) in &self.intra_edges_in_wrong_corridor {
             lines.push(format!("    ERROR: Intra-domain edge {} in wrong corridor (domain {})", eid.0, did.0));
         }
+        for &(eid, nid) in &self.labels_hidden_under_nodes {
+            lines.push(format!("    ERROR: Label of edge {} occluded by node {}", eid.0, nid.0));
+        }
+        for &(did, overflow) in &self.domains_outside_canvas {
+            lines.push(format!("    ERROR: Domain {} outside canvas by {:.1}px", did.0, overflow));
+        }
 
         lines.join("\n")
     }
@@ -321,6 +327,8 @@ impl QualityReport {
             + self.node_deriv_overlaps.len()
             + self.deriv_deriv_overlaps.len()
             + self.intra_edges_in_wrong_corridor.len()
+            + self.labels_hidden_under_nodes.len()
+            + self.domains_outside_canvas.len()
     }
 
     pub fn warning_count(&self) -> usize {
@@ -353,12 +361,10 @@ impl QualityReport {
             + self.stub_domain_title_overlaps.len()
             + self.domain_title_title_overlaps.len()
             + self.edges_hidden_under_nodes.len()
-            + self.labels_hidden_under_nodes.len()
             + self.arrowheads_hidden_under_nodes.len()
             + self.stubs_hidden_under_nodes.len()
             + self.connected_edge_occlusion.len()
             + self.nodes_outside_canvas.len()
-            + self.domains_outside_canvas.len()
             + self.derivs_outside_canvas.len()
             + self.edges_outside_canvas.len()
             + self.labels_outside_canvas.len()
@@ -545,18 +551,23 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         find_connected_edge_occlusion(graph, &layout.nodes, &parsed);
 
     // ── Canvas overflow ────────────────────────────────────────────────
+    // Content coordinates may have negative x values when corridor expansion
+    // pushes domains left.  The SVG renderer compensates via content_offset_x,
+    // so the valid content x-range is [-offset, width - 2*margin - offset].
+    // We express this by shifting the check origin left by offset.
+    let offset_x = layout.content_offset_x;
 
-    let nodes_outside_canvas = find_nodes_outside_canvas(&layout.nodes, total_width, total_height);
+    let nodes_outside_canvas = find_nodes_outside_canvas(&layout.nodes, total_width, total_height, offset_x);
     let domains_outside_canvas =
-        find_domains_outside_canvas(&layout.domains, total_width, total_height);
+        find_domains_outside_canvas(&layout.domains, total_width, total_height, offset_x);
     let derivs_outside_canvas =
-        find_derivs_outside_canvas(&layout.derivations, total_width, total_height);
-    let edges_outside_canvas = find_edges_outside_canvas(&parsed, total_width, total_height);
+        find_derivs_outside_canvas(&layout.derivations, total_width, total_height, offset_x);
+    let edges_outside_canvas = find_edges_outside_canvas(&parsed, total_width, total_height, offset_x);
     let labels_outside_canvas =
-        find_labels_outside_canvas(&all_labels, total_width, total_height);
+        find_labels_outside_canvas(&all_labels, total_width, total_height, offset_x);
     let arrowheads_outside_canvas =
-        find_arrowheads_outside_canvas(&all_arrowheads, total_width, total_height);
-    let stubs_outside_canvas = find_stubs_outside_canvas(&all_stubs, total_width, total_height);
+        find_arrowheads_outside_canvas(&all_arrowheads, total_width, total_height, offset_x);
+    let stubs_outside_canvas = find_stubs_outside_canvas(&all_stubs, total_width, total_height, offset_x);
 
     // ── Domain corridor correctness ──────────────────────────────────
 
@@ -748,6 +759,21 @@ impl Aabb {
 
     fn contains_point(&self, px: f64, py: f64) -> bool {
         px >= self.x && px <= self.x + self.w && py >= self.y && py <= self.y + self.h
+    }
+
+    /// Fraction of `other` that is hidden (overlapped) by `self`.
+    /// Returns 0.0 if no overlap, 1.0 if fully contained.
+    fn overlap_fraction(&self, other: &Aabb) -> f64 {
+        let other_area = other.w * other.h;
+        if other_area <= 0.0 {
+            return 0.0;
+        }
+        let ix = (self.x + self.w).min(other.x + other.w) - self.x.max(other.x);
+        let iy = (self.y + self.h).min(other.y + other.h) - self.y.max(other.y);
+        if ix <= 0.0 || iy <= 0.0 {
+            return 0.0;
+        }
+        (ix * iy) / other_area
     }
 }
 
@@ -1365,26 +1391,6 @@ fn find_inter_domain_edges_in_intra_corridors(
 /// Returns true if both edges are constraints connecting the same pair of
 /// nodes (in either direction).  Used to exempt bundled corridor sharing
 /// from channel collision errors.
-fn same_node_pair_constraints(graph: &Graph, a: EdgeId, b: EdgeId) -> bool {
-    let pair = |eid: EdgeId| -> Option<(NodeId, NodeId)> {
-        if let Edge::Constraint { source_prop, dest_prop, .. } = &graph.edges[eid.index()] {
-            let sn = graph.properties[source_prop.index()].node;
-            let dn = graph.properties[dest_prop.index()].node;
-            if sn.index() <= dn.index() {
-                Some((sn, dn))
-            } else {
-                Some((dn, sn))
-            }
-        } else {
-            None
-        }
-    };
-    match (pair(a), pair(b)) {
-        (Some(pa), Some(pb)) => pa == pb,
-        _ => false,
-    }
-}
-
 /// Find pairs of edges that share the same vertical channel x-coordinate
 /// while their y-ranges overlap (channel collision).
 ///
@@ -1464,12 +1470,6 @@ fn find_channel_collisions(
             if (x_a - x_b).abs() < 0.5 && y_max_a > y_min_b + 0.5 && y_max_b > y_min_a + 0.5 {
                 // Exempt center-port edges that share a node or derivation.
                 if both_center_port(eid_a, eid_b) && shares_endpoint(eid_a, eid_b) {
-                    continue;
-                }
-                // Exempt constraint edges between the same node pair — these
-                // intentionally share a corridor channel (bundle routing) to
-                // prevent horizontal-vs-vertical crossing artifacts.
-                if same_node_pair_constraints(graph, eid_a, eid_b) {
                     continue;
                 }
                 collisions.push((eid_a, eid_b));
@@ -2093,7 +2093,8 @@ fn find_labels_hidden_under_nodes(
         let lb = Aabb::from_label(label);
         for n in nodes {
             let nb = Aabb::from_node(n);
-            if nb.contains(&lb) {
+            // Label is occluded if >50% of its area is behind the node.
+            if nb.overlap_fraction(&lb) > 0.5 {
                 out.push((eid, n.id));
             }
         }
@@ -2235,10 +2236,11 @@ fn find_connected_edge_occlusion(
 
 /// Compute how many pixels of an AABB extend beyond the canvas bounds.
 /// Returns 0.0 if fully inside.
-fn aabb_overflow(aabb: &Aabb, canvas_w: f64, canvas_h: f64) -> f64 {
+fn aabb_overflow(aabb: &Aabb, canvas_w: f64, canvas_h: f64, offset_x: f64) -> f64 {
     let mut overflow = 0.0_f64;
-    if aabb.x < 0.0 {
-        overflow += -aabb.x;
+    // Content x may be negative; offset_x compensates for this in the SVG.
+    if aabb.x < -offset_x {
+        overflow += -offset_x - aabb.x;
     }
     if aabb.y < 0.0 {
         overflow += -aabb.y;
@@ -2272,11 +2274,12 @@ fn find_nodes_outside_canvas(
     nodes: &[NodeLayout],
     canvas_w: f64,
     canvas_h: f64,
+    offset_x: f64,
 ) -> Vec<(NodeId, f64)> {
     nodes
         .iter()
         .filter_map(|n| {
-            let overflow = aabb_overflow(&Aabb::from_node(n), canvas_w, canvas_h);
+            let overflow = aabb_overflow(&Aabb::from_node(n), canvas_w, canvas_h, offset_x);
             if overflow > 0.5 { Some((n.id, overflow)) } else { None }
         })
         .collect()
@@ -2286,6 +2289,7 @@ fn find_domains_outside_canvas(
     domains: &[DomainLayout],
     canvas_w: f64,
     canvas_h: f64,
+    offset_x: f64,
 ) -> Vec<(DomainId, f64)> {
     domains
         .iter()
@@ -2296,7 +2300,7 @@ fn find_domains_outside_canvas(
                 w: d.width,
                 h: d.height,
             };
-            let overflow = aabb_overflow(&ab, canvas_w, canvas_h);
+            let overflow = aabb_overflow(&ab, canvas_w, canvas_h, offset_x);
             if overflow > 0.5 { Some((d.id, overflow)) } else { None }
         })
         .collect()
@@ -2306,6 +2310,7 @@ fn find_derivs_outside_canvas(
     derivs: &[DerivLayout],
     canvas_w: f64,
     canvas_h: f64,
+    offset_x: f64,
 ) -> Vec<(DerivId, f64)> {
     derivs
         .iter()
@@ -2316,7 +2321,7 @@ fn find_derivs_outside_canvas(
                 w: d.width,
                 h: d.height,
             };
-            let overflow = aabb_overflow(&ab, canvas_w, canvas_h);
+            let overflow = aabb_overflow(&ab, canvas_w, canvas_h, offset_x);
             if overflow > 0.5 { Some((d.id, overflow)) } else { None }
         })
         .collect()
@@ -2326,7 +2331,12 @@ fn find_edges_outside_canvas(
     edges: &[(EdgeId, Vec<LineSeg>)],
     canvas_w: f64,
     canvas_h: f64,
+    _offset_x: f64,
 ) -> Vec<(EdgeId, f64)> {
+    // Edge segments use segment_overflow which checks against canvas bounds
+    // directly; content_offset_x handling would need segment shifting.
+    // For now, keep existing behavior (edge coordinates are already correct
+    // relative to the content frame).
     edges
         .iter()
         .filter_map(|(eid, segs)| {
@@ -2340,11 +2350,12 @@ fn find_labels_outside_canvas(
     labels: &[(EdgeId, &EdgeLabel)],
     canvas_w: f64,
     canvas_h: f64,
+    offset_x: f64,
 ) -> Vec<(EdgeId, f64)> {
     labels
         .iter()
         .filter_map(|&(eid, label)| {
-            let overflow = aabb_overflow(&Aabb::from_label(label), canvas_w, canvas_h);
+            let overflow = aabb_overflow(&Aabb::from_label(label), canvas_w, canvas_h, offset_x);
             if overflow > 0.5 { Some((eid, overflow)) } else { None }
         })
         .collect()
@@ -2354,11 +2365,12 @@ fn find_arrowheads_outside_canvas(
     arrowheads: &[(EdgeId, Aabb)],
     canvas_w: f64,
     canvas_h: f64,
+    offset_x: f64,
 ) -> Vec<(EdgeId, f64)> {
     arrowheads
         .iter()
         .filter_map(|(eid, ab)| {
-            let overflow = aabb_overflow(ab, canvas_w, canvas_h);
+            let overflow = aabb_overflow(ab, canvas_w, canvas_h, offset_x);
             if overflow > 0.5 { Some((*eid, overflow)) } else { None }
         })
         .collect()
@@ -2368,6 +2380,7 @@ fn find_stubs_outside_canvas(
     stubs: &[(EdgeId, Vec<LineSeg>)],
     canvas_w: f64,
     canvas_h: f64,
+    _offset_x: f64,
 ) -> Vec<(EdgeId, f64)> {
     stubs
         .iter()
