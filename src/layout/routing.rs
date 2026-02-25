@@ -1819,7 +1819,13 @@ pub fn route_label_candidates(route: &Route) -> Vec<(f64, f64, &'static str)> {
         }
     }
 
-    // Candidate E/F: Vertical segment at 25% and 50%.
+    // Candidate E/F/G/H: Vertical segment at 25% and 50%, on both sides.
+    //
+    // For bracket routes (H-V-H) the vertical runs outside the node column.
+    // Placing the label on the *outward* side (away from nodes) can push it
+    // past the domain boundary, while placing it on the *inward* side (toward
+    // the inter-node gap) keeps it in free space.  We generate candidates on
+    // both sides so the collision-aware scorer can pick the best one.
     for (i, seg) in route.segments.iter().enumerate() {
         if let Segment::Vertical { x, y_start, y_end } = seg {
             let offset_right = if i > 0 {
@@ -1830,19 +1836,25 @@ pub fn route_label_candidates(route: &Route) -> Vec<(f64, f64, &'static str)> {
             } else {
                 true
             };
-            let (off_x, anchor) = if offset_right {
-                (*x + 4.0, "start")
+            let (out_x, out_anchor, in_x, in_anchor) = if offset_right {
+                (*x + 4.0, "start", *x - 4.0, "end")
             } else {
-                (*x - 4.0, "end")
+                (*x - 4.0, "end", *x + 4.0, "start")
             };
 
-            // 25% position (near source junction).
+            // 25% position (near source junction) — inward side first (preferred).
             let y_25 = y_start + (y_end - y_start) * 0.25;
-            candidates.push((off_x, y_25, anchor));
+            candidates.push((in_x, y_25, in_anchor));
 
-            // 50% position (midpoint — original placement).
+            // 25% position — outward side.
+            candidates.push((out_x, y_25, out_anchor));
+
+            // 50% position (midpoint) — inward side first.
             let y_50 = (y_start + y_end) / 2.0;
-            candidates.push((off_x, y_50, anchor));
+            candidates.push((in_x, y_50, in_anchor));
+
+            // 50% position — outward side.
+            candidates.push((out_x, y_50, out_anchor));
 
             break; // Only use first vertical segment.
         }
