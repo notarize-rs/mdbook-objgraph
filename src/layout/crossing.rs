@@ -1,6 +1,6 @@
 //! Weighted port-aware nested barycenter crossing minimization (DESIGN.md §4.2.3).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::long_edge::{LayerEntry, LayerItem, LongEdge};
 use super::{EndpointRole, PortSide, PortSideAssignment};
@@ -787,6 +787,56 @@ pub fn minimize_crossings(
                     })
                     .collect();
 
+                // Collect properties on this node that have cross-node edges.
+                // Used by the bubble-sort to penalize cross-node edges that fall
+                // inside same-node brackets (which causes physical crossings).
+                let cross_node_props: HashSet<PropId> = graph
+                    .edges
+                    .iter()
+                    .filter_map(|edge| match edge {
+                        Edge::Constraint { source_prop, dest_prop, .. } => {
+                            let src_node = graph.properties[source_prop.index()].node;
+                            let dst_node = graph.properties[dest_prop.index()].node;
+                            if src_node != dst_node {
+                                if src_node == node_id { Some(*source_prop) }
+                                else if dst_node == node_id { Some(*dest_prop) }
+                                else { None }
+                            } else { None }
+                        }
+                        Edge::DerivInput { source_prop, .. } => {
+                            if graph.properties[source_prop.index()].node == node_id {
+                                Some(*source_prop)
+                            } else { None }
+                        }
+                        _ => None,
+                    })
+                    .collect();
+
+                // Collect inter-node constraint pairs for bipartite crossing
+                // detection.  For edges from this node to the same target node,
+                // crossings occur when source property order is inverted relative
+                // to target property order.  We record (local_prop, remote_prop,
+                // weight) and group by target node.
+                let mut inter_node_edges_by_target: HashMap<NodeId, Vec<(PropId, PropId, u32)>> =
+                    HashMap::new();
+                for edge in &graph.edges {
+                    if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                        let src_node = graph.properties[source_prop.index()].node;
+                        let dst_node = graph.properties[dest_prop.index()].node;
+                        if src_node == node_id && dst_node != node_id {
+                            inter_node_edges_by_target
+                                .entry(dst_node)
+                                .or_default()
+                                .push((*source_prop, *dest_prop, edge.weight()));
+                        } else if dst_node == node_id && src_node != node_id {
+                            inter_node_edges_by_target
+                                .entry(src_node)
+                                .or_default()
+                                .push((*dest_prop, *source_prop, edge.weight()));
+                        }
+                    }
+                }
+
                 // Build a quick index: prop_idx within current ordering
                 let prop_position: HashMap<PropId, usize> = props
                     .iter()
@@ -917,7 +967,9 @@ pub fn minimize_crossings(
                 // using adjacent swaps (bubble-sort style).  The barycenter
                 // sort above handles grouping and source-before-dest ordering
                 // but may leave crossings when multiple constraints share the
-                // same midpoint.  This pass detects and eliminates them.
+                // same midpoint.  This pass also penalizes cross-node edges
+                // that fall inside same-node brackets (which causes physical
+                // crossings when both route through the same corridor).
                 if !same_node_edges.is_empty() {
                     let max_passes = new_prop_order.len();
                     for _ in 0..max_passes {
@@ -935,9 +987,13 @@ pub fn minimize_crossings(
                                 .map(|(idx, &pid)| (pid, idx))
                                 .collect();
 
-                            // For each pair of same-node
-                            // constraints, check if swapping i and i+1 reduces
-                            // the total number of crossings.
+                            let swap_pos = |p: usize| -> usize {
+                                if p == i { i + 1 }
+                                else if p == i + 1 { i }
+                                else { p }
+                            };
+
+                            // Cost from same-node constraint pair crossings.
                             for e1_idx in 0..same_node_edges.len() {
                                 for e2_idx in (e1_idx + 1)..same_node_edges.len() {
                                     let (s1, d1, w1) = same_node_edges[e1_idx];
@@ -950,21 +1006,13 @@ pub fn minimize_crossings(
                                         pos.get(&s1), pos.get(&d1),
                                         pos.get(&s2), pos.get(&d2),
                                     ) {
-                                        // Current crossing?
                                         let crosses_now =
                                             (s1p < s2p) != (d1p < d2p)
                                             && s1p != s2p && d1p != d2p;
-
-                                        // After swapping positions i and i+1:
-                                        let swap_pos = |p: usize| -> usize {
-                                            if p == i { i + 1 }
-                                            else if p == i + 1 { i }
-                                            else { p }
-                                        };
-                                        let s1ps = swap_pos(s1p);
-                                        let d1ps = swap_pos(d1p);
-                                        let s2ps = swap_pos(s2p);
-                                        let d2ps = swap_pos(d2p);
+                                        let (s1ps, d1ps, s2ps, d2ps) = (
+                                            swap_pos(s1p), swap_pos(d1p),
+                                            swap_pos(s2p), swap_pos(d2p),
+                                        );
                                         let crosses_after =
                                             (s1ps < s2ps) != (d1ps < d2ps)
                                             && s1ps != s2ps && d1ps != d2ps;
@@ -972,6 +1020,55 @@ pub fn minimize_crossings(
                                         let w = (w1 + w2) as i64;
                                         if crosses_now { cost_current += w; }
                                         if crosses_after { cost_swapped += w; }
+                                    }
+                                }
+                            }
+
+                            // Cost from cross-node edges inside same-node brackets.
+                            for &(s, d, w) in &same_node_edges {
+                                if let (Some(&sp), Some(&dp)) = (pos.get(&s), pos.get(&d)) {
+                                    let (lo, hi) = if sp < dp { (sp, dp) } else { (dp, sp) };
+                                    for (r, &pid) in new_prop_order.iter().enumerate() {
+                                        if !cross_node_props.contains(&pid) { continue; }
+                                        let rs = swap_pos(r);
+                                        let (los, his) = (swap_pos(lo), swap_pos(hi));
+                                        if lo < r && r < hi { cost_current += w as i64; }
+                                        if los < rs && rs < his { cost_swapped += w as i64; }
+                                    }
+                                }
+                            }
+
+                            // Cost from inter-node bipartite crossings: two edges
+                            // from this node to the same target node cross when
+                            // their local property order is inverted relative to
+                            // the remote property order.
+                            for edges in inter_node_edges_by_target.values() {
+                                for e1 in 0..edges.len() {
+                                    for e2 in (e1 + 1)..edges.len() {
+                                        let (lp1, rp1, w1) = edges[e1];
+                                        let (lp2, rp2, w2) = edges[e2];
+                                        if let (Some(&l1), Some(&l2)) =
+                                            (pos.get(&lp1), pos.get(&lp2))
+                                        {
+                                            // Remote order is fixed (from the
+                                            // target node's current prop_order).
+                                            let r1 = prop_order.prop_index(
+                                                graph.properties[rp1.index()].node, rp1,
+                                            ).unwrap_or(0);
+                                            let r2 = prop_order.prop_index(
+                                                graph.properties[rp2.index()].node, rp2,
+                                            ).unwrap_or(0);
+                                            if r1 == r2 { continue; }
+
+                                            let w = (w1 + w2) as i64;
+                                            let crosses_now =
+                                                (l1 < l2) != (r1 < r2);
+                                            let (l1s, l2s) = (swap_pos(l1), swap_pos(l2));
+                                            let crosses_after =
+                                                (l1s < l2s) != (r1 < r2);
+                                            if crosses_now { cost_current += w; }
+                                            if crosses_after { cost_swapped += w; }
+                                        }
                                     }
                                 }
                             }

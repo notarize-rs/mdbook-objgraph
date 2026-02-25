@@ -192,8 +192,44 @@ fn sev_snp_realistic_no_node_overlaps() {
 #[test]
 fn sev_snp_realistic_quality_summary() {
     let input = include_str!("sev_snp_realistic.obgraph");
-    let report = run_quality(input);
+    let ast = parse::parse(input).expect("parse failed");
+    let graph = model::build(ast).expect("build failed");
+    let layout = mdbook_obgraph::layout::layout(&graph).expect("layout failed");
+    let report = quality::analyze(&graph, &layout);
     eprintln!("{}", report.summary());
+    if !report.crossing_pairs.is_empty() {
+        eprintln!("\n  Crossing pairs:");
+        for (a, b) in &report.crossing_pairs {
+            eprintln!("    {} x {}", describe_edge(&graph, *a), describe_edge(&graph, *b));
+        }
+    }
+}
+
+fn describe_edge(graph: &model::types::Graph, eid: model::types::EdgeId) -> String {
+    use model::types::Edge;
+    match &graph.edges[eid.index()] {
+        Edge::Anchor { parent, child, operation } => {
+            format!("A{}: {} <- {} ({})", eid.index(),
+                graph.nodes[child.index()].label(),
+                graph.nodes[parent.index()].label(),
+                operation.as_deref().unwrap_or(""))
+        }
+        Edge::Constraint { source_prop, dest_prop, operation } => {
+            let sp = &graph.properties[source_prop.index()];
+            let dp = &graph.properties[dest_prop.index()];
+            format!("C{}: {}::{} <= {}::{} ({})", eid.index(),
+                graph.nodes[sp.node.index()].label(), sp.name,
+                graph.nodes[dp.node.index()].label(), dp.name,
+                operation.as_deref().unwrap_or(""))
+        }
+        Edge::DerivInput { source_prop, target_deriv } => {
+            let sp = &graph.properties[source_prop.index()];
+            let d = &graph.derivations[target_deriv.index()];
+            format!("D{}: {}::{} -> deriv({})", eid.index(),
+                graph.nodes[sp.node.index()].label(), sp.name,
+                d.operation)
+        }
+    }
 }
 
 #[test]

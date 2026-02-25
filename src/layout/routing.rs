@@ -377,6 +377,37 @@ fn find_deriv_layout(
 }
 
 
+/// For an intra-domain constraint, pick the corridor side that minimizes crossings.
+///
+/// Uses the same heuristic as `same_column_outer_side`: route away from the
+/// inter-column gap (the side with no neighbor domains). Falls back to Right.
+fn intra_domain_corridor_side(
+    graph: &Graph,
+    node_id: NodeId,
+    domain_layouts: &[DomainLayout],
+) -> PortSide {
+    let domain_id = match graph.nodes[node_id.index()].domain {
+        Some(d) => d,
+        None => return PortSide::Right,
+    };
+    let dl = match domain_layouts.iter().find(|dl| dl.id == domain_id) {
+        Some(d) => d,
+        None => return PortSide::Right,
+    };
+    let col_center = dl.x + dl.width / 2.0;
+    let has_left = domain_layouts.iter().any(|other| {
+        other.id != domain_id && other.x + other.width < col_center
+    });
+    let has_right = domain_layouts.iter().any(|other| {
+        other.id != domain_id && other.x > col_center
+    });
+    match (has_left, has_right) {
+        (true, false) => PortSide::Right,   // Gap is left, route right.
+        (false, true) => PortSide::Left,    // Gap is right, route left.
+        _ => PortSide::Right,               // Default: right corridor.
+    }
+}
+
 /// Determine if two nodes' domains are in the same column and which side is "outer".
 ///
 /// Two domains are in the same column if their x-ranges overlap significantly.
@@ -530,18 +561,32 @@ pub fn refine_port_sides(
                     sides.insert((edge_id, EndpointRole::Upstream), PortSide::Left);
                     sides.insert((edge_id, EndpointRole::Downstream), PortSide::Right);
                 } else {
-                    // Same center x: use per-node counter to alternate sides,
-                    // spreading edges across both corridors.
-                    let cnt = node_side_counter.entry(src_node).or_insert(0);
-                    let side = if (*cnt).is_multiple_of(2) {
-                        PortSide::Right
-                    } else {
-                        PortSide::Left
+                    // Same center x: pick a consistent side based on domain
+                    // geometry. For same-domain constraints, use the intra-domain
+                    // corridor side. For cross-domain, alternate to spread load.
+                    let same_domain = {
+                        let sd = graph.nodes[src_node.index()].domain;
+                        let td = graph.nodes[dst_node.index()].domain;
+                        sd.is_some() && sd == td
                     };
-                    *cnt += 1;
+                    let side = if same_domain {
+                        // Same domain: all edges go through same corridor to
+                        // minimize crossings between parallel edges.
+                        intra_domain_corridor_side(graph, src_node, domain_layouts)
+                    } else {
+                        // Cross-domain: alternate to spread across corridors.
+                        let cnt = node_side_counter.entry(src_node).or_insert(0);
+                        let s = if (*cnt).is_multiple_of(2) {
+                            PortSide::Right
+                        } else {
+                            PortSide::Left
+                        };
+                        *cnt += 1;
+                        let cnt2 = node_side_counter.entry(dst_node).or_insert(0);
+                        *cnt2 += 1;
+                        s
+                    };
                     sides.insert((edge_id, EndpointRole::Upstream), side);
-                    let cnt2 = node_side_counter.entry(dst_node).or_insert(0);
-                    *cnt2 += 1;
                     sides.insert((edge_id, EndpointRole::Downstream), side);
                 }
             }
@@ -1133,6 +1178,7 @@ fn edge_priority(edge: &Edge) -> u32 {
         Edge::Constraint { .. } => 2,
     }
 }
+
 
 /// Compute the vertical midpoint of an edge's endpoints in coordinate space.
 /// Used for topology-aware corridor channel allocation: edges are sorted by

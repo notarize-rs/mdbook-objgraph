@@ -44,6 +44,8 @@ pub struct QualityReport {
     /// Cross-domain constraint edges whose vertical segments fall inside
     /// an intra-domain corridor (between domain border and node area).
     pub inter_domain_edges_in_intra_corridors: Vec<(EdgeId, DomainId)>,
+    /// Pairs of edges whose SVG path segments geometrically cross.
+    pub crossing_pairs: Vec<(EdgeId, EdgeId)>,
     /// Pairs of edges that share the same vertical channel x-coordinate
     /// while their y-ranges overlap (channel collision).
     pub channel_collisions: Vec<(EdgeId, EdgeId)>,
@@ -245,7 +247,8 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         .collect();
 
     let node_edge_overlaps = find_node_edge_overlaps(graph, &layout.nodes, &parsed);
-    let edge_crossings = count_edge_crossings(&parsed);
+    let crossing_pairs = find_crossing_pairs(&parsed);
+    let edge_crossings = count_segment_crossings(&parsed);
     let total_edge_length = parsed
         .iter()
         .flat_map(|(_, segs)| segs.iter())
@@ -292,6 +295,7 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         free_nodes_inside_domains,
         domain_contiguity_violations,
         inter_domain_edges_in_intra_corridors,
+        crossing_pairs,
         channel_collisions,
         total_height,
         total_width,
@@ -741,7 +745,7 @@ fn edge_connects_to_node(graph: &Graph, edge_id: EdgeId, node_id: NodeId) -> boo
     }
 }
 
-fn count_edge_crossings(edges: &[(EdgeId, Vec<LineSeg>)]) -> usize {
+fn count_segment_crossings(edges: &[(EdgeId, Vec<LineSeg>)]) -> usize {
     let mut count = 0;
     for i in 0..edges.len() {
         for j in (i + 1)..edges.len() {
@@ -755,6 +759,26 @@ fn count_edge_crossings(edges: &[(EdgeId, Vec<LineSeg>)]) -> usize {
         }
     }
     count
+}
+
+fn find_crossing_pairs(edges: &[(EdgeId, Vec<LineSeg>)]) -> Vec<(EdgeId, EdgeId)> {
+    let mut pairs = Vec::new();
+    for i in 0..edges.len() {
+        for j in (i + 1)..edges.len() {
+            let mut crosses = false;
+            for seg_a in &edges[i].1 {
+                for seg_b in &edges[j].1 {
+                    if segments_cross(seg_a, seg_b) {
+                        crosses = true;
+                    }
+                }
+            }
+            if crosses {
+                pairs.push((edges[i].0, edges[j].0));
+            }
+        }
+    }
+    pairs
 }
 
 fn compute_node_width_delta(nodes: &[NodeLayout]) -> f64 {
