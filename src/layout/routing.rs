@@ -638,8 +638,34 @@ pub fn refine_port_sides(
                 } else if src_cx > tgt_cx {
                     sides.insert((edge_id, EndpointRole::Upstream), PortSide::Left);
                     sides.insert((edge_id, EndpointRole::Downstream), PortSide::Right);
+                } else {
+                    // Same center x — determine side from the derivation output
+                    // domain's position. Input edges enter the pill from the side
+                    // opposite the output (i.e. the side facing the source domains).
+                    let deriv = &graph.derivations[target_deriv.index()];
+                    let out_node = graph.properties[deriv.output_prop.index()].node;
+                    let out_nl = find_node_layout(node_layouts, out_node);
+                    let side = if let Some(out_nl) = out_nl {
+                        let out_cx = out_nl.x + out_nl.width / 2.0;
+                        if out_cx < tgt_cx {
+                            // Output is to the left — inputs enter from the right
+                            // (pill faces left toward output, right toward inputs).
+                            // Source exits left to reach the corridor between columns,
+                            // enters pill from left (same corridor side).
+                            PortSide::Left
+                        } else if out_cx > tgt_cx {
+                            // Output is to the right — inputs enter from the left.
+                            PortSide::Right
+                        } else {
+                            // All aligned — default to right.
+                            PortSide::Right
+                        }
+                    } else {
+                        PortSide::Right
+                    };
+                    sides.insert((edge_id, EndpointRole::Upstream), side);
+                    sides.insert((edge_id, EndpointRole::Downstream), side);
                 }
-                // else: same center x — leave unassigned for center-port routing
             }
         }
     }
@@ -737,6 +763,10 @@ struct PortDistributor {
     slots: std::collections::HashMap<(EdgeId, PropId, PortSide), usize>,
     /// Total connections per (PropId, PortSide).
     counts: std::collections::HashMap<(PropId, PortSide), usize>,
+    /// Pre-computed slot index for derivation pill side ports: (EdgeId, DerivId, PortSide) -> slot.
+    deriv_slots: std::collections::HashMap<(EdgeId, crate::model::types::DerivId, PortSide), usize>,
+    /// Total connections per (DerivId, PortSide) on the derivation pill.
+    deriv_counts: std::collections::HashMap<(crate::model::types::DerivId, PortSide), usize>,
 }
 
 impl PortDistributor {
@@ -756,6 +786,12 @@ impl PortDistributor {
         // Collect (edge_id, role, opposite_y) per (PropId, PortSide).
         let mut prop_side_edges: std::collections::HashMap<
             (PropId, PortSide),
+            Vec<(EdgeId, f64)>,
+        > = std::collections::HashMap::new();
+
+        // Collect derivation pill downstream connections: (DerivId, PortSide) -> Vec<(EdgeId, src_y)>.
+        let mut deriv_side_edges: std::collections::HashMap<
+            (crate::model::types::DerivId, PortSide),
             Vec<(EdgeId, f64)>,
         > = std::collections::HashMap::new();
 
@@ -779,13 +815,19 @@ impl PortDistributor {
                             .or_default().push((edge_id, opp_y));
                     }
                 }
-                Edge::DerivInput { source_prop, .. } => {
+                Edge::DerivInput { source_prop, target_deriv, .. } => {
                     if let Some(&side) = port_sides.get(&(edge_id, EndpointRole::Upstream)) {
                         *counts.entry((*source_prop, side)).or_insert(0) += 1;
                         let opp_y = opposite_y(graph, edge, EndpointRole::Upstream,
                             node_layouts, deriv_layouts, prop_order);
                         prop_side_edges.entry((*source_prop, side))
                             .or_default().push((edge_id, opp_y));
+                    }
+                    // Track downstream (derivation pill) side connections.
+                    if let Some(&side) = port_sides.get(&(edge_id, EndpointRole::Downstream)) {
+                        deriv_side_edges.entry((*target_deriv, side))
+                            .or_default().push((edge_id, opposite_y(graph, edge, EndpointRole::Downstream,
+                                node_layouts, deriv_layouts, prop_order)));
                     }
                 }
                 Edge::Anchor { .. } => {} // anchors use center ports
@@ -801,7 +843,18 @@ impl PortDistributor {
             }
         }
 
-        PortDistributor { slots, counts }
+        // Sort derivation pill connections by source Y and assign slot indices.
+        let mut deriv_slots = std::collections::HashMap::new();
+        let mut deriv_counts = std::collections::HashMap::new();
+        for ((deriv_id, side), mut edges) in deriv_side_edges {
+            edges.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            deriv_counts.insert((deriv_id, side), edges.len());
+            for (slot, (edge_id, _)) in edges.iter().enumerate() {
+                deriv_slots.insert((*edge_id, deriv_id, side), slot);
+            }
+        }
+
+        PortDistributor { slots, counts, deriv_slots, deriv_counts }
     }
 
     /// Get the distributed y for a property-side connection using pre-computed slot.
@@ -809,6 +862,22 @@ impl PortDistributor {
         let total = self.counts.get(&(prop_id, side)).copied().unwrap_or(1);
         let slot = self.slots.get(&(edge_id, prop_id, side)).copied().unwrap_or(0);
         nl.distributed_port_y(prop_idx, slot, total)
+    }
+
+    /// Get the distributed y for a derivation pill side port.
+    ///
+    /// When multiple inputs enter the same side, distributes them vertically
+    /// along the pill's side edge to avoid overlap.
+    fn deriv_port_y(&self, dl: &DerivLayout, edge_id: EdgeId, side: PortSide) -> f64 {
+        let total = self.deriv_counts.get(&(dl.id, side)).copied().unwrap_or(1);
+        let slot = self.deriv_slots.get(&(edge_id, dl.id, side)).copied().unwrap_or(0);
+        if total <= 1 {
+            return dl.y + dl.height / 2.0;
+        }
+        // Distribute slots evenly within the pill height.
+        let segment = dl.height / (total as f64 + 1.0);
+        let y = dl.y + segment * (slot as f64 + 1.0);
+        (y / 2.0).round() * 2.0
     }
 }
 
@@ -942,16 +1011,20 @@ fn port_position(
                 }
                 EndpointRole::Downstream => {
                     // Downstream of DerivInput connects to derivation pill
-                    // at the assigned side (left or right at mid-height),
-                    // falling back to top-center if no side is assigned.
+                    // at the assigned side (left or right), with vertical
+                    // distribution when multiple inputs share the same side.
+                    // Falls back to top-center if no side is assigned.
                     let dl = find_deriv_layout(deriv_layouts, *target_deriv)?;
                     let side = port_sides.get(&(edge_id, role)).copied();
                     match side {
-                        Some(PortSide::Left) => {
-                            Some((dl.x, dl.y + dl.height / 2.0, Some(PortSide::Left)))
-                        }
-                        Some(PortSide::Right) => {
-                            Some((dl.x + dl.width, dl.y + dl.height / 2.0, Some(PortSide::Right)))
+                        Some(s) => {
+                            let x = match s {
+                                PortSide::Left => dl.x,
+                                PortSide::Right => dl.x + dl.width,
+                            };
+                            // Distribute multiple inputs vertically along the pill side.
+                            let y = distributor.deriv_port_y(dl, edge_id, s);
+                            Some((x, y, Some(s)))
                         }
                         None => {
                             // No side assigned — connect to top center.
