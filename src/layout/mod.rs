@@ -252,6 +252,15 @@ pub enum PortSide {
     Right,
 }
 
+impl PortSide {
+    pub fn opposite(self) -> Self {
+        match self {
+            PortSide::Left => PortSide::Right,
+            PortSide::Right => PortSide::Left,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EndpointRole {
     Upstream,

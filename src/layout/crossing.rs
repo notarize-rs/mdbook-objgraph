@@ -1038,6 +1038,21 @@ pub fn minimize_crossings(
                                 }
                             }
 
+                            // Cost from bracket span: larger spans increase the
+                            // chance of crossing other brackets.  Penalizing span
+                            // encourages interleaved ordering (src1, dst1, src2,
+                            // dst2) which eliminates staircase overlaps.
+                            for &(s, d, w) in &same_node_edges {
+                                if let (Some(&sp), Some(&dp)) = (pos.get(&s), pos.get(&d)) {
+                                    let span_now = sp.abs_diff(dp) as i64;
+                                    let sp_s = swap_pos(sp);
+                                    let dp_s = swap_pos(dp);
+                                    let span_after = sp_s.abs_diff(dp_s) as i64;
+                                    cost_current += span_now * w as i64;
+                                    cost_swapped += span_after * w as i64;
+                                }
+                            }
+
                             // Cost from inter-node bipartite crossings: two edges
                             // from this node to the same target node cross when
                             // their local property order is inverted relative to
