@@ -1016,22 +1016,41 @@ pub fn expand_corridors_for_edges(
         let right_channels = max_overlap_count(&right_y_spans);
 
         // Compute the required corridor width for each side.
-        // Width needed: CORRIDOR_PAD (first channel offset from start) +
-        //               (num_channels - 1) * CHANNEL_GAP
+        // Width needed: CORRIDOR_PAD on each side of the channel group
+        // (clearance from domain boundary + clearance from nodes),
+        // plus (num_channels - 1) * CHANNEL_GAP between channels.
         let left_needed = if left_channels > 0 {
-            CORRIDOR_PAD + (left_channels as f64 - 1.0) * CHANNEL_GAP
+            2.0 * CORRIDOR_PAD + (left_channels as f64 - 1.0) * CHANNEL_GAP
         } else {
             0.0
         };
         let right_needed = if right_channels > 0 {
-            CORRIDOR_PAD + (right_channels as f64 - 1.0) * CHANNEL_GAP
+            2.0 * CORRIDOR_PAD + (right_channels as f64 - 1.0) * CHANNEL_GAP
         } else {
             0.0
         };
 
-        // How much extra space is needed beyond the default corridor?
-        let left_extra = (left_needed - default_corridor).max(0.0);
-        let right_extra = (right_needed - default_corridor).max(0.0);
+        // Compare against the CURRENT corridor width, not just the default.
+        // Same-column domains may have already been expanded by a prior domain's
+        // processing, so the corridor may already be wider than the default.
+        let dl_idx_tmp = domain_layouts.iter().position(|dl| dl.id == did).unwrap();
+        let members: Vec<&NodeLayout> = domain.members.iter().map(|nid| &node_layouts[nid.index()]).collect();
+        let current_left_corridor = if members.is_empty() {
+            default_corridor
+        } else {
+            let min_node_x = members.iter().map(|nl| nl.x).fold(f64::INFINITY, f64::min);
+            (min_node_x - domain_layouts[dl_idx_tmp].x).max(default_corridor)
+        };
+        let current_right_corridor = if members.is_empty() {
+            default_corridor
+        } else {
+            let max_node_right = members.iter().map(|nl| nl.x + nl.width).fold(f64::NEG_INFINITY, f64::max);
+            ((domain_layouts[dl_idx_tmp].x + domain_layouts[dl_idx_tmp].width) - max_node_right).max(default_corridor)
+        };
+
+        // How much extra space is needed beyond the current corridor?
+        let left_extra = (left_needed - current_left_corridor).max(0.0);
+        let right_extra = (right_needed - current_right_corridor).max(0.0);
 
         if left_extra < 0.01 && right_extra < 0.01 {
             continue;
