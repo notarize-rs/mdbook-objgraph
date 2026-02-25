@@ -31,7 +31,7 @@ impl Segment {
     }
 
     /// Starting point of this segment.
-    fn start(&self) -> (f64, f64) {
+    pub(super) fn start(&self) -> (f64, f64) {
         match self {
             Segment::Horizontal { y, x_start, .. } => (*x_start, *y),
             Segment::Vertical { x, y_start, .. } => (*x, *y_start),
@@ -39,7 +39,7 @@ impl Segment {
     }
 
     /// Ending point of this segment.
-    fn end(&self) -> (f64, f64) {
+    pub(super) fn end(&self) -> (f64, f64) {
         match self {
             Segment::Horizontal { y, x_end, .. } => (*x_end, *y),
             Segment::Vertical { x, y_end, .. } => (*x, *y_end),
@@ -1751,49 +1751,133 @@ pub fn generate_stub(route: &Route) -> Route {
     }
 }
 
-/// Returns the label position for a route: the midpoint of the first vertical
-/// segment, offset 4px horizontally. Falls back to arc-length midpoint if no
-/// vertical segment exists. Returns `(x, y, anchor)`.
-pub fn route_label_position(route: &Route) -> (f64, f64, &'static str) {
-    // Find first vertical segment.
-    for seg in &route.segments {
+/// Generate candidate label positions for a route, ordered by preference.
+///
+/// Returns up to 4 candidates.  The caller selects the one with fewest
+/// collisions against already-placed labels and layout obstacles.
+///
+/// Candidate strategies:
+///
+/// 1. **Middle horizontal segment** (5-segment H-V-H-V-H routes or V-H-V
+///    anchor routes): inter-layer space with few obstacles.
+///
+/// 2. **First horizontal segment** of an H-V-H bracket route: near the
+///    source port, each edge at a different y → natural separation.
+///
+/// 3. **Vertical segment at 25%**: near the source junction, away from the
+///    corridor midpoint where other edges are densest.
+///
+/// 4. **Vertical segment at 50%**: original midpoint position (fallback).
+pub fn route_label_candidates(route: &Route) -> Vec<(f64, f64, &'static str)> {
+    let mut candidates = Vec::new();
+    let n = route.segments.len();
+
+    // Candidate A: 5-segment route — middle horizontal segment (index 2).
+    if n == 5
+        && let Segment::Horizontal { y, x_start, x_end } = &route.segments[2]
+    {
+        let mid_x = (x_start + x_end) / 2.0;
+        candidates.push((mid_x, *y - 4.0, "middle"));
+    }
+
+    // Candidate B: V-H-V anchor route — middle horizontal segment (index 1).
+    if n == 3
+        && let (
+            Segment::Vertical { .. },
+            Segment::Horizontal { y, x_start, x_end },
+            Segment::Vertical { .. },
+        ) = (&route.segments[0], &route.segments[1], &route.segments[2])
+    {
+        let mid_x = (x_start + x_end) / 2.0;
+        candidates.push((mid_x, *y - 4.0, "middle"));
+    }
+
+    // Candidate C: first horizontal segment midpoint (bracket or 5-seg routes).
+    if (n == 3 || n == 5)
+        && let Segment::Horizontal { y, x_start, x_end } = &route.segments[0]
+        && (x_end - x_start).abs() > 1.0
+    {
+        let mid_x = (x_start + x_end) / 2.0;
+        candidates.push((mid_x, *y - 4.0, "middle"));
+    }
+
+    // Candidate D: last horizontal segment midpoint.
+    if n >= 3
+        && let Segment::Horizontal { y, x_start, x_end } = route.segments.last().unwrap()
+        && (x_end - x_start).abs() > 1.0
+    {
+        let mid_x = (x_start + x_end) / 2.0;
+        let pos = (mid_x, *y - 4.0, "middle");
+        if !candidates.iter().any(|c| (c.0 - pos.0).abs() < 1.0 && (c.1 - pos.1).abs() < 1.0) {
+            candidates.push(pos);
+        }
+    }
+
+    // Candidate E/F: Vertical segment at 25% and 50%.
+    for (i, seg) in route.segments.iter().enumerate() {
         if let Segment::Vertical { x, y_start, y_end } = seg {
-            let mid_y = (y_start + y_end) / 2.0;
-            // Determine which side to offset based on horizontal context.
-            // If there's a preceding horizontal segment going right-to-left (x_end < x_start),
-            // the label goes to the right of the channel; otherwise to the left.
-            let offset_right = route.segments.first().is_none_or(|first| {
-                match first {
+            let offset_right = if i > 0 {
+                match &route.segments[i - 1] {
                     Segment::Horizontal { x_start, x_end, .. } => x_end > x_start,
                     _ => true,
                 }
-            });
-            if offset_right {
-                return (*x + 4.0, mid_y, "start");
             } else {
-                return (*x - 4.0, mid_y, "end");
+                true
+            };
+            let (off_x, anchor) = if offset_right {
+                (*x + 4.0, "start")
+            } else {
+                (*x - 4.0, "end")
+            };
+
+            // 25% position (near source junction).
+            let y_25 = y_start + (y_end - y_start) * 0.25;
+            candidates.push((off_x, y_25, anchor));
+
+            // 50% position (midpoint — original placement).
+            let y_50 = (y_start + y_end) / 2.0;
+            candidates.push((off_x, y_50, anchor));
+
+            break; // Only use first vertical segment.
+        }
+    }
+
+    // Fallback: arc-length midpoint.
+    if candidates.is_empty() {
+        let total: f64 = route.segments.iter().map(|s| s.length()).sum();
+        if total < 1e-9 {
+            let (x, y) = route.segments.first().map(|s| s.start()).unwrap_or((0.0, 0.0));
+            candidates.push((x, y, "middle"));
+        } else {
+            let mut remaining = total / 2.0;
+            for seg in &route.segments {
+                let len = seg.length();
+                if remaining <= len {
+                    let frac = remaining / len;
+                    let (sx, sy) = seg.start();
+                    let (ex, ey) = seg.end();
+                    candidates.push((sx + (ex - sx) * frac, sy + (ey - sy) * frac, "middle"));
+                    break;
+                }
+                remaining -= len;
+            }
+            if candidates.is_empty() {
+                let (x, y) = route.segments.last().map(|s| s.end()).unwrap_or((0.0, 0.0));
+                candidates.push((x, y, "middle"));
             }
         }
     }
-    // Fallback: arc-length midpoint.
-    let total: f64 = route.segments.iter().map(|s| s.length()).sum();
-    if total < 1e-9 {
-        let (x, y) = route.segments.first().map(|s| s.start()).unwrap_or((0.0, 0.0));
-        return (x, y, "middle");
-    }
-    let mut remaining = total / 2.0;
-    for seg in &route.segments {
-        let len = seg.length();
-        if remaining <= len {
-            let frac = remaining / len;
-            let (sx, sy) = seg.start();
-            let (ex, ey) = seg.end();
-            return (sx + (ex - sx) * frac, sy + (ey - sy) * frac, "middle");
-        }
-        remaining -= len;
-    }
-    let (x, y) = route.segments.last().map(|s| s.end()).unwrap_or((0.0, 0.0));
-    (x, y, "middle")
+
+    candidates
+}
+
+/// Returns the label position for a route (simple version without collision
+/// avoidance).  Picks the first candidate from `route_label_candidates`.
+pub fn route_label_position(route: &Route) -> (f64, f64, &'static str) {
+    route_label_candidates(route)
+        .into_iter()
+        .next()
+        .unwrap_or((0.0, 0.0, "middle"))
 }
 
 /// Convert a Route to an EdgePath.  If `label_text` is Some, an EdgeLabel is

@@ -557,6 +557,121 @@ fn recenter_derivations(
 }
 
 // ---------------------------------------------------------------------------
+// Label collision helpers
+// ---------------------------------------------------------------------------
+
+/// A line segment as two endpoints: ((x1,y1), (x2,y2)).
+type LineSeg = ((f64, f64), (f64, f64));
+
+/// AABB overlap test for two (x, y, w, h) rectangles.
+fn aabbs_overlap(a: &(f64, f64, f64, f64), b: &(f64, f64, f64, f64)) -> bool {
+    let (ax, ay, aw, ah) = *a;
+    let (bx, by, bw, bh) = *b;
+    ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by
+}
+
+/// Test if a line segment ((x1,y1),(x2,y2)) intersects an AABB (x,y,w,h).
+fn segment_intersects_aabb(
+    seg: &LineSeg,
+    aabb: &(f64, f64, f64, f64),
+) -> bool {
+    let ((x1, y1), (x2, y2)) = *seg;
+    let (ax, ay, aw, ah) = *aabb;
+    // Bounding box quick reject.
+    let seg_min_x = x1.min(x2);
+    let seg_max_x = x1.max(x2);
+    let seg_min_y = y1.min(y2);
+    let seg_max_y = y1.max(y2);
+    if seg_max_x < ax || seg_min_x > ax + aw || seg_max_y < ay || seg_min_y > ay + ah {
+        return false;
+    }
+    // For orthogonal segments (our case), the BB test is sufficient:
+    // a horizontal or vertical segment whose BB overlaps the AABB does intersect.
+    true
+}
+
+/// Pick the best label candidate position by minimizing collisions.
+///
+/// Scores each candidate against:
+/// - Already-placed labels (Label-Label overlap: +3 penalty)
+/// - Domain/node obstacle AABBs (Label-Domain/Node overlap: +1 penalty each)
+/// - Other edge segments (Edge-Label overlap: +2 penalty each, max 4)
+fn pick_best_label_candidate(
+    candidates: &[(f64, f64, &'static str)],
+    text: &str,
+    font_size: f64,
+    placed_labels: &[(f64, f64, f64, f64)],
+    obstacle_aabbs: &[(f64, f64, f64, f64)],
+    edge_segments: &[Vec<LineSeg>],
+    own_route_idx: usize,
+) -> (f64, f64, &'static str) {
+    if candidates.len() <= 1 {
+        return candidates.first().copied().unwrap_or((0.0, 0.0, "middle"));
+    }
+
+    let text_width = text.len() as f64 * font_size * LABEL_CHAR_WIDTH_FACTOR;
+
+    let mut best = candidates[0];
+    let mut best_score = u32::MAX;
+
+    for &(cx, cy, anchor) in candidates {
+        // Compute this candidate's bounding box.
+        let (left, right) = match anchor {
+            "start" => (cx, cx + text_width),
+            "end" => (cx - text_width, cx),
+            _ => (cx - text_width / 2.0, cx + text_width / 2.0),
+        };
+        let bb = (left, cy - font_size, right - left, font_size);
+
+        let mut score: u32 = 0;
+
+        // Label-Label collisions (high penalty).
+        for placed in placed_labels {
+            if aabbs_overlap(&bb, placed) {
+                score += 3;
+            }
+        }
+
+        // Label-Domain/Node collisions (moderate penalty).
+        for obs in obstacle_aabbs {
+            if aabbs_overlap(&bb, obs) {
+                score += 1;
+            }
+        }
+
+        // Edge-Label collisions (moderate penalty, capped to limit cost).
+        let mut edge_hits = 0u32;
+        for (idx, segs) in edge_segments.iter().enumerate() {
+            if idx == own_route_idx {
+                continue;
+            }
+            if edge_hits >= 4 {
+                break;
+            }
+            for seg in segs {
+                if segment_intersects_aabb(seg, &bb) {
+                    edge_hits += 1;
+                    break;
+                }
+            }
+        }
+        score += edge_hits * 2;
+
+        if score < best_score {
+            best_score = score;
+            best = (cx, cy, anchor);
+        }
+
+        // Perfect score — stop early.
+        if score == 0 {
+            break;
+        }
+    }
+
+    best
+}
+
+// ---------------------------------------------------------------------------
 // Main layout entry point
 // ---------------------------------------------------------------------------
 
@@ -636,12 +751,39 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         &prop_order,
     );
 
-    // Classify edges into anchors, derivation edges, and constraints
+    // Classify edges into anchors, derivation edges, and constraints.
+    //
+    // Labels are placed using a collision-aware candidate selection:
+    // each edge generates multiple candidate label positions and the
+    // one with the fewest overlaps against already-placed labels,
+    // domain boundaries, and other edge segments is chosen.
     let mut anchors = Vec::new();
     let mut intra_domain_constraints = Vec::new();
     let mut cross_domain_constraints: Vec<CrossDomainPaths> = Vec::new();
 
-    for route in &routes {
+    // Collect obstacle AABBs: domain bounding boxes and node bounding boxes.
+    let obstacle_aabbs: Vec<(f64, f64, f64, f64)> = domain_layouts
+        .iter()
+        .map(|dl| (dl.x, dl.y, dl.width, dl.height))
+        .chain(node_layouts.iter().map(|nl| (nl.x, nl.y, nl.width, nl.height)))
+        .collect();
+
+    // Already-placed label bounding boxes for collision detection.
+    let mut placed_label_bbs: Vec<(f64, f64, f64, f64)> = Vec::new();
+
+    // Pre-parse edge segments for edge-label collision checking.
+    let edge_segments: Vec<Vec<LineSeg>> = routes
+        .iter()
+        .map(|route| {
+            route
+                .segments
+                .iter()
+                .map(|seg| (seg.start(), seg.end()))
+                .collect()
+        })
+        .collect();
+
+    for (route_idx, route) in routes.iter().enumerate() {
         let edge = &graph.edges[route.edge_id.index()];
         let label_text = edge_operation(edge);
         let label_font_size = match edge {
@@ -649,8 +791,25 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
             Edge::Constraint { .. } | Edge::DerivInput { .. } => CONSTRAINT_LABEL_SIZE,
         };
         let label = label_text.map(|text| {
-            let (x, y, anchor) = routing::route_label_position(route);
-            EdgeLabel { text, x, y, anchor, font_size: label_font_size }
+            let candidates = routing::route_label_candidates(route);
+            let (x, y, anchor) = pick_best_label_candidate(
+                &candidates,
+                &text,
+                label_font_size,
+                &placed_label_bbs,
+                &obstacle_aabbs,
+                &edge_segments,
+                route_idx,
+            );
+            let lbl = EdgeLabel {
+                text,
+                x,
+                y,
+                anchor,
+                font_size: label_font_size,
+            };
+            placed_label_bbs.push(lbl.bounding_box());
+            lbl
         });
         let svg_path = routing::route_to_svg_path(route);
         let edge_path = EdgePath {
