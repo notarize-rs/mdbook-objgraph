@@ -8,7 +8,7 @@ use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId};
 
 use super::{
     DerivLayout, DomainLayout, EdgeLabel, EdgePath, LayoutResult, NodeLayout, StubPath,
-    ARROWHEAD_SIZE, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT, NODE_H_SPACING,
+    ARROWHEAD_SIZE, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT,
 };
 
 // ---------------------------------------------------------------------------
@@ -93,6 +93,10 @@ pub struct QualityReport {
     /// Each entry is (edge_id, node_id, hidden_px, total_px) — the edge connects
     /// to the node but a significant portion of its path is inside the node AABB.
     pub connected_edge_occlusion: Vec<(EdgeId, NodeId, f64, f64)>,
+    /// Labels whose AABB overlaps a node AABB by >50%. Unlike
+    /// `labels_hidden_under_nodes` (full containment), this catches partial
+    /// occlusion where the label is mostly behind a node but not fully inside it.
+    pub labels_occluded_by_nodes: Vec<(EdgeId, NodeId, f64)>,
 
     // ── Canvas overflow (elements outside canvas bounds) ─────────────
     /// Nodes partially or fully outside the canvas.
@@ -134,36 +138,50 @@ impl QualityReport {
         self.warning_count() > 0
     }
 
-    /// Human-readable summary grouped by category.
-    pub fn summary(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push(format!(
-            "Quality Report: {} errors, {} warnings",
-            self.error_count(),
-            self.warning_count()
-        ));
+    // ── Requirement metrics (MUST be zero) ─────────────────────────
 
-        // ── Existing metrics ─────────────────────────────────────────
-        lines.push(format!("  Node-node overlaps:    {}", self.node_overlaps.len()));
-        lines.push(format!("  Domain overlaps:       {}", self.domain_overlaps.len()));
-        lines.push(format!("  Nodes outside domain:  {}", self.nodes_outside_domain.len()));
-        lines.push(format!("  Node-edge overlaps:    {}", self.node_edge_overlaps.len()));
-        lines.push(format!("  Edge-edge crossings:   {}", self.edge_crossings));
-        lines.push(format!("  Min node gap:          {:.1}px (threshold: {:.1}px)", self.min_node_gap, NODE_H_SPACING));
-        lines.push(format!("  Aspect ratio:          {:.2}", self.aspect_ratio));
-        lines.push(format!("  Total edge length:     {:.0}px", self.total_edge_length));
-        lines.push(format!("  Node width delta:      {:.1}px", self.node_width_delta));
-        lines.push(format!("  Max parent misalign:   {:.1}px", self.max_parent_misalignment));
-        lines.push(format!("  Mean constraint segs:  {:.1}", self.mean_constraint_segments));
-        lines.push(format!("  Dimensions:            {:.0}w x {:.0}h px", self.total_width, self.total_height));
-        lines.push(format!("  Column heights:        {:?}", self.column_heights.iter().map(|h| format!("{:.0}", h)).collect::<Vec<_>>()));
-        lines.push(format!("  Column height imbal:   {:.0}px", self.column_height_imbalance));
+    /// All metrics that represent hard correctness requirements.
+    /// Every item in this list must be driven to zero.
+    fn requirement_items(&self) -> Vec<(&'static str, usize)> {
+        vec![
+            // Structural correctness
+            ("Node↔Node overlaps", self.node_overlaps.len()),
+            ("Domain↔Domain overlaps", self.domain_overlaps.len()),
+            ("Nodes outside domain", self.nodes_outside_domain.len()),
+            ("Derivs inside domains", self.derivs_inside_domains.len()),
+            ("Free nodes inside domains", self.free_nodes_inside_domains.len()),
+            ("Domain contiguity violations", self.domain_contiguity_violations.len()),
+            // Corridor correctness
+            ("Inter-domain in intra-corridor", self.inter_domain_edges_in_intra_corridors.len()),
+            ("Intra-edge in wrong corridor", self.intra_edges_in_wrong_corridor.len()),
+            ("Channel collisions", self.channel_collisions.len()),
+            // Element overlap (hard)
+            ("Node↔Deriv overlaps", self.node_deriv_overlaps.len()),
+            ("Deriv↔Deriv overlaps", self.deriv_deriv_overlaps.len()),
+            // Occlusion (hidden elements)
+            ("Edges hidden under nodes", self.edges_hidden_under_nodes.len()),
+            ("Labels hidden under nodes", self.labels_hidden_under_nodes.len()),
+            ("Labels occluded by nodes", self.labels_occluded_by_nodes.len()),
+            ("Arrows hidden under nodes", self.arrowheads_hidden_under_nodes.len()),
+            ("Stubs hidden under nodes", self.stubs_hidden_under_nodes.len()),
+            ("Connected-edge occlusion", self.connected_edge_occlusion.len()),
+            // Canvas overflow
+            ("Nodes outside canvas", self.nodes_outside_canvas.len()),
+            ("Domains outside canvas", self.domains_outside_canvas.len()),
+            ("Derivs outside canvas", self.derivs_outside_canvas.len()),
+            ("Edges outside canvas", self.edges_outside_canvas.len()),
+            ("Labels outside canvas", self.labels_outside_canvas.len()),
+            ("Arrows outside canvas", self.arrowheads_outside_canvas.len()),
+            ("Stubs outside canvas", self.stubs_outside_canvas.len()),
+        ]
+    }
 
-        // ── Collision matrix ─────────────────────────────────────────
-        lines.push(String::new());
-        lines.push("  Collision matrix:".to_string());
-        let collision_fields: &[(&str, usize)] = &[
-            ("Node↔Deriv", self.node_deriv_overlaps.len()),
+    // ── Quality metrics (minimize/maximize) ────────────────────────
+
+    /// Collision matrix: all visual-element-pair overlaps.
+    /// These should be minimized toward zero but may not always be achievable.
+    fn collision_items(&self) -> Vec<(&'static str, usize)> {
+        vec![
             ("Label↔Node", self.label_node_overlaps.len()),
             ("Arrow↔Node", self.arrowhead_node_overlaps.len()),
             ("Stub↔Node", self.stub_node_overlaps.len()),
@@ -171,7 +189,6 @@ impl QualityReport {
             ("Label↔Domain", self.label_domain_overlaps.len()),
             ("Arrow↔Domain", self.arrowhead_domain_overlaps.len()),
             ("Stub↔Domain", self.stub_domain_overlaps.len()),
-            ("Deriv↔Deriv", self.deriv_deriv_overlaps.len()),
             ("Edge↔Deriv", self.edge_deriv_overlaps.len()),
             ("Label↔Deriv", self.label_deriv_overlaps.len()),
             ("Arrow↔Deriv", self.arrowhead_deriv_overlaps.len()),
@@ -190,180 +207,151 @@ impl QualityReport {
             ("Stub↔Stub", self.stub_stub_overlaps.len()),
             ("Stub↔DomTitle", self.stub_domain_title_overlaps.len()),
             ("DomTitle↔DomTitle", self.domain_title_title_overlaps.len()),
-        ];
-        for (name, count) in collision_fields {
-            if *count > 0 {
-                lines.push(format!("    {:<20} {}", name, count));
-            }
-        }
-        let total_collisions: usize = collision_fields.iter().map(|(_, c)| c).sum();
-        lines.push(format!("    Total new collisions: {}", total_collisions));
+            ("Node↔Edge", self.node_edge_overlaps.len()),
+        ]
+    }
 
-        // ── Occlusion ────────────────────────────────────────────────
+    /// Human-readable summary grouped by category.
+    pub fn summary(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Quality Report: {} requirement violations, {} quality issues",
+            self.error_count(),
+            self.warning_count()
+        ));
+
+        // ═══════════════════════════════════════════════════════════════
+        // REQUIREMENTS — must be zero
+        // ═══════════════════════════════════════════════════════════════
         lines.push(String::new());
-        lines.push("  Occlusion (hidden elements):".to_string());
-        lines.push(format!("    Edges hidden under nodes:  {}", self.edges_hidden_under_nodes.len()));
-        lines.push(format!("    Labels hidden under nodes: {}", self.labels_hidden_under_nodes.len()));
-        lines.push(format!("    Arrows hidden under nodes: {}", self.arrowheads_hidden_under_nodes.len()));
-        lines.push(format!("    Stubs hidden under nodes:  {}", self.stubs_hidden_under_nodes.len()));
-        lines.push(format!("    Connected-edge occlusion:  {}", self.connected_edge_occlusion.len()));
-        if !self.connected_edge_occlusion.is_empty() {
+        lines.push("  ═══ REQUIREMENTS (must be zero) ═══".to_string());
+        let req_items = self.requirement_items();
+        let req_total: usize = req_items.iter().map(|(_, c)| c).sum();
+        if req_total == 0 {
+            lines.push("    ALL CLEAR (0 violations)".to_string());
+        } else {
+            for (name, count) in &req_items {
+                if *count > 0 {
+                    lines.push(format!("    VIOLATION: {:<32} {}", name, count));
+                }
+            }
+            lines.push(format!("    Total violations: {}", req_total));
+            // Detail lines for violations
+            for &(a, b) in &self.node_overlaps {
+                lines.push(format!("      Node {} overlaps Node {}", a.0, b.0));
+            }
+            for &(a, b) in &self.domain_overlaps {
+                lines.push(format!("      Domain {} overlaps Domain {}", a.0, b.0));
+            }
+            for &(n, d) in &self.nodes_outside_domain {
+                lines.push(format!("      Node {} outside domain {}", n.0, d.0));
+            }
+            for &(d, dom) in &self.derivs_inside_domains {
+                lines.push(format!("      Deriv {} inside domain {}", d.0, dom.0));
+            }
+            for &(n, dom) in &self.free_nodes_inside_domains {
+                lines.push(format!("      Free node {} inside domain {}", n.0, dom.0));
+            }
+            for &(dom, n) in &self.domain_contiguity_violations {
+                lines.push(format!("      Domain {} contiguity violated by node {}", dom.0, n.0));
+            }
+            for &(eid, did) in &self.inter_domain_edges_in_intra_corridors {
+                lines.push(format!("      Inter-domain edge {} in intra-corridor of domain {}", eid.0, did.0));
+            }
+            for &(eid, did) in &self.intra_edges_in_wrong_corridor {
+                lines.push(format!("      Intra-domain edge {} in wrong corridor (domain {})", eid.0, did.0));
+            }
+            for &(a, b) in &self.channel_collisions {
+                lines.push(format!("      Channel collision: edge {} vs edge {}", a.0, b.0));
+            }
+            for &(n, d) in &self.node_deriv_overlaps {
+                lines.push(format!("      Node {} overlaps deriv {}", n.0, d.0));
+            }
+            for &(d1, d2) in &self.deriv_deriv_overlaps {
+                lines.push(format!("      Deriv {} overlaps deriv {}", d1.0, d2.0));
+            }
             for &(eid, nid, hidden, total) in &self.connected_edge_occlusion {
                 lines.push(format!(
-                    "      edge {} behind node {}: {:.0}/{:.0}px ({:.0}%)",
+                    "      Edge {} occluded by node {}: {:.0}/{:.0}px ({:.0}%)",
                     eid.0, nid.0, hidden, total, hidden / total * 100.0
+                ));
+            }
+            for &(eid, nid, pct) in &self.labels_occluded_by_nodes {
+                lines.push(format!(
+                    "      Label on edge {} occluded by node {}: {:.0}% hidden",
+                    eid.0, nid.0, pct * 100.0
                 ));
             }
         }
 
-        // ── Canvas overflow ────────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════
+        // QUALITY — minimize collisions
+        // ═══════════════════════════════════════════════════════════════
         lines.push(String::new());
-        lines.push("  Canvas overflow:".to_string());
-        let overflow_fields: &[(&str, usize)] = &[
-            ("Nodes", self.nodes_outside_canvas.len()),
-            ("Domains", self.domains_outside_canvas.len()),
-            ("Derivations", self.derivs_outside_canvas.len()),
-            ("Edges", self.edges_outside_canvas.len()),
-            ("Labels", self.labels_outside_canvas.len()),
-            ("Arrowheads", self.arrowheads_outside_canvas.len()),
-            ("Stubs", self.stubs_outside_canvas.len()),
-        ];
-        let total_overflow: usize = overflow_fields.iter().map(|(_, c)| c).sum();
-        if total_overflow == 0 {
-            lines.push("    (none)".to_string());
+        lines.push("  ═══ QUALITY: Collisions (minimize) ═══".to_string());
+        let collision_items = self.collision_items();
+        let collision_total: usize = collision_items.iter().map(|(_, c)| c).sum();
+        if collision_total == 0 {
+            lines.push("    PERFECT (0 collisions)".to_string());
         } else {
-            for (name, count) in overflow_fields {
+            for (name, count) in &collision_items {
                 if *count > 0 {
                     lines.push(format!("    {:<20} {}", name, count));
                 }
             }
-            lines.push(format!("    Total overflows:     {}", total_overflow));
+            lines.push(format!("    Total collisions:    {}", collision_total));
         }
 
-        // ── Domain corridor correctness ──────────────────────────────
+        // ═══════════════════════════════════════════════════════════════
+        // QUALITY — minimize crossings
+        // ═══════════════════════════════════════════════════════════════
         lines.push(String::new());
-        lines.push("  Domain corridor correctness:".to_string());
-        lines.push(format!("    Inter-domain in intra-corridor: {}", self.inter_domain_edges_in_intra_corridors.len()));
-        lines.push(format!("    Intra-edge in wrong corridor:   {}", self.intra_edges_in_wrong_corridor.len()));
+        lines.push("  ═══ QUALITY: Edge crossings (minimize) ═══".to_string());
+        lines.push(format!("    Edge-edge crossings:   {}", self.edge_crossings));
 
-        // ── Layout symmetry ──────────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════
+        // QUALITY — balance & symmetry (optimize toward ideal)
+        // ═══════════════════════════════════════════════════════════════
         lines.push(String::new());
-        lines.push("  Layout symmetry:".to_string());
-        lines.push(format!("    Visual balance:          {:.3} (0 = centered)", self.visual_balance));
-        lines.push(format!("    Column centering error:  {:.1}px (0 = aligned)", self.max_column_centering_error));
-        lines.push(format!("    Domain size CV:          {:.3} (0 = uniform)", self.domain_size_cv));
+        lines.push("  ═══ QUALITY: Balance & symmetry (optimize) ═══".to_string());
+        lines.push(format!("    Visual balance:          {:.3} (ideal: 0)", self.visual_balance));
+        lines.push(format!("    Column centering error:  {:.1}px (ideal: 0)", self.max_column_centering_error));
+        lines.push(format!("    Domain size CV:          {:.3} (ideal: 0)", self.domain_size_cv));
+        lines.push(format!("    Port side balance:       {:.3} (ideal: 1.0)", self.port_side_balance));
+        lines.push(format!("    Edge length CV:          {:.3} (ideal: 0)", self.edge_length_cv));
+        lines.push(format!("    Routing dir balance:     {:.3} (ideal: 1.0)", self.routing_direction_balance));
+        lines.push(format!("    Column height imbalance: {:.0}px (ideal: 0)", self.column_height_imbalance));
 
-        // ── Edge routing quality ─────────────────────────────────────
+        // ═══════════════════════════════════════════════════════════════
+        // INFORMATIONAL — dimensions & complexity
+        // ═══════════════════════════════════════════════════════════════
         lines.push(String::new());
-        lines.push("  Edge routing quality:".to_string());
-        lines.push(format!("    Port side balance:       {:.3} (1.0 = balanced)", self.port_side_balance));
-        lines.push(format!("    Edge length CV:          {:.3} (0 = uniform)", self.edge_length_cv));
+        lines.push("  ═══ INFO ═══".to_string());
+        lines.push(format!("    Dimensions:              {:.0}w x {:.0}h px", self.total_width, self.total_height));
+        lines.push(format!("    Aspect ratio:            {:.2}", self.aspect_ratio));
+        lines.push(format!("    Total edge length:       {:.0}px", self.total_edge_length));
+        lines.push(format!("    Min node gap:            {:.1}px", self.min_node_gap));
+        lines.push(format!("    Node width delta:        {:.1}px", self.node_width_delta));
+        lines.push(format!("    Max parent misalign:     {:.1}px", self.max_parent_misalignment));
+        lines.push(format!("    Mean constraint segs:    {:.1}", self.mean_constraint_segments));
+        lines.push(format!("    Column heights:          {:?}", self.column_heights.iter().map(|h| format!("{:.0}", h)).collect::<Vec<_>>()));
         lines.push(format!(
             "    Segment complexity:      [simple={}, bracket={}, spaghetti={}]",
             self.segment_complexity_distribution[0],
             self.segment_complexity_distribution[1],
             self.segment_complexity_distribution[2],
         ));
-        lines.push(format!("    Routing dir balance:     {:.3} (1.0 = symmetric)", self.routing_direction_balance));
-
-        // ── Error detail lines ───────────────────────────────────────
-        let has_detail = self.error_count() > 0;
-        if has_detail {
-            lines.push(String::new());
-            lines.push("  Error details:".to_string());
-        }
-        for &(a, b) in &self.node_overlaps {
-            lines.push(format!("    ERROR: Node {} overlaps Node {}", a.0, b.0));
-        }
-        for &(a, b) in &self.domain_overlaps {
-            lines.push(format!("    ERROR: Domain {} overlaps Domain {}", a.0, b.0));
-        }
-        for &(n, d) in &self.nodes_outside_domain {
-            lines.push(format!("    ERROR: Node {} outside domain {}", n.0, d.0));
-        }
-        for &(d, dom) in &self.derivs_inside_domains {
-            lines.push(format!("    ERROR: Deriv {} inside domain {}", d.0, dom.0));
-        }
-        for &(n, dom) in &self.free_nodes_inside_domains {
-            lines.push(format!("    ERROR: Free node {} inside domain {}", n.0, dom.0));
-        }
-        for &(dom, n) in &self.domain_contiguity_violations {
-            lines.push(format!("    ERROR: Domain {} contiguity violated by node {}", dom.0, n.0));
-        }
-        for &(eid, did) in &self.inter_domain_edges_in_intra_corridors {
-            lines.push(format!("    ERROR: Inter-domain edge {} in intra-corridor of domain {}", eid.0, did.0));
-        }
-        for &(a, b) in &self.channel_collisions {
-            lines.push(format!("    ERROR: Channel collision edge {} vs edge {}", a.0, b.0));
-        }
-        for &(n, d) in &self.node_deriv_overlaps {
-            lines.push(format!("    ERROR: Node {} overlaps deriv {}", n.0, d.0));
-        }
-        for &(d1, d2) in &self.deriv_deriv_overlaps {
-            lines.push(format!("    ERROR: Deriv {} overlaps deriv {}", d1.0, d2.0));
-        }
-        for &(eid, did) in &self.intra_edges_in_wrong_corridor {
-            lines.push(format!("    ERROR: Intra-domain edge {} in wrong corridor (domain {})", eid.0, did.0));
-        }
 
         lines.join("\n")
     }
 
     pub fn error_count(&self) -> usize {
-        self.node_overlaps.len()
-            + self.domain_overlaps.len()
-            + self.nodes_outside_domain.len()
-            + self.derivs_inside_domains.len()
-            + self.free_nodes_inside_domains.len()
-            + self.domain_contiguity_violations.len()
-            + self.inter_domain_edges_in_intra_corridors.len()
-            + self.channel_collisions.len()
-            + self.node_deriv_overlaps.len()
-            + self.deriv_deriv_overlaps.len()
-            + self.intra_edges_in_wrong_corridor.len()
+        self.requirement_items().iter().map(|(_, c)| c).sum()
     }
 
     pub fn warning_count(&self) -> usize {
-        let tight_gap = if self.min_node_gap < NODE_H_SPACING - 1.0 { 1 } else { 0 };
-        self.node_edge_overlaps.len()
-            + tight_gap
-            + self.label_node_overlaps.len()
-            + self.arrowhead_node_overlaps.len()
-            + self.stub_node_overlaps.len()
-            + self.edge_domain_boundary_crossings.len()
-            + self.label_domain_overlaps.len()
-            + self.arrowhead_domain_overlaps.len()
-            + self.stub_domain_overlaps.len()
-            + self.edge_deriv_overlaps.len()
-            + self.label_deriv_overlaps.len()
-            + self.arrowhead_deriv_overlaps.len()
-            + self.stub_deriv_overlaps.len()
-            + self.edge_label_overlaps.len()
-            + self.edge_arrowhead_overlaps.len()
-            + self.edge_stub_overlaps.len()
-            + self.edge_domain_title_overlaps.len()
-            + self.label_label_overlaps.len()
-            + self.label_arrowhead_overlaps.len()
-            + self.label_stub_overlaps.len()
-            + self.label_domain_title_overlaps.len()
-            + self.arrowhead_arrowhead_overlaps.len()
-            + self.arrowhead_stub_overlaps.len()
-            + self.arrowhead_domain_title_overlaps.len()
-            + self.stub_stub_overlaps.len()
-            + self.stub_domain_title_overlaps.len()
-            + self.domain_title_title_overlaps.len()
-            + self.edges_hidden_under_nodes.len()
-            + self.labels_hidden_under_nodes.len()
-            + self.arrowheads_hidden_under_nodes.len()
-            + self.stubs_hidden_under_nodes.len()
-            + self.connected_edge_occlusion.len()
-            + self.nodes_outside_canvas.len()
-            + self.domains_outside_canvas.len()
-            + self.derivs_outside_canvas.len()
-            + self.edges_outside_canvas.len()
-            + self.labels_outside_canvas.len()
-            + self.arrowheads_outside_canvas.len()
-            + self.stubs_outside_canvas.len()
+        self.collision_items().iter().map(|(_, c)| c).sum::<usize>()
+            + self.edge_crossings
     }
 }
 
@@ -537,6 +525,8 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         find_edges_hidden_under_nodes(graph, &layout.nodes, &parsed);
     let labels_hidden_under_nodes =
         find_labels_hidden_under_nodes(&layout.nodes, &all_labels);
+    let labels_occluded_by_nodes =
+        find_labels_occluded_by_nodes(&layout.nodes, &all_labels);
     let arrowheads_hidden_under_nodes =
         find_arrowheads_hidden_under_nodes(graph, &layout.nodes, &all_arrowheads);
     let stubs_hidden_under_nodes =
@@ -627,6 +617,7 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         domain_title_title_overlaps,
         edges_hidden_under_nodes,
         labels_hidden_under_nodes,
+        labels_occluded_by_nodes,
         arrowheads_hidden_under_nodes,
         stubs_hidden_under_nodes,
         connected_edge_occlusion,
@@ -1362,29 +1353,6 @@ fn find_inter_domain_edges_in_intra_corridors(
     violations
 }
 
-/// Returns true if both edges are constraints connecting the same pair of
-/// nodes (in either direction).  Used to exempt bundled corridor sharing
-/// from channel collision errors.
-fn same_node_pair_constraints(graph: &Graph, a: EdgeId, b: EdgeId) -> bool {
-    let pair = |eid: EdgeId| -> Option<(NodeId, NodeId)> {
-        if let Edge::Constraint { source_prop, dest_prop, .. } = &graph.edges[eid.index()] {
-            let sn = graph.properties[source_prop.index()].node;
-            let dn = graph.properties[dest_prop.index()].node;
-            if sn.index() <= dn.index() {
-                Some((sn, dn))
-            } else {
-                Some((dn, sn))
-            }
-        } else {
-            None
-        }
-    };
-    match (pair(a), pair(b)) {
-        (Some(pa), Some(pb)) => pa == pb,
-        _ => false,
-    }
-}
-
 /// Find pairs of edges that share the same vertical channel x-coordinate
 /// while their y-ranges overlap (channel collision).
 ///
@@ -1464,12 +1432,6 @@ fn find_channel_collisions(
             if (x_a - x_b).abs() < 0.5 && y_max_a > y_min_b + 0.5 && y_max_b > y_min_a + 0.5 {
                 // Exempt center-port edges that share a node or derivation.
                 if both_center_port(eid_a, eid_b) && shares_endpoint(eid_a, eid_b) {
-                    continue;
-                }
-                // Exempt constraint edges between the same node pair — these
-                // intentionally share a corridor channel (bundle routing) to
-                // prevent horizontal-vs-vertical crossing artifacts.
-                if same_node_pair_constraints(graph, eid_a, eid_b) {
                     continue;
                 }
                 collisions.push((eid_a, eid_b));
@@ -2095,6 +2057,40 @@ fn find_labels_hidden_under_nodes(
             let nb = Aabb::from_node(n);
             if nb.contains(&lb) {
                 out.push((eid, n.id));
+            }
+        }
+    }
+    out
+}
+
+/// Find labels that are >50% occluded by any node's AABB.
+/// Unlike `find_labels_hidden_under_nodes` (which requires full containment),
+/// this catches partial occlusion where a label is mostly behind a node.
+fn find_labels_occluded_by_nodes(
+    nodes: &[NodeLayout],
+    labels: &[(EdgeId, &EdgeLabel)],
+) -> Vec<(EdgeId, NodeId, f64)> {
+    let mut out = Vec::new();
+    for &(eid, label) in labels {
+        let lb = Aabb::from_label(label);
+        let label_area = lb.w * lb.h;
+        if label_area < 1.0 {
+            continue;
+        }
+        for n in nodes {
+            let nb = Aabb::from_node(n);
+            // Full containment is already caught by labels_hidden_under_nodes.
+            if nb.contains(&lb) {
+                continue;
+            }
+            // Compute intersection area.
+            let ix = (lb.x + lb.w).min(nb.x + nb.w) - lb.x.max(nb.x);
+            let iy = (lb.y + lb.h).min(nb.y + nb.h) - lb.y.max(nb.y);
+            if ix > 0.0 && iy > 0.0 {
+                let overlap_frac = (ix * iy) / label_area;
+                if overlap_frac > 0.50 {
+                    out.push((eid, n.id, overlap_frac));
+                }
             }
         }
     }
