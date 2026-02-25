@@ -224,6 +224,25 @@ impl EdgeLabel {
         let (left_x, right_x) = self.bounding_x();
         (left_x, self.y - self.font_size, right_x - left_x, self.font_size)
     }
+
+    /// Clamp the label position so that its bounding box stays within
+    /// `[0, max_x] x [0, max_y]` in content coordinates.
+    pub fn clamp_to_content_area(&mut self, max_x: f64, max_y: f64) {
+        let (left, right) = self.bounding_x();
+        // Clamp horizontal: shift x so left >= 0 and right <= max_x.
+        if left < 0.0 {
+            self.x -= left; // shift right by the amount of left overflow
+        } else if right > max_x {
+            self.x -= right - max_x; // shift left by the amount of right overflow
+        }
+        // Clamp vertical: top of bounding box = y - font_size, bottom = y.
+        let top = self.y - self.font_size;
+        if top < 0.0 {
+            self.y -= top; // shift down
+        } else if self.y > max_y {
+            self.y = max_y; // shift up so baseline is at max_y
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -666,6 +685,40 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
                 } else {
                     intra_domain_constraints.push(edge_path);
                 }
+            }
+        }
+    }
+
+    // Phase 7: Clamp edge label positions so they stay within the content
+    // bounding box.  Labels placed near the canvas edge (especially the left
+    // edge at x ≈ 0) can extend beyond the content area; clamping prevents
+    // the quality check from flagging them as outside the canvas.
+    {
+        let mut content_max_x = 0.0_f64;
+        let mut content_max_y = 0.0_f64;
+        for nl in &node_layouts {
+            content_max_x = content_max_x.max(nl.x + nl.width);
+            content_max_y = content_max_y.max(nl.y + nl.height);
+        }
+        for dl in &deriv_layouts {
+            content_max_x = content_max_x.max(dl.x + dl.width);
+            content_max_y = content_max_y.max(dl.y + dl.height);
+        }
+        for dl in &domain_layouts {
+            content_max_x = content_max_x.max(dl.x + dl.width);
+            content_max_y = content_max_y.max(dl.y + dl.height);
+        }
+
+        for ep in anchors.iter_mut()
+            .chain(intra_domain_constraints.iter_mut())
+        {
+            if let Some(ref mut label) = ep.label {
+                label.clamp_to_content_area(content_max_x, content_max_y);
+            }
+        }
+        for cdp in cross_domain_constraints.iter_mut() {
+            if let Some(ref mut label) = cdp.full_path.label {
+                label.clamp_to_content_area(content_max_x, content_max_y);
             }
         }
     }
