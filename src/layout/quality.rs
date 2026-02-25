@@ -767,6 +767,21 @@ impl Aabb {
     fn contains_point(&self, px: f64, py: f64) -> bool {
         px >= self.x && px <= self.x + self.w && py >= self.y && py <= self.y + self.h
     }
+
+    /// Fraction of `other` that is hidden (overlapped) by `self`.
+    /// Returns 0.0 if no overlap, 1.0 if fully contained.
+    fn overlap_fraction(&self, other: &Aabb) -> f64 {
+        let other_area = other.w * other.h;
+        if other_area <= 0.0 {
+            return 0.0;
+        }
+        let ix = (self.x + self.w).min(other.x + other.w) - self.x.max(other.x);
+        let iy = (self.y + self.h).min(other.y + other.h) - self.y.max(other.y);
+        if ix <= 0.0 || iy <= 0.0 {
+            return 0.0;
+        }
+        (ix * iy) / other_area
+    }
 }
 
 /// Test if a line segment intersects an AABB.
@@ -2082,7 +2097,8 @@ fn find_labels_hidden_under_nodes(
         let lb = Aabb::from_label(label);
         for n in nodes {
             let nb = Aabb::from_node(n);
-            if nb.contains(&lb) {
+            // Label is occluded if >50% of its area is behind the node.
+            if nb.overlap_fraction(&lb) > 0.5 {
                 out.push((eid, n.id));
             }
         }
@@ -2257,7 +2273,8 @@ fn find_connected_edge_occlusion(
 // ---------------------------------------------------------------------------
 
 /// Compute how many pixels of an AABB extend beyond the canvas bounds.
-/// Returns 0.0 if fully inside.
+/// Returns 0.0 if fully inside.  Coordinates are in canvas space (already
+/// shifted by the SVG translate offset).
 fn aabb_overflow(aabb: &Aabb, canvas_w: f64, canvas_h: f64) -> f64 {
     let mut overflow = 0.0_f64;
     if aabb.x < 0.0 {
@@ -2397,6 +2414,10 @@ fn find_edges_outside_canvas(
     margin_x: f64,
     margin_y: f64,
 ) -> Vec<(EdgeId, f64)> {
+    // Edge segments use segment_overflow which checks against canvas bounds
+    // directly; content_offset_x handling would need segment shifting.
+    // For now, keep existing behavior (edge coordinates are already correct
+    // relative to the content frame).
     edges
         .iter()
         .filter_map(|(eid, segs)| {

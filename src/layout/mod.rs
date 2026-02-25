@@ -598,12 +598,14 @@ fn segment_intersects_aabb(
 /// - Already-placed labels (Label-Label overlap: +3 penalty)
 /// - Domain/node obstacle AABBs (Label-Domain/Node overlap: +1 penalty each)
 /// - Other edge segments (Edge-Label overlap: +2 penalty each, max 4)
+#[allow(clippy::too_many_arguments)]
 fn pick_best_label_candidate(
     candidates: &[(f64, f64, &'static str)],
     text: &str,
     font_size: f64,
     placed_labels: &[(f64, f64, f64, f64)],
     obstacle_aabbs: &[(f64, f64, f64, f64)],
+    node_aabbs: &[(f64, f64, f64, f64)],
     edge_segments: &[Vec<LineSeg>],
     own_route_idx: usize,
 ) -> (f64, f64, &'static str) {
@@ -613,10 +615,35 @@ fn pick_best_label_candidate(
 
     let text_width = text.len() as f64 * font_size * LABEL_CHAR_WIDTH_FACTOR;
 
-    let mut best = candidates[0];
+    // Generate node-clearing candidates: for each primary candidate that would
+    // be occluded by a node, create a shifted version just outside the node.
+    let mut all_candidates: Vec<(f64, f64, &'static str)> = candidates.to_vec();
+    for &(cx, cy, anchor) in candidates {
+        let (left, _right) = match anchor {
+            "start" => (cx, cx + text_width),
+            "end" => (cx - text_width, cx),
+            _ => (cx - text_width / 2.0, cx + text_width / 2.0),
+        };
+        let bb = (left, cy - font_size, text_width.max(0.01), font_size);
+        for node_bb in node_aabbs {
+            let frac = overlap_fraction(node_bb, &bb);
+            if frac > 0.3 {
+                let node_right = node_bb.0 + node_bb.2;
+                let node_left = node_bb.0;
+                // Candidate shifted right: label starts just past node right edge.
+                let shifted_right_x = node_right + 2.0;
+                all_candidates.push((shifted_right_x, cy, "start"));
+                // Candidate shifted left: label ends just before node left edge.
+                let shifted_left_x = node_left - 2.0;
+                all_candidates.push((shifted_left_x, cy, "end"));
+            }
+        }
+    }
+
+    let mut best = all_candidates[0];
     let mut best_score = u32::MAX;
 
-    for &(cx, cy, anchor) in candidates {
+    for &(cx, cy, anchor) in &all_candidates {
         // Compute this candidate's bounding box.
         let (left, right) = match anchor {
             "start" => (cx, cx + text_width),
@@ -627,6 +654,17 @@ fn pick_best_label_candidate(
 
         let mut score: u32 = 0;
 
+        // Node occlusion penalty (very high — label becomes unreadable).
+        // Check each node: if >50% of label area is hidden behind node, heavy penalty.
+        for node_bb in node_aabbs {
+            let frac = overlap_fraction(node_bb, &bb);
+            if frac > 0.5 {
+                score += 100;
+            } else if frac > 0.01 {
+                score += 10;
+            }
+        }
+
         // Label-Label collisions (high penalty).
         for placed in placed_labels {
             if aabbs_overlap(&bb, placed) {
@@ -634,7 +672,7 @@ fn pick_best_label_candidate(
             }
         }
 
-        // Label-Domain/Node collisions (moderate penalty).
+        // Label-Domain collisions (moderate penalty).
         for obs in obstacle_aabbs {
             if aabbs_overlap(&bb, obs) {
                 score += 1;
@@ -671,6 +709,20 @@ fn pick_best_label_candidate(
     }
 
     best
+}
+
+/// Fraction of `other` that is overlapped by `self` (both as tuples `(x, y, w, h)`).
+fn overlap_fraction(a: &(f64, f64, f64, f64), b: &(f64, f64, f64, f64)) -> f64 {
+    let b_area = b.2 * b.3;
+    if b_area <= 0.0 {
+        return 0.0;
+    }
+    let ix = (a.0 + a.2).min(b.0 + b.2) - a.0.max(b.0);
+    let iy = (a.1 + a.3).min(b.1 + b.3) - a.1.max(b.1);
+    if ix <= 0.0 || iy <= 0.0 {
+        return 0.0;
+    }
+    (ix * iy) / b_area
 }
 
 // ---------------------------------------------------------------------------
@@ -763,11 +815,16 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     let mut intra_domain_constraints = Vec::new();
     let mut cross_domain_constraints: Vec<CrossDomainPaths> = Vec::new();
 
-    // Collect obstacle AABBs: domain bounding boxes and node bounding boxes.
+    // Collect obstacle AABBs: domain bounding boxes (moderate penalty for overlaps).
     let obstacle_aabbs: Vec<(f64, f64, f64, f64)> = domain_layouts
         .iter()
         .map(|dl| (dl.x, dl.y, dl.width, dl.height))
-        .chain(node_layouts.iter().map(|nl| (nl.x, nl.y, nl.width, nl.height)))
+        .collect();
+
+    // Node AABBs — labels hidden behind nodes are serious errors.
+    let node_aabbs: Vec<(f64, f64, f64, f64)> = node_layouts
+        .iter()
+        .map(|nl| (nl.x, nl.y, nl.width, nl.height))
         .collect();
 
     // Already-placed label bounding boxes for collision detection.
@@ -800,6 +857,7 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
                 label_font_size,
                 &placed_label_bbs,
                 &obstacle_aabbs,
+                &node_aabbs,
                 &edge_segments,
                 route_idx,
             );
@@ -1006,18 +1064,22 @@ fn compute_dimensions(
     labels: &[&EdgeLabel],
 ) -> (f64, f64, f64) {
     // Content bounding box (nodes, derivations, domains).
+    let mut content_min_x = 0.0_f64;
     let mut content_max_x = 0.0_f64;
     let mut max_y = 0.0_f64;
 
     for nl in node_layouts {
+        content_min_x = content_min_x.min(nl.x);
         content_max_x = content_max_x.max(nl.x + nl.width);
         max_y = max_y.max(nl.y + nl.height);
     }
     for dl in deriv_layouts {
+        content_min_x = content_min_x.min(dl.x);
         content_max_x = content_max_x.max(dl.x + dl.width);
         max_y = max_y.max(dl.y + dl.height);
     }
     for dl in domain_layouts {
+        content_min_x = content_min_x.min(dl.x);
         content_max_x = content_max_x.max(dl.x + dl.width);
         max_y = max_y.max(dl.y + dl.height);
     }
@@ -1025,7 +1087,7 @@ fn compute_dimensions(
     // Compute the horizontal extent of all edge labels, padded to
     // compensate for text-width estimation error (LABEL_OVERFLOW_PAD on
     // each side of every label bounding box).
-    let mut label_min_x = 0.0_f64;
+    let mut label_min_x = content_min_x;
     let mut label_max_x = content_max_x;
     for lbl in labels {
         let (left, right) = lbl.bounding_x();
@@ -1033,10 +1095,10 @@ fn compute_dimensions(
         label_max_x = label_max_x.max(right + LABEL_OVERFLOW_PAD);
     }
 
-    // If labels extend past the left edge, we need extra offset.
-    // The content_offset_x shifts the translate rightward so the leftmost
-    // label fits inside the global margin.
-    let content_offset_x = if label_min_x < 0.0 { -label_min_x } else { 0.0 };
+    // If any content (labels, nodes, domains) extends past the left edge
+    // (x < 0), compute offset to shift the content right.
+    let min_x = label_min_x.min(content_min_x);
+    let content_offset_x = if min_x < 0.0 { -min_x } else { 0.0 };
 
     // Total width accounts for: global margin on each side, content width,
     // plus any extra space needed for labels on either side.
