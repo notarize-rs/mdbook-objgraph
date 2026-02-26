@@ -1705,7 +1705,7 @@ fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
     struct BracketInfo {
         route_idx: usize,
         corridor_x: f64,
-        span: f64,  // |src_y - tgt_y|
+        min_y: f64, // top of vertical extent (smallest y)
     }
 
     // Group bracket routes by (node_pair, corridor_x_sign).
@@ -1749,12 +1749,15 @@ fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
         bundles.entry((lo, hi, is_right)).or_default().push(BracketInfo {
             route_idx: ri,
             corridor_x,
-            span: (src_y - tgt_y).abs(),
+            min_y: src_y.min(tgt_y),
         });
     }
 
-    // For each bundle with ≥2 brackets, sort by span and reassign
-    // corridor x-coordinates so shortest span → innermost channel.
+    // For each bundle with ≥2 brackets, reassign corridor x-coordinates
+    // so brackets nest properly (no source-side horizontal crosses an
+    // inner vertical).  The edge whose vertical starts earliest (smallest
+    // min_y) must be outermost — its horizontal enters above all inner
+    // verticals.
     for bundle in bundles.values_mut() {
         if bundle.len() < 2 { continue; }
 
@@ -1773,9 +1776,12 @@ fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Sort bundle by ascending span (shortest first = innermost).
+        // Sort bundle by min_y descending: largest min_y (deepest start)
+        // → innermost channel.  The edge whose vertical starts earliest
+        // (smallest min_y) ends up outermost, so its horizontal enters
+        // above all inner verticals and cannot cross them.
         bundle.sort_by(|a, b| {
-            a.span.partial_cmp(&b.span).unwrap_or(std::cmp::Ordering::Equal)
+            b.min_y.partial_cmp(&a.min_y).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Assign xs[i] to bundle[i]: shortest span → innermost x.
