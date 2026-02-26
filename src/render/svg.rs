@@ -168,11 +168,10 @@ fn is_edge_valid(edge_id: EdgeId, graph: &Graph, state: &StateResult) -> bool {
 fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &StateResult) {
     writeln!(out, r#"    <g class="obgraph-edges">"#).unwrap();
 
-    // --- Anchor paths (wrapped in <g> for property-hover filtering) ---
+    // --- Anchor paths ---
     writeln!(out, r#"      <g class="obgraph-anchors">"#).unwrap();
     for ep in &layout.anchors {
         let valid = is_edge_valid(ep.edge_id, graph, state);
-        let participants = edge_node_participants(ep.edge_id, graph);
         let (class, marker) = if valid {
             ("obgraph-anchor", "arrow-anchor-valid")
         } else {
@@ -180,16 +179,10 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         };
         writeln!(
             out,
-            r#"        <g data-participants="{p}" data-edge="{id}">"#,
-            p = participants,
-            id = ep.edge_id.0,
-        )
-        .unwrap();
-        writeln!(
-            out,
-            r#"          <path class="{class}" d="{d}" marker-end="url(#{marker})"/>"#,
+            r#"        <path class="{class}" d="{d}" data-edge="{id}" marker-end="url(#{marker})"/>"#,
             class = class,
             d = ep.svg_path,
+            id = ep.edge_id.0,
             marker = marker,
         )
         .unwrap();
@@ -197,20 +190,17 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
             let label_fill = if valid { "#22c55e" } else { "#ef4444" };
             writeln!(
                 out,
-                r##"          <text class="obgraph-anchor-label" x="{x}" y="{y}" fill="{fill}" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
+                r##"        <text class="obgraph-anchor-label" x="{x}" y="{y}" fill="{fill}" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
                 x = lbl.x, y = lbl.y, fill = label_fill, anchor = lbl.anchor, text = escape_xml(&lbl.text)
             ).unwrap();
         }
-        writeln!(out, r#"        </g>"#).unwrap();
     }
     writeln!(out, r#"      </g>"#).unwrap();
 
-    // --- Intra-domain constraint and derivation input paths (wrapped in <g> for property-hover filtering) ---
+    // --- Intra-domain constraint and derivation input paths ---
     writeln!(out, r#"      <g class="obgraph-constraints-intra">"#).unwrap();
     for ep in &layout.intra_domain_constraints {
         let valid = is_edge_valid(ep.edge_id, graph, state);
-        let participants = edge_node_participants(ep.edge_id, graph);
-        let props = props_attr(ep.edge_id, graph);
         let (class, marker) = if valid {
             ("obgraph-constraint", "arrow-constraint-valid")
         } else {
@@ -218,17 +208,10 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         };
         writeln!(
             out,
-            r#"        <g data-participants="{p}" data-props="{props}" data-edge="{id}">"#,
-            p = participants,
-            props = props,
-            id = ep.edge_id.0,
-        )
-        .unwrap();
-        writeln!(
-            out,
-            r#"          <path class="{class}" d="{d}" marker-end="url(#{marker})"/>"#,
+            r#"        <path class="{class}" d="{d}" data-edge="{id}" marker-end="url(#{marker})"/>"#,
             class = class,
             d = ep.svg_path,
+            id = ep.edge_id.0,
             marker = marker,
         )
         .unwrap();
@@ -236,11 +219,10 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
             let label_fill = if valid { "#60a5fa" } else { "#ef4444" };
             writeln!(
                 out,
-                r##"          <text class="obgraph-constraint-label" x="{x}" y="{y}" fill="{fill}" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
+                r##"        <text class="obgraph-constraint-label" x="{x}" y="{y}" fill="{fill}" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
                 x = lbl.x, y = lbl.y, fill = label_fill, anchor = lbl.anchor, text = escape_xml(&lbl.text)
             ).unwrap();
         }
-        writeln!(out, r#"        </g>"#).unwrap();
     }
     writeln!(out, r#"      </g>"#).unwrap();
 
@@ -334,33 +316,6 @@ fn props_attr(edge_id: EdgeId, graph: &Graph) -> String {
             format!("{},{}", source_prop.0, output_prop.0)
         }
         Edge::Anchor { .. } => String::new(),
-    }
-}
-
-/// Format the participant node IDs for an edge as a comma-separated string.
-fn edge_node_participants(edge_id: EdgeId, graph: &Graph) -> String {
-    let edge = &graph.edges[edge_id.index()];
-    match edge {
-        Edge::Anchor { parent, child, .. } => format!("{},{}", parent.0, child.0),
-        Edge::Constraint {
-            source_prop,
-            dest_prop,
-            ..
-        } => {
-            let src_node = graph.properties[source_prop.index()].node;
-            let dst_node = graph.properties[dest_prop.index()].node;
-            format!("{},{}", src_node.0, dst_node.0)
-        }
-        Edge::DerivInput {
-            source_prop,
-            target_deriv,
-            ..
-        } => {
-            let src_node = graph.properties[source_prop.index()].node;
-            let out_prop = graph.derivations[target_deriv.index()].output_prop;
-            let dst_node = graph.properties[out_prop.index()].node;
-            format!("{},{}", src_node.0, dst_node.0)
-        }
     }
 }
 
@@ -1505,28 +1460,17 @@ mod tests {
 
         let svg = generate_svg(&graph, &layout, &trust_state);
 
-        // Anchor paths are now wrapped in <g data-edge="0" data-participants="...">
-        //   <path class="obgraph-anchor" .../>
-        // </g>
-        let anchor_group = svg
+        let anchor_line = svg
             .lines()
-            .find(|l| l.contains(r#"data-edge="0""#) && l.contains("<g "))
-            .expect("anchor edge group not found");
+            .find(|l| l.contains(r#"data-edge="0""#) && l.contains("obgraph-anchor"))
+            .expect("anchor edge line not found");
         assert!(
-            anchor_group.contains(r#"data-participants="#),
-            "anchor group should have data-participants"
-        );
-        let anchor_path = svg
-            .lines()
-            .find(|l| l.contains("obgraph-anchor") && l.contains("<path"))
-            .expect("anchor path not found");
-        assert!(
-            anchor_path.contains(r#"class="obgraph-anchor""#),
+            anchor_line.contains(r#"class="obgraph-anchor""#),
             "valid anchor should use obgraph-anchor class, got: {}",
-            anchor_path.trim()
+            anchor_line.trim()
         );
         assert!(
-            anchor_path.contains("arrow-anchor-valid"),
+            anchor_line.contains("arrow-anchor-valid"),
             "valid anchor should use arrow-anchor-valid marker"
         );
     }
@@ -1608,28 +1552,17 @@ mod tests {
 
         let svg = generate_svg(&graph, &layout, &trust_state);
 
-        // Intra-domain constraints are now wrapped in <g data-edge="0" data-participants="..." data-props="...">
-        //   <path class="obgraph-constraint-invalid" .../>
-        // </g>
-        let constraint_group = svg
+        let constraint_line = svg
             .lines()
-            .find(|l| l.contains(r#"data-edge="0""#) && l.contains("<g "))
-            .expect("constraint edge group not found");
+            .find(|l| l.contains(r#"data-edge="0""#) && l.contains("obgraph-constraint"))
+            .expect("constraint edge line not found");
         assert!(
-            constraint_group.contains(r#"data-props="#),
-            "constraint group should have data-props"
-        );
-        let constraint_path = svg
-            .lines()
-            .find(|l| l.contains("obgraph-constraint-invalid") && l.contains("<path"))
-            .expect("constraint path not found");
-        assert!(
-            constraint_path.contains(r#"class="obgraph-constraint-invalid""#),
+            constraint_line.contains(r#"class="obgraph-constraint-invalid""#),
             "invalid constraint should use obgraph-constraint-invalid class, got: {}",
-            constraint_path.trim()
+            constraint_line.trim()
         );
         assert!(
-            constraint_path.contains("arrow-constraint-invalid"),
+            constraint_line.contains("arrow-constraint-invalid"),
             "invalid constraint should use arrow-constraint-invalid marker"
         );
     }

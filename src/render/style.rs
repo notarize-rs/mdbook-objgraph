@@ -136,18 +136,6 @@ pub fn css() -> &'static str {
   pointer-events: none;
 }
 
-/* Smooth transitions for anchor/intra-domain edge groups during property hover */
-.obgraph-anchors > g,
-.obgraph-constraints-intra > g {
-  transition: opacity 0.15s ease;
-}
-
-/* Filtered: hidden during property-level hover */
-.obgraph-filtered {
-  opacity: 0;
-  pointer-events: none;
-}
-
 /* Node background rect — white with light border and shadow */
 .obgraph-node-bg {
   fill: var(--obg-node-bg);
