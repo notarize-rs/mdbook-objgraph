@@ -377,10 +377,10 @@ function minimize_crossings(layers, edges) → optimized_layers:
 
 ##### Chiasm Pre-Seeding for Same-Domain Constraint Bundles
 
-After barycenter sorting, same-domain node pairs connected by ≥2 constraints
-receive **chiasm pre-seeding**: the connected properties on one node are
-reversed relative to the other node's order. This creates a chiastic (ABBA)
-arrangement — strictly nested brackets in the side corridor:
+After barycenter sorting and sifting, same-domain node pairs connected by ≥2
+constraints receive a **chiasm override**: the connected properties on the
+lower node are reversed relative to the upper node's order. This creates a
+chiastic (ABBA) arrangement — strictly nested brackets in the side corridor:
 
 ```
   ╭────────────────╮   prop_a → prop_x (outermost)
@@ -391,12 +391,15 @@ arrangement — strictly nested brackets in the side corridor:
   ╰────────────────╯
 ```
 
-Without chiasm pre-seeding, parallel ordering creates overlapping bracket spans
-that cause corridor collisions.
+Without the chiasm override, parallel ordering creates overlapping bracket spans
+that cause corridor collisions. The override is applied only to the lower node
+of each pair to prevent double-reversal (both sides reversing cancels out).
+It runs after sifting so it has the final word on chiasm-connected property
+ordering.
 
 ##### Sifting Refinement
 
-After barycenter sorting and chiasm pre-seeding, a **sifting** pass refines
+After barycenter sorting, a **sifting** pass refines
 intra-node property ordering (replacing the simpler bubble-sort approach). For
 each property, ordered by decreasing connectivity, sifting removes it from the
 list and evaluates every possible insertion position, choosing the one that
@@ -1161,6 +1164,16 @@ function route_single_edge(src_x, src_y, src_side,
     // between corridors. Collapse zero-length segments.
     return Route { segments: collapse_zero_length(segments) }
 ```
+
+##### Post-Route Bracket Nesting Fix
+
+After all edges are routed, a post-processing pass fixes bracket nesting for
+same-node-pair constraint bundles. For bracket routes (H-V-H) between the same
+two nodes through the same corridor, the corridor channel x-coordinates are
+reassigned so that shorter-span (inner) brackets use inner channels and
+wider-span (outer) brackets use outer channels. This ensures the chiastic
+property ordering produces visually clean nested brackets without modifying
+the global routing order.
 
 For **long edges** (spanning multiple layers), the route passes through multiple
 horizontal channels. Each intermediate layer contributes an additional
