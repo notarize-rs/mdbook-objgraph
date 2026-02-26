@@ -7,54 +7,131 @@ pub fn js() -> &'static str {
   if (!svg) return;
 
   var selected = new Set();
-  var hovered = new Set();
+  var hoveredNode = null;
+  var hoveredProp = null;
 
-  function isActive(id) {
-    return selected.has(id) || hovered.has(id);
+  function isNodeActive(id) {
+    return selected.has(id) || hoveredNode === id;
   }
 
+  // Check if any participant node is selected or title-bar-hovered.
   function hasActiveParticipant(el) {
     var attr = el.getAttribute('data-participants');
     if (!attr) return false;
     var ids = attr.split(',');
     for (var i = 0; i < ids.length; i++) {
-      if (isActive(ids[i])) return true;
+      if (isNodeActive(ids[i])) return true;
+    }
+    return false;
+  }
+
+  // Check if any participant node is in the selected set.
+  function hasSelectedParticipant(el) {
+    var attr = el.getAttribute('data-participants');
+    if (!attr) return false;
+    var ids = attr.split(',');
+    for (var i = 0; i < ids.length; i++) {
+      if (selected.has(ids[i])) return true;
+    }
+    return false;
+  }
+
+  // Check if the hovered property matches any prop on this edge.
+  function hasHoveredProp(el) {
+    if (!hoveredProp) return false;
+    var attr = el.getAttribute('data-props');
+    if (!attr) return false;
+    var ids = attr.split(',');
+    for (var i = 0; i < ids.length; i++) {
+      if (ids[i] === hoveredProp) return true;
+    }
+    return false;
+  }
+
+  // An edge is "active" (should be shown) if:
+  //   (a) any participant node is selected, OR
+  //   (b) hoveredNode is a participant AND either no prop hover or prop matches
+  function isEdgeActive(el) {
+    if (hasSelectedParticipant(el)) return true;
+    if (hoveredNode !== null && hasActiveParticipant(el)) {
+      if (hoveredProp === null) return true;
+      return hasHoveredProp(el);
+    }
+    return false;
+  }
+
+  // Should this always-visible edge (intra/anchor) be filtered out?
+  // Only filters during property hover on the hovered node's edges.
+  function shouldFilter(el) {
+    if (hoveredProp === null) return false;
+    if (hasSelectedParticipant(el)) return false;
+    var attr = el.getAttribute('data-participants');
+    if (!attr) return false;
+    var ids = attr.split(',');
+    for (var i = 0; i < ids.length; i++) {
+      if (ids[i] === hoveredNode) {
+        return !hasHoveredProp(el);
+      }
     }
     return false;
   }
 
   function updateEdges() {
+    // Cross-domain full paths (skip those inside deriv-chain groups)
     svg.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
-      if (hasActiveParticipant(p)) {
+      if (p.closest('.obgraph-deriv-chain')) return;
+      if (isEdgeActive(p)) {
         p.classList.add('obgraph-active');
       } else {
         p.classList.remove('obgraph-active');
       }
     });
+
+    // Cross-domain stubs (skip those inside deriv-chain groups)
     svg.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
-      if (hasActiveParticipant(p)) {
+      if (p.closest('.obgraph-deriv-chain')) return;
+      if (isEdgeActive(p)) {
         p.classList.add('obgraph-hidden');
       } else {
         p.classList.remove('obgraph-hidden');
       }
     });
+
+    // Intra-domain constraint groups: filter non-matching during property hover
+    svg.querySelectorAll('.obgraph-constraints-intra > g').forEach(function(g) {
+      if (shouldFilter(g)) {
+        g.classList.add('obgraph-filtered');
+      } else {
+        g.classList.remove('obgraph-filtered');
+      }
+    });
+
+    // Anchor groups: filter during property hover (anchors have no props)
+    svg.querySelectorAll('.obgraph-anchors > g').forEach(function(g) {
+      if (shouldFilter(g)) {
+        g.classList.add('obgraph-filtered');
+      } else {
+        g.classList.remove('obgraph-filtered');
+      }
+    });
+
     // Derivation chain atomic toggling
     svg.querySelectorAll('.obgraph-deriv-chain').forEach(function(g) {
-      if (hasActiveParticipant(g)) {
-        g.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
+      var active = isEdgeActive(g);
+      g.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
+        if (active) {
           p.classList.add('obgraph-active');
-        });
-        g.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
-          p.classList.add('obgraph-hidden');
-        });
-      } else {
-        g.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
+        } else {
           p.classList.remove('obgraph-active');
-        });
-        g.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
+        }
+      });
+      g.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
+        if (active) {
+          p.classList.add('obgraph-hidden');
+        } else {
           p.classList.remove('obgraph-hidden');
-        });
-      }
+        }
+      });
     });
   }
 
@@ -63,14 +140,25 @@ pub fn js() -> &'static str {
     if (node.getAttribute('data-selected') === 'true') {
       selected.add(id);
     }
-    node.addEventListener('mouseenter', function() {
-      hovered.add(id);
+
+    // mouseover bubbles: detects property vs title-bar hover
+    node.addEventListener('mouseover', function(e) {
+      hoveredNode = id;
+      var propEl = e.target.closest('.obgraph-prop');
+      if (propEl) {
+        hoveredProp = propEl.getAttribute('data-prop');
+      } else {
+        hoveredProp = null;
+      }
       updateEdges();
     });
+
     node.addEventListener('mouseleave', function() {
-      hovered.delete(id);
+      hoveredNode = null;
+      hoveredProp = null;
       updateEdges();
     });
+
     node.addEventListener('click', function(e) {
       e.stopPropagation();
       if (selected.has(id)) {
