@@ -9,11 +9,16 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 // ---------------------------------------------------------------------------
 
 /// Object graph visualizer for mdbook.
-///
-/// When invoked with no subcommand, runs as an mdbook preprocessor
-/// (reads [context, book] JSON from stdin, writes modified book to stdout).
 #[derive(Parser)]
-#[command(name = "mdbook-obgraph", version, about, long_about = None, subcommand_required = false)]
+#[command(
+    name = "mdbook-obgraph",
+    version,
+    about,
+    long_about = "Object graph visualizer for mdbook.\n\n\
+        When invoked with no subcommand, runs as an mdbook preprocessor \
+        (reads [context, book] JSON from stdin, writes modified book to stdout).",
+    subcommand_required = false,
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -168,8 +173,8 @@ fn read_input(path: &Path) -> Result<String, io::Error> {
     }
 }
 
-/// Derive a display name from a file path (stem without extension).
-fn display_name(path: &Path) -> String {
+/// File stem for machine-readable output (JSON file identifiers, error messages).
+fn file_stem(path: &Path) -> String {
     if path == Path::new("-") {
         return "stdin".to_string();
     }
@@ -177,6 +182,11 @@ fn display_name(path: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("obgraph")
         .to_string()
+}
+
+/// Human-readable display name (underscores → spaces, used for HTML titles and text output).
+fn display_name(path: &Path) -> String {
+    file_stem(path).replace('_', " ")
 }
 
 /// Write output to a file or stdout.
@@ -452,7 +462,7 @@ fn run_check(args: CheckArgs) -> i32 {
     let mut had_pipeline_error = false;
 
     for path in &args.files {
-        let name = display_name(path);
+        let stem = file_stem(path);
 
         let input = match read_input(path) {
             Ok(s) => s,
@@ -466,7 +476,7 @@ fn run_check(args: CheckArgs) -> i32 {
         let ast = match mdbook_obgraph::parse::parse(&input) {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("error: {name}: {e}");
+                eprintln!("error: {stem}: {e}");
                 had_pipeline_error = true;
                 continue;
             }
@@ -475,7 +485,7 @@ fn run_check(args: CheckArgs) -> i32 {
         let graph = match mdbook_obgraph::model::build(ast) {
             Ok(g) => g,
             Err(e) => {
-                eprintln!("error: {name}: {e}");
+                eprintln!("error: {stem}: {e}");
                 had_pipeline_error = true;
                 continue;
             }
@@ -484,14 +494,14 @@ fn run_check(args: CheckArgs) -> i32 {
         let layout = match mdbook_obgraph::layout::layout(&graph) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("error: {name}: {e}");
+                eprintln!("error: {stem}: {e}");
                 had_pipeline_error = true;
                 continue;
             }
         };
 
         let report = mdbook_obgraph::layout::quality::analyze(&graph, &layout);
-        results.push((name, path.clone(), graph, report));
+        results.push((stem, path.clone(), graph, report));
     }
 
     if had_pipeline_error && results.is_empty() {
@@ -504,8 +514,9 @@ fn run_check(args: CheckArgs) -> i32 {
 
     match args.format {
         CheckFormat::Text => {
-            for (name, _path, graph, report) in &results {
-                print_check_text(name, graph, report);
+            for (stem, _path, graph, report) in &results {
+                let name = stem.replace('_', " ");
+                print_check_text(&name, graph, report);
             }
         }
         CheckFormat::Json => {
@@ -681,7 +692,40 @@ fn print_check_text(
     }
 
     if warnings > 0 {
-        println!("  Warnings: {warnings} collision/overlap issues");
+        println!("  Warnings:");
+        macro_rules! warn {
+            ($field:ident, $label:expr) => {
+                if !report.$field.is_empty() {
+                    println!("    {}: {}", $label, report.$field.len());
+                }
+            };
+        }
+        warn!(node_edge_overlaps, "node-edge overlaps");
+        warn!(label_node_overlaps, "label-node overlaps");
+        warn!(arrowhead_node_overlaps, "arrowhead-node overlaps");
+        warn!(stub_node_overlaps, "stub-node overlaps");
+        warn!(edge_domain_boundary_crossings, "edge-domain boundary crossings");
+        warn!(label_domain_overlaps, "label-domain overlaps");
+        warn!(arrowhead_domain_overlaps, "arrowhead-domain overlaps");
+        warn!(stub_domain_overlaps, "stub-domain overlaps");
+        warn!(edge_deriv_overlaps, "edge-derivation overlaps");
+        warn!(label_deriv_overlaps, "label-derivation overlaps");
+        warn!(arrowhead_deriv_overlaps, "arrowhead-derivation overlaps");
+        warn!(stub_deriv_overlaps, "stub-derivation overlaps");
+        warn!(edge_label_overlaps, "edge-label overlaps");
+        warn!(edge_arrowhead_overlaps, "edge-arrowhead overlaps");
+        warn!(edge_stub_overlaps, "edge-stub overlaps");
+        warn!(edge_domain_title_overlaps, "edge-domain title overlaps");
+        warn!(label_label_overlaps, "label-label overlaps");
+        warn!(label_arrowhead_overlaps, "label-arrowhead overlaps");
+        warn!(label_stub_overlaps, "label-stub overlaps");
+        warn!(label_domain_title_overlaps, "label-domain title overlaps");
+        warn!(arrowhead_arrowhead_overlaps, "arrowhead-arrowhead overlaps");
+        warn!(arrowhead_stub_overlaps, "arrowhead-stub overlaps");
+        warn!(arrowhead_domain_title_overlaps, "arrowhead-domain title overlaps");
+        warn!(stub_stub_overlaps, "stub-stub overlaps");
+        warn!(stub_domain_title_overlaps, "stub-domain title overlaps");
+        warn!(domain_title_title_overlaps, "domain title-title overlaps");
     }
 
     println!(
