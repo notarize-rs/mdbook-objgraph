@@ -60,22 +60,6 @@ pub fn js() -> &'static str {
     return false;
   }
 
-  // Should this always-visible edge (intra/anchor) be filtered out?
-  // Only filters during property hover on the hovered node's edges.
-  function shouldFilter(el) {
-    if (hoveredProp === null) return false;
-    if (hasSelectedParticipant(el)) return false;
-    var attr = el.getAttribute('data-participants');
-    if (!attr) return false;
-    var ids = attr.split(',');
-    for (var i = 0; i < ids.length; i++) {
-      if (ids[i] === hoveredNode) {
-        return !hasHoveredProp(el);
-      }
-    }
-    return false;
-  }
-
   function updateEdges() {
     // Cross-domain full paths (skip those inside deriv-chain groups)
     svg.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
@@ -94,24 +78,6 @@ pub fn js() -> &'static str {
         p.classList.add('obgraph-hidden');
       } else {
         p.classList.remove('obgraph-hidden');
-      }
-    });
-
-    // Intra-domain constraint groups: filter non-matching during property hover
-    svg.querySelectorAll('.obgraph-constraints-intra > g').forEach(function(g) {
-      if (shouldFilter(g)) {
-        g.classList.add('obgraph-filtered');
-      } else {
-        g.classList.remove('obgraph-filtered');
-      }
-    });
-
-    // Anchor groups: filter during property hover (anchors have no props)
-    svg.querySelectorAll('.obgraph-anchors > g').forEach(function(g) {
-      if (shouldFilter(g)) {
-        g.classList.add('obgraph-filtered');
-      } else {
-        g.classList.remove('obgraph-filtered');
       }
     });
 
