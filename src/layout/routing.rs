@@ -1588,6 +1588,7 @@ pub fn route_all_edges(
         })
     });
 
+
     let mut routes = Vec::new();
 
     for idx in edge_indices {
@@ -1680,7 +1681,128 @@ pub fn route_all_edges(
         routes.push(route);
     }
 
+    // Post-route: fix bracket nesting channel assignments.
+    // For same-node-pair bracket bundles, sort corridor channels by span
+    // width (shortest span → innermost channel) to create clean nesting.
+    fix_bracket_nesting_channels(graph, &mut routes);
+
     routes
+}
+
+/// Fix bracket nesting by reassigning corridor channel x-coordinates.
+///
+/// For same-node-pair constraint bundles routed as brackets (H-V-H pattern)
+/// through the same corridor, the inner bracket (shortest vertical span)
+/// should use the inner channel (closest to the node), and the outer bracket
+/// (widest span) should use the outer channel.  The initial routing order
+/// may assign channels arbitrarily; this post-processing step swaps the
+/// corridor x-coordinates to achieve correct nesting.
+fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
+    use std::collections::HashMap;
+
+    // Identify bracket routes: H-V-H pattern with 3 segments.
+    // Extract (edge_id, corridor_x, span) for each bracket.
+    struct BracketInfo {
+        route_idx: usize,
+        corridor_x: f64,
+        span: f64,  // |src_y - tgt_y|
+    }
+
+    // Group bracket routes by (node_pair, corridor_x_sign).
+    // corridor_x_sign distinguishes left vs right corridors.
+    let mut bundles: HashMap<(u32, u32, bool), Vec<BracketInfo>> = HashMap::new();
+
+    for (ri, route) in routes.iter().enumerate() {
+        let edge = &graph.edges[route.edge_id.index()];
+        let (src_node, dst_node) = match edge {
+            Edge::Constraint { source_prop, dest_prop, .. } => {
+                (prop_node(graph, *source_prop), prop_node(graph, *dest_prop))
+            }
+            _ => continue,
+        };
+        if src_node == dst_node { continue; }
+
+        // Check for H-V-H bracket pattern (3 segments).
+        if route.segments.len() != 3 { continue; }
+        let corridor_x = match &route.segments[1] {
+            Segment::Vertical { x, .. } => *x,
+            _ => continue,
+        };
+        let (src_y, tgt_y) = match (&route.segments[0], &route.segments[2]) {
+            (Segment::Horizontal { y: sy, .. }, Segment::Horizontal { y: ty, .. }) => (*sy, *ty),
+            _ => continue,
+        };
+
+        let (lo, hi) = if src_node.0 <= dst_node.0 {
+            (src_node.0, dst_node.0)
+        } else {
+            (dst_node.0, src_node.0)
+        };
+        // Group by node pair and whether the corridor is on the left or
+        // right side (using the first segment's horizontal direction).
+        let src_x = match &route.segments[0] {
+            Segment::Horizontal { x_start, .. } => *x_start,
+            _ => continue,
+        };
+        let is_right = corridor_x > src_x;
+
+        bundles.entry((lo, hi, is_right)).or_default().push(BracketInfo {
+            route_idx: ri,
+            corridor_x,
+            span: (src_y - tgt_y).abs(),
+        });
+    }
+
+    // For each bundle with ≥2 brackets, sort by span and reassign
+    // corridor x-coordinates so shortest span → innermost channel.
+    for bundle in bundles.values_mut() {
+        if bundle.len() < 2 { continue; }
+
+        // Collect current x-coordinates sorted by distance from node
+        // (innermost first).
+        let mut xs: Vec<f64> = bundle.iter().map(|b| b.corridor_x).collect();
+        // Sort by absolute distance from the first segment's start x
+        // (which is the node edge). Inner channels are closer.
+        let node_x = match &routes[bundle[0].route_idx].segments[0] {
+            Segment::Horizontal { x_start, .. } => *x_start,
+            _ => continue,
+        };
+        xs.sort_by(|a, b| {
+            let da = (*a - node_x).abs();
+            let db = (*b - node_x).abs();
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Sort bundle by ascending span (shortest first = innermost).
+        bundle.sort_by(|a, b| {
+            a.span.partial_cmp(&b.span).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Assign xs[i] to bundle[i]: shortest span → innermost x.
+        for (i, info) in bundle.iter().enumerate() {
+            let new_x = xs[i];
+            let route = &mut routes[info.route_idx];
+            // Update the vertical segment x.
+            if let Segment::Vertical { x, .. } = &mut route.segments[1] {
+                *x = new_x;
+            }
+            // Update the horizontal segments' corridor-side endpoints.
+            if let Segment::Horizontal { x_start, x_end, .. } = &mut route.segments[0] {
+                if (*x_start - node_x).abs() > (*x_end - node_x).abs() {
+                    *x_start = new_x;
+                } else {
+                    *x_end = new_x;
+                }
+            }
+            if let Segment::Horizontal { x_start, x_end, .. } = &mut route.segments[2] {
+                if (*x_start - node_x).abs() > (*x_end - node_x).abs() {
+                    *x_start = new_x;
+                } else {
+                    *x_end = new_x;
+                }
+            }
+        }
+    }
 }
 
 /// Convert a Route to an SVG path string.
