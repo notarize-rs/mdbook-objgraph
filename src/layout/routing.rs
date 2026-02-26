@@ -1705,7 +1705,9 @@ fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
     struct BracketInfo {
         route_idx: usize,
         corridor_x: f64,
-        min_y: f64, // top of vertical extent (smallest y)
+        src_y: f64,
+        dst_y: f64,
+        dst_x: f64,  // destination node x (from seg2's non-corridor endpoint)
     }
 
     // Group bracket routes by (node_pair, corridor_x_sign).
@@ -1746,10 +1748,24 @@ fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
         };
         let is_right = corridor_x > src_x;
 
+        // Determine dest_x: the non-corridor endpoint of seg2.
+        let dst_x = match &route.segments[2] {
+            Segment::Horizontal { x_start, x_end, .. } => {
+                if (*x_start - corridor_x).abs() < (*x_end - corridor_x).abs() {
+                    *x_end  // x_start is corridor-side, x_end is dest-side
+                } else {
+                    *x_start
+                }
+            }
+            _ => continue,
+        };
+
         bundles.entry((lo, hi, is_right)).or_default().push(BracketInfo {
             route_idx: ri,
             corridor_x,
-            min_y: src_y.min(tgt_y),
+            src_y,
+            dst_y: tgt_y,
+            dst_x,
         });
     }
 
@@ -1776,13 +1792,110 @@ fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Sort bundle by min_y descending: largest min_y (deepest start)
-        // → innermost channel.  The edge whose vertical starts earliest
-        // (smallest min_y) ends up outermost, so its horizontal enters
-        // above all inner verticals and cannot cross them.
-        bundle.sort_by(|a, b| {
-            b.min_y.partial_cmp(&a.min_y).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // For each pair of edges, determine the assignment (inner vs outer)
+        // that minimizes geometric crossings.  An outer edge's horizontal
+        // segments cross the inner edge's vertical when the horizontal's y
+        // falls within the inner's vertical span AND the horizontal passes
+        // through the inner channel's x.
+        //
+        // Source-side: the outer horizontal always passes through inner_x
+        //   (it goes from source past inner to outer).
+        // Dest-side: the outer horizontal passes through inner_x only when
+        //   inner_x is between outer_x and dest_x (same-side corridor).
+        //
+        // For bundles > 2 edges, fall back to min_y descending sort.
+        // Count how many crossings a given inner/outer assignment produces.
+        let count_crossings = |inner_src_y: f64, inner_dst_y: f64, inner_dst_x: f64,
+                                outer_src_y: f64, outer_dst_y: f64, outer_dst_x: f64,
+                                inner_x: f64, outer_x: f64| -> usize {
+            let inner_lo = inner_src_y.min(inner_dst_y);
+            let inner_hi = inner_src_y.max(inner_dst_y);
+            let mut n = 0;
+            // Source-side: outer horizontal at outer_src_y passes through inner_x.
+            if outer_src_y > inner_lo - 0.5 && outer_src_y < inner_hi + 0.5 { n += 1; }
+            // Dest-side: outer horizontal passes through inner_x only when
+            // inner_x is between outer_x and dest_x (same-side corridor).
+            let dest_passes_inner = (inner_x - outer_x) * (inner_x - outer_dst_x) < 0.0;
+            if dest_passes_inner &&
+               outer_dst_y > inner_lo - 0.5 && outer_dst_y < inner_hi + 0.5 { n += 1; }
+            let _ = inner_dst_x; // used only for symmetry with outer_dst_x
+            n
+        };
+
+        if bundle.len() == 2 {
+            let (a, b) = (&bundle[0], &bundle[1]);
+            // xs[0] = innermost, xs[1] = outermost
+            let ca = count_crossings(a.src_y, a.dst_y, a.dst_x, b.src_y, b.dst_y, b.dst_x, xs[0], xs[1]);
+            let cb = count_crossings(b.src_y, b.dst_y, b.dst_x, a.src_y, a.dst_y, a.dst_x, xs[0], xs[1]);
+            if cb < ca {
+                bundle.swap(0, 1);
+            } else if ca == cb && ca > 0 {
+                // Tied with crossings — try swapping source y values.
+                // This changes which edge enters the corridor first, often
+                // breaking the tie for same-side corridor brackets.
+                let (sa, sb) = (a.src_y, b.src_y);
+                let ca_s = count_crossings(a.src_y, a.dst_y, a.dst_x, sb, b.dst_y, b.dst_x, xs[0], xs[1]);
+                let _ = ca_s; // baseline with no src swap
+                // Try: a gets b's src_y, b gets a's src_y
+                let ca2 = count_crossings(sb, a.dst_y, a.dst_x, sa, b.dst_y, b.dst_x, xs[0], xs[1]);
+                let cb2 = count_crossings(sa, b.dst_y, b.dst_x, sb, a.dst_y, a.dst_x, xs[0], xs[1]);
+                if ca2 == 0 || cb2 == 0 {
+                    // Source y swap helps — apply it to the routes.
+                    // Extract y values, swap, and write back (avoids double borrow).
+                    let ri_a = bundle[0].route_idx;
+                    let ri_b = bundle[1].route_idx;
+                    let ya_h = match &routes[ri_a].segments[0] {
+                        Segment::Horizontal { y, .. } => *y,
+                        _ => continue,
+                    };
+                    let yb_h = match &routes[ri_b].segments[0] {
+                        Segment::Horizontal { y, .. } => *y,
+                        _ => continue,
+                    };
+                    if let Segment::Horizontal { y, .. } = &mut routes[ri_a].segments[0] { *y = yb_h; }
+                    if let Segment::Horizontal { y, .. } = &mut routes[ri_b].segments[0] { *y = ya_h; }
+                    // Also update the vertical segment y_start to match.
+                    let ya_v = match &routes[ri_a].segments[1] {
+                        Segment::Vertical { y_start, .. } => *y_start,
+                        _ => continue,
+                    };
+                    let yb_v = match &routes[ri_b].segments[1] {
+                        Segment::Vertical { y_start, .. } => *y_start,
+                        _ => continue,
+                    };
+                    if let Segment::Vertical { y_start, .. } = &mut routes[ri_a].segments[1] { *y_start = yb_v; }
+                    if let Segment::Vertical { y_start, .. } = &mut routes[ri_b].segments[1] { *y_start = ya_v; }
+                    // Update bundle src_y for subsequent assignment.
+                    bundle[0] = BracketInfo { src_y: sb, ..bundle[0] };
+                    bundle[1] = BracketInfo { src_y: sa, ..bundle[1] };
+                    // Pick the crossing-free assignment.
+                    if cb2 < ca2 {
+                        bundle.swap(0, 1);
+                    }
+                } else {
+                    // Swap didn't help — fall back to min_y tiebreak.
+                    let a_min = bundle[0].src_y.min(bundle[0].dst_y);
+                    let b_min = bundle[1].src_y.min(bundle[1].dst_y);
+                    if b_min > a_min {
+                        bundle.swap(0, 1);
+                    }
+                }
+            } else if ca == cb {
+                // Tied at 0 — use min_y descending tiebreak.
+                let a_min = bundle[0].src_y.min(bundle[0].dst_y);
+                let b_min = bundle[1].src_y.min(bundle[1].dst_y);
+                if b_min > a_min {
+                    bundle.swap(0, 1);
+                }
+            }
+        } else {
+            // Fall back to min_y descending for larger bundles.
+            bundle.sort_by(|a, b| {
+                let a_min = a.src_y.min(a.dst_y);
+                let b_min = b.src_y.min(b.dst_y);
+                b_min.partial_cmp(&a_min).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
 
         // Assign xs[i] to bundle[i]: shortest span → innermost x.
         for (i, info) in bundle.iter().enumerate() {
