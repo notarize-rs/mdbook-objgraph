@@ -76,6 +76,31 @@ impl PropertyOrder {
 }
 
 // ---------------------------------------------------------------------------
+// Edge → logical property pair
+// ---------------------------------------------------------------------------
+
+/// For Constraint and DerivInput edges, returns (source_prop, dest_prop).
+/// For DerivInput, dest_prop is the derivation's output_prop (attributed to
+/// the destination node). Returns None for Anchor edges.
+fn edge_prop_pair(graph: &Graph, edge: &Edge) -> Option<(PropId, PropId)> {
+    match edge {
+        Edge::Constraint {
+            source_prop,
+            dest_prop,
+            ..
+        } => Some((*source_prop, *dest_prop)),
+        Edge::DerivInput {
+            source_prop,
+            target_deriv,
+        } => {
+            let deriv = &graph.derivations[target_deriv.index()];
+            Some((*source_prop, deriv.output_prop))
+        }
+        Edge::Anchor { .. } => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Position computation
 // ---------------------------------------------------------------------------
 
@@ -812,27 +837,28 @@ pub fn minimize_crossings(
                     })
                     .collect();
 
-                // Collect inter-node constraint pairs for bipartite crossing
-                // detection.  For edges from this node to the same target node,
-                // crossings occur when source property order is inverted relative
-                // to target property order.  We record (local_prop, remote_prop,
-                // weight) and group by target node.
+                // Collect inter-node edge pairs (Constraint + DerivInput) for
+                // bipartite crossing detection.  For edges from this node to the
+                // same target node, crossings occur when source property order is
+                // inverted relative to target property order.  We record
+                // (local_prop, remote_prop, weight) and group by target node.
+                // DerivInput edges use deriv.output_prop as the logical dest_prop.
                 let mut inter_node_edges_by_target: HashMap<NodeId, Vec<(PropId, PropId, u32)>> =
                     HashMap::new();
                 for edge in &graph.edges {
-                    if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-                        let src_node = graph.properties[source_prop.index()].node;
-                        let dst_node = graph.properties[dest_prop.index()].node;
+                    if let Some((src_prop, dst_prop)) = edge_prop_pair(graph, edge) {
+                        let src_node = graph.properties[src_prop.index()].node;
+                        let dst_node = graph.properties[dst_prop.index()].node;
                         if src_node == node_id && dst_node != node_id {
                             inter_node_edges_by_target
                                 .entry(dst_node)
                                 .or_default()
-                                .push((*source_prop, *dest_prop, edge.weight()));
+                                .push((src_prop, dst_prop, edge.weight()));
                         } else if dst_node == node_id && src_node != node_id {
                             inter_node_edges_by_target
                                 .entry(src_node)
                                 .or_default()
-                                .push((*dest_prop, *source_prop, edge.weight()));
+                                .push((dst_prop, src_prop, edge.weight()));
                         }
                     }
                 }

@@ -397,6 +397,33 @@ of each pair to prevent double-reversal (both sides reversing cancels out).
 It runs after sifting so it has the final word on chiasm-connected property
 ordering.
 
+##### DerivInput/Constraint Unification
+
+Derivation pills are geometrically equivalent to unnamed single-property nodes.
+For property ordering and bracket nesting purposes, DerivInput edges participate
+in the same algorithms as Constraint edges via a logical property-pair mapping:
+
+```
+DerivInput { source_prop, target_deriv }
+  → logical (source_prop, graph.derivations[target_deriv].output_prop)
+```
+
+The derivation's synthetic `output_prop` is attributed to the destination node
+in the model builder, so this mapping produces a `(source_prop, dest_prop)` pair
+where both properties have well-defined node ownership — identical to a
+Constraint edge for ordering purposes.
+
+This means DerivInput edges:
+- Participate in the **inter-node bipartite crossing cost** (with weight 2)
+- Are counted in **sifting connectivity** (most-connected properties sifted first)
+- Influence **chiasm override** detection for same-domain node pairs
+- Are processed by **post-route bracket nesting** channel reassignment
+
+Code paths that remain DerivInput-specific handle genuine structural differences:
+layer parity (derivations on odd layers), coordinate assignment (pill sizing and
+centering), port coordinate dispatch (connecting to pill geometry), corridor
+selection (derivations sit outside domains), and rendering (pill shape).
+
 ##### Sifting Refinement
 
 After barycenter sorting, a **sifting** pass refines
@@ -411,7 +438,8 @@ minimizes a multi-term cost:
 3. **Bracket span** — penalizes large src-to-dst distances.
 4. **Inter-node bipartite crossings** — for same-domain pairs, penalizes
    parallel ordering (prefers chiasm); for cross-domain pairs, penalizes
-   inverted ordering (prefers parallel).
+   inverted ordering (prefers parallel). Includes both Constraint and DerivInput
+   edges via the logical property-pair mapping.
 5. **Edge-length proximity** — pulls properties toward their cross-node
    endpoints (above=top, below=bottom), weighted as a tiebreaker.
 
@@ -953,6 +981,12 @@ function layout_endpoints(edge) → (upstream_element, downstream_element):
 layer (higher y-coordinate). This matches the trust flow direction: sources at
 top, destinations at bottom.
 
+For property-ordering and crossing-minimization purposes, DerivInput can also be
+viewed as a logical property pair: `(source_prop, deriv.output_prop)`, where
+`output_prop` is the derivation's synthetic output property attributed to the
+destination node. This mapping is used by `edge_prop_pair()` in `crossing.rs`
+and by `fix_bracket_nesting_channels()` in `routing.rs`.
+
 ##### Port Position Dispatch
 
 The routing algorithm calls `port_position(endpoint)` for each edge endpoint.
@@ -1168,12 +1202,13 @@ function route_single_edge(src_x, src_y, src_side,
 ##### Post-Route Bracket Nesting Fix
 
 After all edges are routed, a post-processing pass fixes bracket nesting for
-same-node-pair constraint bundles. For bracket routes (H-V-H) between the same
-two nodes through the same corridor, the corridor channel x-coordinates are
-reassigned so that shorter-span (inner) brackets use inner channels and
-wider-span (outer) brackets use outer channels. This ensures the chiastic
-property ordering produces visually clean nested brackets without modifying
-the global routing order.
+same-node-pair edge bundles (Constraint and DerivInput). For bracket routes
+(H-V-H) between the same two logical nodes through the same corridor, the
+corridor channel x-coordinates are reassigned so that shorter-span (inner)
+brackets use inner channels and wider-span (outer) brackets use outer channels.
+For DerivInput edges, the logical target node is the node owning the
+derivation's `output_prop`. This ensures the chiastic property ordering produces
+visually clean nested brackets without modifying the global routing order.
 
 For **long edges** (spanning multiple layers), the route passes through multiple
 horizontal channels. Each intermediate layer contributes an additional

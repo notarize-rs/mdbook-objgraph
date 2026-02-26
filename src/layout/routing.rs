@@ -1650,14 +1650,22 @@ pub fn route_all_edges(
                     let td = graph.nodes[tgt_nid.index()].domain;
                     if sd == td { (sd, td) } else { (None, None) }
                 }
-                Edge::DerivInput { source_prop, .. } => {
-                    // Route through the source node's domain corridors.
-                    // The pill is outside all domains, so using the source
-                    // domain keeps the vertical channel close to the source
-                    // port and avoids crossing distant constraint edges.
-                    let src_nid = prop_node(graph, *source_prop);
-                    let sd = graph.nodes[src_nid.index()].domain;
-                    (sd, sd)
+                Edge::DerivInput {
+                    source_prop,
+                    target_deriv,
+                } => {
+                    if super::is_deriv_cross_domain(graph, *target_deriv) {
+                        // Cross-domain derivation: route through the
+                        // inter-column gap corridor like other cross-domain
+                        // edges.
+                        (None, None)
+                    } else {
+                        // Intra-domain derivation: all inputs + output in
+                        // the same domain — use domain corridors.
+                        let src_nid = prop_node(graph, *source_prop);
+                        let sd = graph.nodes[src_nid.index()].domain;
+                        (sd, sd)
+                    }
                 }
             }
         };
@@ -1719,6 +1727,13 @@ fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
         let (src_node, dst_node) = match edge {
             Edge::Constraint { source_prop, dest_prop, .. } => {
                 (prop_node(graph, *source_prop), prop_node(graph, *dest_prop))
+            }
+            Edge::DerivInput {
+                source_prop,
+                target_deriv,
+            } => {
+                let deriv = &graph.derivations[target_deriv.index()];
+                (prop_node(graph, *source_prop), prop_node(graph, deriv.output_prop))
             }
             _ => continue,
         };

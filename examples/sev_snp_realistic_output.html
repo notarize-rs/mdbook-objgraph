@@ -142,6 +142,18 @@
   pointer-events: none;
 }
 
+/* Smooth transitions for anchor/intra-domain edge groups during property hover */
+.obgraph-anchors > g,
+.obgraph-constraints-intra > g {
+  transition: opacity 0.15s ease;
+}
+
+/* Filtered: hidden during property-level hover */
+.obgraph-filtered {
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* Node background rect — white with light border and shadow */
 .obgraph-node-bg {
   fill: var(--obg-node-bg);
@@ -302,109 +314,189 @@
     </g>
     <g class="obgraph-edges">
       <g class="obgraph-anchors">
-        <path class="obgraph-anchor" d="M115.5,264 L115.5,286" data-edge="0" marker-end="url(#arrow-anchor-valid)"/>
-        <text class="obgraph-anchor-label" x="111.5" y="275" fill="#22c55e" text-anchor="end" dominant-baseline="central">ecdsa_p384</text>
-        <path class="obgraph-anchor" d="M115.5,524 L115.5,546" data-edge="1" marker-end="url(#arrow-anchor-valid)"/>
-        <text class="obgraph-anchor-label" x="111.5" y="535" fill="#22c55e" text-anchor="end" dominant-baseline="central">ecdsa_p384</text>
-        <path class="obgraph-anchor" d="M446.5,812 L446.5,834" data-edge="3" marker-end="url(#arrow-anchor-valid)"/>
-        <text class="obgraph-anchor-label" x="442.5" y="823" fill="#22c55e" text-anchor="end" dominant-baseline="central">rsa_2048</text>
-        <path class="obgraph-anchor" d="M115.5,844 L115.5,866" data-edge="2" marker-end="url(#arrow-anchor-valid)"/>
-        <text class="obgraph-anchor-label" x="111.5" y="855" fill="#22c55e" text-anchor="end" dominant-baseline="central">ecdsa_p384</text>
-        <path class="obgraph-anchor-invalid" d="M446.5,1052 L446.5,1074" data-edge="4" marker-end="url(#arrow-anchor-invalid)"/>
-        <text class="obgraph-anchor-label" x="442.5" y="1063" fill="#ef4444" text-anchor="end" dominant-baseline="central">tpm2_activate_credential</text>
-        <path class="obgraph-anchor-invalid" d="M446.5,1132 L446.5,1154" data-edge="5" marker-end="url(#arrow-anchor-invalid)"/>
-        <text class="obgraph-anchor-label" x="442.5" y="1143" fill="#ef4444" text-anchor="end" dominant-baseline="central">rsassa_pss</text>
-        <path class="obgraph-anchor-invalid" d="M446.5,1352 L446.5,1374" data-edge="6" marker-end="url(#arrow-anchor-invalid)"/>
-        <text class="obgraph-anchor-label" x="442.5" y="1363" fill="#ef4444" text-anchor="end" dominant-baseline="central">pcr_replay</text>
-        <path class="obgraph-anchor-invalid" d="M115.5,1424 L115.5,1506" data-edge="7" marker-end="url(#arrow-anchor-invalid)"/>
-        <text class="obgraph-anchor-label" x="111.5" y="1465" fill="#ef4444" text-anchor="end" dominant-baseline="central">sha256</text>
-        <path class="obgraph-anchor-invalid" d="M115.5,1584 L115.5,1606" data-edge="8" marker-end="url(#arrow-anchor-invalid)"/>
-        <text class="obgraph-anchor-label" x="111.5" y="1595" fill="#ef4444" text-anchor="end" dominant-baseline="central">ecdsa_p256</text>
-        <path class="obgraph-anchor-invalid" d="M115.5,1744 L115.5,1766" data-edge="9" marker-end="url(#arrow-anchor-invalid)"/>
-        <text class="obgraph-anchor-label" x="119.5" y="1755" fill="#ef4444" text-anchor="start" dominant-baseline="central">tpm2_activate_credential</text>
-        <path class="obgraph-anchor-invalid" d="M115.5,1824 L115.5,1846" data-edge="10" marker-end="url(#arrow-anchor-invalid)"/>
-        <text class="obgraph-anchor-label" x="111.5" y="1835" fill="#ef4444" text-anchor="end" dominant-baseline="central">rsassa_pss</text>
-        <path class="obgraph-anchor-invalid" d="M115.5,1984 L115.5,2006" data-edge="11" marker-end="url(#arrow-anchor-invalid)"/>
-        <text class="obgraph-anchor-label" x="111.5" y="1995" fill="#ef4444" text-anchor="end" dominant-baseline="central">pcr_replay</text>
+        <g data-participants="2,3" data-edge="0">
+          <path class="obgraph-anchor" d="M115.5,264 L115.5,286" marker-end="url(#arrow-anchor-valid)"/>
+          <text class="obgraph-anchor-label" x="111.5" y="275" fill="#22c55e" text-anchor="end" dominant-baseline="central">ecdsa_p384</text>
+        </g>
+        <g data-participants="3,4" data-edge="1">
+          <path class="obgraph-anchor" d="M115.5,524 L115.5,546" marker-end="url(#arrow-anchor-valid)"/>
+          <text class="obgraph-anchor-label" x="111.5" y="535" fill="#22c55e" text-anchor="end" dominant-baseline="central">ecdsa_p384</text>
+        </g>
+        <g data-participants="8,9" data-edge="3">
+          <path class="obgraph-anchor" d="M446.5,812 L446.5,834" marker-end="url(#arrow-anchor-valid)"/>
+          <text class="obgraph-anchor-label" x="442.5" y="823" fill="#22c55e" text-anchor="end" dominant-baseline="central">rsa_2048</text>
+        </g>
+        <g data-participants="4,5" data-edge="2">
+          <path class="obgraph-anchor" d="M115.5,844 L115.5,866" marker-end="url(#arrow-anchor-valid)"/>
+          <text class="obgraph-anchor-label" x="111.5" y="855" fill="#22c55e" text-anchor="end" dominant-baseline="central">ecdsa_p384</text>
+        </g>
+        <g data-participants="9,10" data-edge="4">
+          <path class="obgraph-anchor-invalid" d="M446.5,1052 L446.5,1074" marker-end="url(#arrow-anchor-invalid)"/>
+          <text class="obgraph-anchor-label" x="442.5" y="1063" fill="#ef4444" text-anchor="end" dominant-baseline="central">tpm2_activate_credential</text>
+        </g>
+        <g data-participants="10,11" data-edge="5">
+          <path class="obgraph-anchor-invalid" d="M446.5,1132 L446.5,1154" marker-end="url(#arrow-anchor-invalid)"/>
+          <text class="obgraph-anchor-label" x="442.5" y="1143" fill="#ef4444" text-anchor="end" dominant-baseline="central">rsassa_pss</text>
+        </g>
+        <g data-participants="11,12" data-edge="6">
+          <path class="obgraph-anchor-invalid" d="M446.5,1352 L446.5,1374" marker-end="url(#arrow-anchor-invalid)"/>
+          <text class="obgraph-anchor-label" x="442.5" y="1363" fill="#ef4444" text-anchor="end" dominant-baseline="central">pcr_replay</text>
+        </g>
+        <g data-participants="5,13" data-edge="7">
+          <path class="obgraph-anchor-invalid" d="M115.5,1424 L115.5,1506" marker-end="url(#arrow-anchor-invalid)"/>
+          <text class="obgraph-anchor-label" x="111.5" y="1465" fill="#ef4444" text-anchor="end" dominant-baseline="central">sha256</text>
+        </g>
+        <g data-participants="13,14" data-edge="8">
+          <path class="obgraph-anchor-invalid" d="M115.5,1584 L115.5,1606" marker-end="url(#arrow-anchor-invalid)"/>
+          <text class="obgraph-anchor-label" x="111.5" y="1595" fill="#ef4444" text-anchor="end" dominant-baseline="central">ecdsa_p256</text>
+        </g>
+        <g data-participants="14,15" data-edge="9">
+          <path class="obgraph-anchor-invalid" d="M115.5,1744 L115.5,1766" marker-end="url(#arrow-anchor-invalid)"/>
+          <text class="obgraph-anchor-label" x="119.5" y="1755" fill="#ef4444" text-anchor="start" dominant-baseline="central">tpm2_activate_credential</text>
+        </g>
+        <g data-participants="15,16" data-edge="10">
+          <path class="obgraph-anchor-invalid" d="M115.5,1824 L115.5,1846" marker-end="url(#arrow-anchor-invalid)"/>
+          <text class="obgraph-anchor-label" x="111.5" y="1835" fill="#ef4444" text-anchor="end" dominant-baseline="central">rsassa_pss</text>
+        </g>
+        <g data-participants="16,17" data-edge="11">
+          <path class="obgraph-anchor-invalid" d="M115.5,1984 L115.5,2006" marker-end="url(#arrow-anchor-invalid)"/>
+          <text class="obgraph-anchor-label" x="111.5" y="1995" fill="#ef4444" text-anchor="end" dominant-baseline="central">pcr_replay</text>
+        </g>
       </g>
       <g class="obgraph-constraints-intra">
-        <path class="obgraph-constraint" d="M363,294 L351,294 L351,503 L351.01,503" data-edge="33" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint" d="M363,434 L355,434 L355,509 L354.99,509" data-edge="34" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint" d="M199,154 L223,154 L223,134 L205,134" data-edge="12" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="201" y="149" fill="#60a5fa" text-anchor="start" dominant-baseline="central">issuer_match</text>
-        <path class="obgraph-constraint" d="M199,254 L223,254 L223,234 L205,234" data-edge="13" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint" d="M32,154 L8,154 L8,354 L26,354" data-edge="16" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="46.800000000000004" y="204" fill="#60a5fa" text-anchor="end" dominant-baseline="central">issuer_match</text>
-        <path class="obgraph-constraint" d="M32,254 L12,254 L12,334 L26,334" data-edge="17" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint" d="M32,494 L8,494 L8,614 L26,614" data-edge="20" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="46.800000000000004" y="524" fill="#60a5fa" text-anchor="end" dominant-baseline="central">issuer_match</text>
-        <path class="obgraph-constraint" d="M32,514 L12,514 L12,594 L26,594" data-edge="21" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint" d="M363,702 L351,702 L351,682 L357,682" data-edge="40" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="347" y="697" fill="#60a5fa" text-anchor="end" dominant-baseline="central">issuer_match</text>
-        <path class="obgraph-constraint" d="M363,802 L351,802 L351,782 L357,782" data-edge="41" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint" d="M530,702 L546,702 L546,902 L536,902" data-edge="44" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="361" y="752" fill="#60a5fa" text-anchor="end" dominant-baseline="central">issuer_match</text>
-        <path class="obgraph-constraint" d="M530,802 L542,802 L542,882 L536,882" data-edge="45" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint" d="M32,834 L24,834 L24,934 L26,934" data-edge="28" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="28" y="830" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
-        <path class="obgraph-constraint" d="M32,814 L20,814 L20,974 L26,974" data-edge="27" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="26" y="810" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
-        <path class="obgraph-constraint" d="M32,794 L16,794 L16,1054 L26,1054" data-edge="26" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="24" y="790" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
-        <path class="obgraph-constraint" d="M199,938 L223,938 L223,914 L205,914" data-edge="32" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="211" y="934" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
-        <path class="obgraph-constraint" d="M199,978 L223,978 L223,954 L205,954" data-edge="31" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="211" y="974" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
-        <path class="obgraph-constraint" d="M32,774 L12,774 L12,1174 L26,1174" data-edge="25" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="22" y="770" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
-        <path class="obgraph-constraint" d="M32,754 L8,754 L8,1214 L26,1214" data-edge="24" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint" d="M199,1058 L223,1058 L223,1074 L205,1074" data-edge="30" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="211" y="1054" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
-        <path class="obgraph-constraint" d="M530,1042 L542,1042 L542,1118 L536,1118" data-edge="48" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="538" y="1061" fill="#60a5fa" text-anchor="end" dominant-baseline="central">tpm2_activate_credential</text>
-        <path class="obgraph-constraint-invalid" d="M530,1126 L542,1126 L542,1202 L536,1202" data-edge="49" marker-end="url(#arrow-constraint-invalid)"/>
-        <text class="obgraph-constraint-label" x="538" y="1145" fill="#ef4444" text-anchor="end" dominant-baseline="central">sha256_name</text>
-        <path class="obgraph-constraint" d="M199,1178 L223,1178 L223,1194 L205,1194" data-edge="29" marker-end="url(#arrow-constraint-valid)"/>
-        <text class="obgraph-constraint-label" x="211" y="1174" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
-        <path class="obgraph-constraint-invalid" d="M530,1342 L542,1342 L542,1422 L536,1422" data-edge="51" marker-end="url(#arrow-constraint-invalid)"/>
-        <text class="obgraph-constraint-label" x="538" y="1362" fill="#ef4444" text-anchor="end" dominant-baseline="central">pcr_replay</text>
-        <path class="obgraph-constraint-invalid" d="M32,1574 L8,1574 L8,1654 L26,1654" data-edge="52" marker-end="url(#arrow-constraint-invalid)"/>
-        <path class="obgraph-constraint-invalid" d="M32,1734 L8,1734 L8,1810 L26,1810" data-edge="53" marker-end="url(#arrow-constraint-invalid)"/>
-        <text class="obgraph-constraint-label" x="12" y="1753" fill="#ef4444" text-anchor="start" dominant-baseline="central">tpm2_activate_credential</text>
-        <path class="obgraph-constraint-invalid" d="M32,1818 L8,1818 L8,1894 L26,1894" data-edge="54" marker-end="url(#arrow-constraint-invalid)"/>
-        <text class="obgraph-constraint-label" x="12" y="1837" fill="#ef4444" text-anchor="start" dominant-baseline="central">sha256_name</text>
-        <path class="obgraph-constraint-invalid" d="M32,1974 L8,1974 L8,2054 L26,2054" data-edge="55" marker-end="url(#arrow-constraint-invalid)"/>
-        <text class="obgraph-constraint-label" x="12" y="1994" fill="#ef4444" text-anchor="start" dominant-baseline="central">pcr_replay</text>
+        <g data-participants="2,2" data-props="6,3" data-edge="12">
+          <path class="obgraph-constraint" d="M199,154 L223,154 L223,134 L205,134" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="201" y="149" fill="#60a5fa" text-anchor="start" dominant-baseline="central">issuer_match</text>
+        </g>
+        <g data-participants="2,2" data-props="10,11" data-edge="13">
+          <path class="obgraph-constraint" d="M199,254 L223,254 L223,234 L205,234" marker-end="url(#arrow-constraint-valid)"/>
+        </g>
+        <g data-participants="2,3" data-props="6,13" data-edge="16">
+          <path class="obgraph-constraint" d="M32,154 L8,154 L8,354 L26,354" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="46.800000000000004" y="204" fill="#60a5fa" text-anchor="end" dominant-baseline="central">issuer_match</text>
+        </g>
+        <g data-participants="2,3" data-props="10,21" data-edge="17">
+          <path class="obgraph-constraint" d="M32,254 L12,254 L12,334 L26,334" marker-end="url(#arrow-constraint-valid)"/>
+        </g>
+        <g data-participants="3,4" data-props="16,23" data-edge="20">
+          <path class="obgraph-constraint" d="M32,494 L8,494 L8,614 L26,614" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="46.800000000000004" y="524" fill="#60a5fa" text-anchor="end" dominant-baseline="central">issuer_match</text>
+        </g>
+        <g data-participants="3,4" data-props="20,29" data-edge="21">
+          <path class="obgraph-constraint" d="M32,514 L12,514 L12,594 L26,594" marker-end="url(#arrow-constraint-valid)"/>
+        </g>
+        <g data-participants="8,8" data-props="67,64" data-edge="40">
+          <path class="obgraph-constraint" d="M363,702 L351,702 L351,682 L357,682" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="347" y="697" fill="#60a5fa" text-anchor="end" dominant-baseline="central">issuer_match</text>
+        </g>
+        <g data-participants="8,8" data-props="71,72" data-edge="41">
+          <path class="obgraph-constraint" d="M363,802 L351,802 L351,782 L357,782" marker-end="url(#arrow-constraint-valid)"/>
+        </g>
+        <g data-participants="8,9" data-props="67,74" data-edge="44">
+          <path class="obgraph-constraint" d="M530,702 L546,702 L546,902 L536,902" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="361" y="752" fill="#60a5fa" text-anchor="end" dominant-baseline="central">issuer_match</text>
+        </g>
+        <g data-participants="8,9" data-props="71,80" data-edge="45">
+          <path class="obgraph-constraint" d="M530,802 L542,802 L542,882 L536,882" marker-end="url(#arrow-constraint-valid)"/>
+        </g>
+        <g data-participants="4,5" data-props="34,56" data-edge="28">
+          <path class="obgraph-constraint" d="M32,834 L24,834 L24,934 L26,934" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="28" y="830" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
+        </g>
+        <g data-participants="4,5" data-props="33,55" data-edge="27">
+          <path class="obgraph-constraint" d="M32,814 L20,814 L20,974 L26,974" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="26" y="810" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
+        </g>
+        <g data-participants="4,5" data-props="32,54" data-edge="26">
+          <path class="obgraph-constraint" d="M32,794 L16,794 L16,1054 L26,1054" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="24" y="790" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
+        </g>
+        <g data-participants="5,5" data-props="56,60" data-edge="32">
+          <path class="obgraph-constraint" d="M199,938 L223,938 L223,914 L205,914" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="211" y="934" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
+        </g>
+        <g data-participants="5,5" data-props="55,59" data-edge="31">
+          <path class="obgraph-constraint" d="M199,978 L223,978 L223,954 L205,954" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="211" y="974" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
+        </g>
+        <g data-participants="4,5" data-props="31,53" data-edge="25">
+          <path class="obgraph-constraint" d="M32,774 L12,774 L12,1174 L26,1174" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="22" y="770" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
+        </g>
+        <g data-participants="4,5" data-props="30,52" data-edge="24">
+          <path class="obgraph-constraint" d="M32,754 L8,754 L8,1214 L26,1214" marker-end="url(#arrow-constraint-valid)"/>
+        </g>
+        <g data-participants="5,5" data-props="54,58" data-edge="30">
+          <path class="obgraph-constraint" d="M199,1058 L223,1058 L223,1074 L205,1074" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="211" y="1054" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
+        </g>
+        <g data-participants="9,10" data-props="78,82" data-edge="48">
+          <path class="obgraph-constraint" d="M530,1042 L542,1042 L542,1118 L536,1118" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="538" y="1061" fill="#60a5fa" text-anchor="end" dominant-baseline="central">tpm2_activate_credential</text>
+        </g>
+        <g data-participants="10,11" data-props="82,85" data-edge="49">
+          <path class="obgraph-constraint-invalid" d="M530,1126 L542,1126 L542,1202 L536,1202" marker-end="url(#arrow-constraint-invalid)"/>
+          <text class="obgraph-constraint-label" x="538" y="1145" fill="#ef4444" text-anchor="end" dominant-baseline="central">sha256_name</text>
+        </g>
+        <g data-participants="5,5" data-props="53,57" data-edge="29">
+          <path class="obgraph-constraint" d="M199,1178 L223,1178 L223,1194 L205,1194" marker-end="url(#arrow-constraint-valid)"/>
+          <text class="obgraph-constraint-label" x="211" y="1174" fill="#60a5fa" text-anchor="middle" dominant-baseline="central">ge</text>
+        </g>
+        <g data-participants="11,12" data-props="90,93" data-edge="51">
+          <path class="obgraph-constraint-invalid" d="M530,1342 L542,1342 L542,1422 L536,1422" marker-end="url(#arrow-constraint-invalid)"/>
+          <text class="obgraph-constraint-label" x="538" y="1362" fill="#ef4444" text-anchor="end" dominant-baseline="central">pcr_replay</text>
+        </g>
+        <g data-participants="13,14" data-props="96,101" data-edge="52">
+          <path class="obgraph-constraint-invalid" d="M32,1574 L8,1574 L8,1654 L26,1654" marker-end="url(#arrow-constraint-invalid)"/>
+        </g>
+        <g data-participants="14,15" data-props="100,102" data-edge="53">
+          <path class="obgraph-constraint-invalid" d="M32,1734 L8,1734 L8,1810 L26,1810" marker-end="url(#arrow-constraint-invalid)"/>
+          <text class="obgraph-constraint-label" x="12" y="1753" fill="#ef4444" text-anchor="start" dominant-baseline="central">tpm2_activate_credential</text>
+        </g>
+        <g data-participants="15,16" data-props="102,105" data-edge="54">
+          <path class="obgraph-constraint-invalid" d="M32,1818 L8,1818 L8,1894 L26,1894" marker-end="url(#arrow-constraint-invalid)"/>
+          <text class="obgraph-constraint-label" x="12" y="1837" fill="#ef4444" text-anchor="start" dominant-baseline="central">sha256_name</text>
+        </g>
+        <g data-participants="16,17" data-props="107,110" data-edge="55">
+          <path class="obgraph-constraint-invalid" d="M32,1974 L8,1974 L8,2054 L26,2054" marker-end="url(#arrow-constraint-invalid)"/>
+          <text class="obgraph-constraint-label" x="12" y="1994" fill="#ef4444" text-anchor="start" dominant-baseline="central">pcr_replay</text>
+        </g>
       </g>
       <g class="obgraph-constraints-cross">
-        <path class="obgraph-constraint-full" d="M363,66 L255,66 L255,74 L205,74" data-edge="14" data-participants="0,2" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M363,68 L259,68 L259,94 L205,94" data-edge="15" data-participants="0,2" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M363,70 L263,70 L263,374 L205,374" data-edge="18" data-participants="0,3" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M363,72 L267,72 L267,394 L205,394" data-edge="19" data-participants="0,3" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M530,78 L562,78 L562,622 L536,622" data-edge="42" data-participants="0,8" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M363,76 L271,76 L271,634 L205,634" data-edge="22" data-participants="0,4" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M530,70 L566,70 L566,642 L536,642" data-edge="43" data-participants="0,8" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M363,78 L275,78 L275,654 L205,654" data-edge="23" data-participants="0,4" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M363,82 L283,82 L283,922 L357,922" data-edge="46" data-participants="0,9" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M363,80 L279,80 L279,942 L357,942" data-edge="47" data-participants="0,9" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M530,154 L570,154 L570,1222 L536,1222" data-edge="50" data-participants="1,11" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-full" d="M363,154 L287,154 L287,1554 L205,1554" data-edge="56" data-participants="1,13" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M363,66 L255,66 L255,74 L205,74" data-edge="14" data-participants="0,2" data-props="0,4" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M363,68 L259,68 L259,94 L205,94" data-edge="15" data-participants="0,2" data-props="0,5" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M363,70 L263,70 L263,374 L205,374" data-edge="18" data-participants="0,3" data-props="0,14" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M363,72 L267,72 L267,394 L205,394" data-edge="19" data-participants="0,3" data-props="0,15" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M530,78 L562,78 L562,622 L536,622" data-edge="42" data-participants="0,8" data-props="0,65" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M363,76 L271,76 L271,634 L205,634" data-edge="22" data-participants="0,4" data-props="0,24" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M530,70 L566,70 L566,642 L536,642" data-edge="43" data-participants="0,8" data-props="0,66" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M363,78 L275,78 L275,654 L205,654" data-edge="23" data-participants="0,4" data-props="0,25" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M363,82 L283,82 L283,922 L357,922" data-edge="46" data-participants="0,9" data-props="0,75" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M363,80 L279,80 L279,942 L357,942" data-edge="47" data-participants="0,9" data-props="0,76" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M530,154 L570,154 L570,1222 L536,1222" data-edge="50" data-participants="1,11" data-props="1,86" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-full" d="M363,154 L287,154 L287,1554 L205,1554" data-edge="56" data-participants="1,13" data-props="1,95" marker-end="url(#arrow-constraint-valid)"/>
       </g>
       <g class="obgraph-constraint-stubs">
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,74 L205,74" data-edge="14" data-participants="0,2" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,94 L205,94" data-edge="15" data-participants="0,2" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,374 L205,374" data-edge="18" data-participants="0,3" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,394 L205,394" data-edge="19" data-participants="0,3" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M546,622 L536,622" data-edge="42" data-participants="0,8" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,634 L205,634" data-edge="22" data-participants="0,4" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M546,642 L536,642" data-edge="43" data-participants="0,8" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,654 L205,654" data-edge="23" data-participants="0,4" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M347,922 L357,922" data-edge="46" data-participants="0,9" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M347,942 L357,942" data-edge="47" data-participants="0,9" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M546,1222 L536,1222" data-edge="50" data-participants="1,11" marker-end="url(#arrow-constraint-valid)"/>
-        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,1554 L205,1554" data-edge="56" data-participants="1,13" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,74 L205,74" data-edge="14" data-participants="0,2" data-props="0,4" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,94 L205,94" data-edge="15" data-participants="0,2" data-props="0,5" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,374 L205,374" data-edge="18" data-participants="0,3" data-props="0,14" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,394 L205,394" data-edge="19" data-participants="0,3" data-props="0,15" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M546,622 L536,622" data-edge="42" data-participants="0,8" data-props="0,65" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,634 L205,634" data-edge="22" data-participants="0,4" data-props="0,24" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M546,642 L536,642" data-edge="43" data-participants="0,8" data-props="0,66" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,654 L205,654" data-edge="23" data-participants="0,4" data-props="0,25" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M347,922 L357,922" data-edge="46" data-participants="0,9" data-props="0,75" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M347,942 L357,942" data-edge="47" data-participants="0,9" data-props="0,76" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M546,1222 L536,1222" data-edge="50" data-participants="1,11" data-props="1,86" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M215,1554 L205,1554" data-edge="56" data-participants="1,13" data-props="1,95" marker-end="url(#arrow-constraint-valid)"/>
       </g>
       <g class="obgraph-deriv-chains">
+      <g class="obgraph-deriv-chain" data-deriv="0" data-participants="5,6,7" data-props="61,62,112">
+        <path class="obgraph-constraint-full" d="M363,294 L255,294 L255,506 L348,506" data-edge="33" data-participants="5,6,7"/>
+        <path class="obgraph-constraint-full" d="M363,434 L259,434 L259,514 L348,514" data-edge="34" data-participants="5,6,7"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M338,506 L348,506" data-edge="33" data-participants="5,6,7" marker-end="url(#arrow-constraint-valid)"/>
+        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="M338,514 L348,514" data-edge="34" data-participants="5,6,7" marker-end="url(#arrow-constraint-valid)"/>
+      </g>
       </g>
     </g>
     <g class="obgraph-derivations">
@@ -1124,54 +1216,131 @@
   if (!svg) return;
 
   var selected = new Set();
-  var hovered = new Set();
+  var hoveredNode = null;
+  var hoveredProp = null;
 
-  function isActive(id) {
-    return selected.has(id) || hovered.has(id);
+  function isNodeActive(id) {
+    return selected.has(id) || hoveredNode === id;
   }
 
+  // Check if any participant node is selected or title-bar-hovered.
   function hasActiveParticipant(el) {
     var attr = el.getAttribute('data-participants');
     if (!attr) return false;
     var ids = attr.split(',');
     for (var i = 0; i < ids.length; i++) {
-      if (isActive(ids[i])) return true;
+      if (isNodeActive(ids[i])) return true;
+    }
+    return false;
+  }
+
+  // Check if any participant node is in the selected set.
+  function hasSelectedParticipant(el) {
+    var attr = el.getAttribute('data-participants');
+    if (!attr) return false;
+    var ids = attr.split(',');
+    for (var i = 0; i < ids.length; i++) {
+      if (selected.has(ids[i])) return true;
+    }
+    return false;
+  }
+
+  // Check if the hovered property matches any prop on this edge.
+  function hasHoveredProp(el) {
+    if (!hoveredProp) return false;
+    var attr = el.getAttribute('data-props');
+    if (!attr) return false;
+    var ids = attr.split(',');
+    for (var i = 0; i < ids.length; i++) {
+      if (ids[i] === hoveredProp) return true;
+    }
+    return false;
+  }
+
+  // An edge is "active" (should be shown) if:
+  //   (a) any participant node is selected, OR
+  //   (b) hoveredNode is a participant AND either no prop hover or prop matches
+  function isEdgeActive(el) {
+    if (hasSelectedParticipant(el)) return true;
+    if (hoveredNode !== null && hasActiveParticipant(el)) {
+      if (hoveredProp === null) return true;
+      return hasHoveredProp(el);
+    }
+    return false;
+  }
+
+  // Should this always-visible edge (intra/anchor) be filtered out?
+  // Only filters during property hover on the hovered node's edges.
+  function shouldFilter(el) {
+    if (hoveredProp === null) return false;
+    if (hasSelectedParticipant(el)) return false;
+    var attr = el.getAttribute('data-participants');
+    if (!attr) return false;
+    var ids = attr.split(',');
+    for (var i = 0; i < ids.length; i++) {
+      if (ids[i] === hoveredNode) {
+        return !hasHoveredProp(el);
+      }
     }
     return false;
   }
 
   function updateEdges() {
+    // Cross-domain full paths (skip those inside deriv-chain groups)
     svg.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
-      if (hasActiveParticipant(p)) {
+      if (p.closest('.obgraph-deriv-chain')) return;
+      if (isEdgeActive(p)) {
         p.classList.add('obgraph-active');
       } else {
         p.classList.remove('obgraph-active');
       }
     });
+
+    // Cross-domain stubs (skip those inside deriv-chain groups)
     svg.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
-      if (hasActiveParticipant(p)) {
+      if (p.closest('.obgraph-deriv-chain')) return;
+      if (isEdgeActive(p)) {
         p.classList.add('obgraph-hidden');
       } else {
         p.classList.remove('obgraph-hidden');
       }
     });
+
+    // Intra-domain constraint groups: filter non-matching during property hover
+    svg.querySelectorAll('.obgraph-constraints-intra > g').forEach(function(g) {
+      if (shouldFilter(g)) {
+        g.classList.add('obgraph-filtered');
+      } else {
+        g.classList.remove('obgraph-filtered');
+      }
+    });
+
+    // Anchor groups: filter during property hover (anchors have no props)
+    svg.querySelectorAll('.obgraph-anchors > g').forEach(function(g) {
+      if (shouldFilter(g)) {
+        g.classList.add('obgraph-filtered');
+      } else {
+        g.classList.remove('obgraph-filtered');
+      }
+    });
+
     // Derivation chain atomic toggling
     svg.querySelectorAll('.obgraph-deriv-chain').forEach(function(g) {
-      if (hasActiveParticipant(g)) {
-        g.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
+      var active = isEdgeActive(g);
+      g.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
+        if (active) {
           p.classList.add('obgraph-active');
-        });
-        g.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
-          p.classList.add('obgraph-hidden');
-        });
-      } else {
-        g.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
+        } else {
           p.classList.remove('obgraph-active');
-        });
-        g.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
+        }
+      });
+      g.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
+        if (active) {
+          p.classList.add('obgraph-hidden');
+        } else {
           p.classList.remove('obgraph-hidden');
-        });
-      }
+        }
+      });
     });
   }
 
@@ -1180,14 +1349,25 @@
     if (node.getAttribute('data-selected') === 'true') {
       selected.add(id);
     }
-    node.addEventListener('mouseenter', function() {
-      hovered.add(id);
+
+    // mouseover bubbles: detects property vs title-bar hover
+    node.addEventListener('mouseover', function(e) {
+      hoveredNode = id;
+      var propEl = e.target.closest('.obgraph-prop');
+      if (propEl) {
+        hoveredProp = propEl.getAttribute('data-prop');
+      } else {
+        hoveredProp = null;
+      }
       updateEdges();
     });
+
     node.addEventListener('mouseleave', function() {
-      hovered.delete(id);
+      hoveredNode = null;
+      hoveredProp = null;
       updateEdges();
     });
+
     node.addEventListener('click', function(e) {
       e.stopPropagation();
       if (selected.has(id)) {

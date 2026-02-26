@@ -830,6 +830,10 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // Already-placed label bounding boxes for collision detection.
     let mut placed_label_bbs: Vec<(f64, f64, f64, f64)> = Vec::new();
 
+    // Collect DerivInput edge paths by derivation for post-loop classification.
+    let mut deriv_edge_paths: std::collections::HashMap<DerivId, Vec<(EdgePath, usize)>> =
+        std::collections::HashMap::new();
+
     // Pre-parse edge segments for edge-label collision checking.
     let edge_segments: Vec<Vec<LineSeg>> = routes
         .iter()
@@ -882,11 +886,12 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
             Edge::Anchor { .. } => {
                 anchors.push(edge_path);
             }
-            Edge::DerivInput { .. } => {
-                // Derivation input edges are now part of DerivChain structs
-                // (built by Stream D). For now, include them in intra-domain constraints
-                // so they still render.
-                intra_domain_constraints.push(edge_path);
+            Edge::DerivInput { target_deriv, .. } => {
+                // Collect by derivation; classified after the loop.
+                deriv_edge_paths
+                    .entry(*target_deriv)
+                    .or_default()
+                    .push((edge_path, route_idx));
             }
             Edge::Constraint {
                 source_prop,
@@ -914,6 +919,47 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
                 } else {
                     intra_domain_constraints.push(edge_path);
                 }
+            }
+        }
+    }
+
+    // Classify DerivInput edges: intra-domain derivations are always-visible,
+    // cross-domain derivations get show/hide with stubs (DerivChain).
+    let mut cross_domain_deriv_chains: Vec<DerivChain> = Vec::new();
+    for (deriv_id, edge_entries) in deriv_edge_paths {
+        if is_deriv_cross_domain(graph, deriv_id) {
+            let deriv = &graph.derivations[deriv_id.index()];
+            let mut participants: Vec<NodeId> = deriv
+                .inputs
+                .iter()
+                .map(|&pid| graph.properties[pid.index()].node)
+                .collect();
+            let output_node = graph.properties[deriv.output_prop.index()].node;
+            participants.push(output_node);
+            participants.sort_unstable();
+            participants.dedup();
+
+            let mut full_paths = Vec::new();
+            let mut stub_paths = Vec::new();
+            for (ep, ri) in edge_entries {
+                let stub_route = routing::generate_stub(&routes[ri]);
+                let dotted_svg = routing::route_to_svg_path(&stub_route);
+                stub_paths.push(StubPath {
+                    edge_id: ep.edge_id,
+                    dotted_svg,
+                });
+                full_paths.push(ep);
+            }
+
+            cross_domain_deriv_chains.push(DerivChain {
+                deriv_id,
+                participants,
+                full_paths,
+                stub_paths,
+            });
+        } else {
+            for (ep, _ri) in edge_entries {
+                intra_domain_constraints.push(ep);
             }
         }
     }
@@ -983,7 +1029,7 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         anchors,
         intra_domain_constraints,
         cross_domain_constraints,
-        cross_domain_deriv_chains: Vec::new(),
+        cross_domain_deriv_chains,
         property_order: prop_order,
         width,
         height,
@@ -1009,6 +1055,22 @@ fn is_cross_domain_constraint(graph: &Graph, src_node: NodeId, dst_node: NodeId)
         (Some(a), Some(b)) => a != b,
         _ => true, // one or both are top-level
     }
+}
+
+/// Returns true if a derivation's inputs span multiple domains (or any
+/// input/output is domain-less).  Cross-domain derivations route through
+/// inter-domain gap corridors and use show/hide with stubs.
+pub(crate) fn is_deriv_cross_domain(graph: &Graph, deriv_id: DerivId) -> bool {
+    let deriv = &graph.derivations[deriv_id.index()];
+    let output_domain =
+        graph.nodes[graph.properties[deriv.output_prop.index()].node.index()].domain;
+    let mut all_doms: Vec<Option<DomainId>> = deriv
+        .inputs
+        .iter()
+        .map(|&pid| graph.nodes[graph.properties[pid.index()].node.index()].domain)
+        .collect();
+    all_doms.push(output_domain);
+    !(all_doms.iter().all(|d| *d == all_doms[0]) && all_doms[0].is_some())
 }
 
 /// Shift all layout elements so that the minimum x and y are >= 0.
