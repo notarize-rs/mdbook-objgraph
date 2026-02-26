@@ -1781,21 +1781,23 @@ fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
         // Assign xs[i] to bundle[i]: shortest span → innermost x.
         for (i, info) in bundle.iter().enumerate() {
             let new_x = xs[i];
+            let old_x = info.corridor_x;
             let route = &mut routes[info.route_idx];
             // Update the vertical segment x.
             if let Segment::Vertical { x, .. } = &mut route.segments[1] {
                 *x = new_x;
             }
             // Update the horizontal segments' corridor-side endpoints.
+            // The corridor-side endpoint is the one matching the old corridor_x.
             if let Segment::Horizontal { x_start, x_end, .. } = &mut route.segments[0] {
-                if (*x_start - node_x).abs() > (*x_end - node_x).abs() {
+                if (*x_start - old_x).abs() < (*x_end - old_x).abs() {
                     *x_start = new_x;
                 } else {
                     *x_end = new_x;
                 }
             }
             if let Segment::Horizontal { x_start, x_end, .. } = &mut route.segments[2] {
-                if (*x_start - node_x).abs() > (*x_end - node_x).abs() {
+                if (*x_start - old_x).abs() < (*x_end - old_x).abs() {
                     *x_start = new_x;
                 } else {
                     *x_end = new_x;
