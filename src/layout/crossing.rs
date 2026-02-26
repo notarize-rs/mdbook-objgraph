@@ -994,184 +994,228 @@ pub fn minimize_crossings(
                 let mut new_prop_order: Vec<PropId> =
                     infos.iter().map(|i| i.prop_id).collect();
 
-                // Post-sort: resolve remaining same-node constraint crossings
-                // using adjacent swaps (bubble-sort style).  The barycenter
-                // sort above handles grouping and source-before-dest ordering
-                // but may leave crossings when multiple constraints share the
-                // same midpoint.  This pass also penalizes cross-node edges
-                // that fall inside same-node brackets (which causes physical
-                // crossings when both route through the same corridor).
+                // Post-sort: refine property ordering using sifting.
+                // For each property (ordered by connectivity), remove it
+                // from the list and try every insertion position, picking
+                // the one that minimizes total cost.  Unlike bubble sort,
+                // sifting can make non-local moves — critical for chiasm
+                // alignment where the optimal position may be many steps
+                // away from the current one.
                 if !same_node_edges.is_empty() {
-                    let max_passes = new_prop_order.len();
-                    for _ in 0..max_passes {
-                        let mut swapped = false;
-                        for i in 0..new_prop_order.len().saturating_sub(1) {
-                            // Count crossings that would be eliminated vs
-                            // created by swapping positions i and i+1.
-                            let mut cost_current: i64 = 0;
-                            let mut cost_swapped: i64 = 0;
+                    // Pre-compute per-target same_domain flag.
+                    let target_same_domain: HashMap<NodeId, bool> =
+                        inter_node_edges_by_target.keys().map(|&tn| {
+                            let local_dom = graph.nodes[node_id.index()].domain;
+                            let remote_dom = graph.nodes[tn.index()].domain;
+                            (tn, local_dom.is_some() && local_dom == remote_dom)
+                        }).collect();
 
-                            // Build position map for the current ordering
-                            let pos: HashMap<PropId, usize> = new_prop_order
-                                .iter()
-                                .enumerate()
-                                .map(|(idx, &pid)| (pid, idx))
-                                .collect();
+                    // Pre-compute remote property indices (fixed across sifting).
+                    let remote_indices: HashMap<PropId, usize> =
+                        inter_node_edges_by_target.values().flat_map(|edges| {
+                            edges.iter().map(|&(_, rp, _)| {
+                                let rn = graph.properties[rp.index()].node;
+                                let ri = prop_order.prop_index(rn, rp).unwrap_or(0);
+                                (rp, ri)
+                            })
+                        }).collect();
 
-                            let swap_pos = |p: usize| -> usize {
-                                if p == i { i + 1 }
-                                else if p == i + 1 { i }
-                                else { p }
-                            };
-
-                            // Cost from same-node constraint pair crossings.
-                            for e1_idx in 0..same_node_edges.len() {
-                                for e2_idx in (e1_idx + 1)..same_node_edges.len() {
-                                    let (s1, d1, w1) = same_node_edges[e1_idx];
-                                    let (s2, d2, w2) = same_node_edges[e2_idx];
-
-                                    if let (
-                                        Some(&s1p), Some(&d1p),
-                                        Some(&s2p), Some(&d2p),
-                                    ) = (
-                                        pos.get(&s1), pos.get(&d1),
-                                        pos.get(&s2), pos.get(&d2),
-                                    ) {
-                                        let crosses_now =
-                                            (s1p < s2p) != (d1p < d2p)
-                                            && s1p != s2p && d1p != d2p;
-                                        let (s1ps, d1ps, s2ps, d2ps) = (
-                                            swap_pos(s1p), swap_pos(d1p),
-                                            swap_pos(s2p), swap_pos(d2p),
-                                        );
-                                        let crosses_after =
-                                            (s1ps < s2ps) != (d1ps < d2ps)
-                                            && s1ps != s2ps && d1ps != d2ps;
-
-                                        let w = (w1 + w2) as i64;
-                                        if crosses_now { cost_current += w; }
-                                        if crosses_after { cost_swapped += w; }
-                                    }
-                                }
-                            }
-
-                            // Cost from cross-node edges inside same-node brackets.
-                            for &(s, d, w) in &same_node_edges {
-                                if let (Some(&sp), Some(&dp)) = (pos.get(&s), pos.get(&d)) {
-                                    let (lo, hi) = if sp < dp { (sp, dp) } else { (dp, sp) };
-                                    for (r, &pid) in new_prop_order.iter().enumerate() {
-                                        if !cross_node_props.contains(&pid) { continue; }
-                                        let rs = swap_pos(r);
-                                        let (los, his) = (swap_pos(lo), swap_pos(hi));
-                                        if lo < r && r < hi { cost_current += w as i64; }
-                                        if los < rs && rs < his { cost_swapped += w as i64; }
-                                    }
-                                }
-                            }
-
-                            // Cost from bracket span: larger spans increase the
-                            // chance of crossing other brackets.  Penalizing span
-                            // encourages interleaved ordering (src1, dst1, src2,
-                            // dst2) which eliminates staircase overlaps.
-                            for &(s, d, w) in &same_node_edges {
-                                if let (Some(&sp), Some(&dp)) = (pos.get(&s), pos.get(&d)) {
-                                    let span_now = sp.abs_diff(dp) as i64;
-                                    let sp_s = swap_pos(sp);
-                                    let dp_s = swap_pos(dp);
-                                    let span_after = sp_s.abs_diff(dp_s) as i64;
-                                    cost_current += span_now * w as i64;
-                                    cost_swapped += span_after * w as i64;
-                                }
-                            }
-
-                            // Cost from inter-node bipartite crossings: two edges
-                            // from this node to the same target node.
-                            // Same-domain pairs use chiasm (reversed) ordering to
-                            // create nested brackets; cross-domain pairs use
-                            // parallel (matching) ordering.
-                            for (&target_node, edges) in &inter_node_edges_by_target {
-                                let same_domain = {
-                                    let local_dom = graph.nodes[node_id.index()].domain;
-                                    let remote_dom = graph.nodes[target_node.index()].domain;
-                                    local_dom.is_some() && local_dom == remote_dom
+                    // Pre-compute edge-length target positions per local prop.
+                    let proximity_targets: HashMap<PropId, (f64, u32)> =
+                        inter_node_edges_by_target.values().flat_map(|edges| {
+                            edges.iter().map(|&(lp, rp, w)| {
+                                let rn = graph.properties[rp.index()].node;
+                                let rl = layer_map
+                                    .get(&LayerElement::Node(rn))
+                                    .copied()
+                                    .unwrap_or(k as u32);
+                                let target = if rl < k as u32 {
+                                    0.0
+                                } else {
+                                    (props.len() - 1) as f64
                                 };
-                                for e1 in 0..edges.len() {
-                                    for e2 in (e1 + 1)..edges.len() {
-                                        let (lp1, rp1, w1) = edges[e1];
-                                        let (lp2, rp2, w2) = edges[e2];
-                                        if let (Some(&l1), Some(&l2)) =
-                                            (pos.get(&lp1), pos.get(&lp2))
-                                        {
-                                            let r1 = prop_order.prop_index(
-                                                graph.properties[rp1.index()].node, rp1,
-                                            ).unwrap_or(0);
-                                            let r2 = prop_order.prop_index(
-                                                graph.properties[rp2.index()].node, rp2,
-                                            ).unwrap_or(0);
-                                            if r1 == r2 { continue; }
+                                (lp, (target, w))
+                            })
+                        }).collect();
 
-                                            let w = (w1 + w2) as i64 * 2;
-                                            let (l1s, l2s) = (swap_pos(l1), swap_pos(l2));
+                    // Cost function for a candidate ordering.
+                    let order_cost = |order: &[PropId]| -> i64 {
+                        let pos: HashMap<PropId, usize> = order
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, &pid)| (pid, idx))
+                            .collect();
+                        let mut cost: i64 = 0;
 
-                                            if same_domain {
-                                                // Chiasm: penalize when local order
-                                                // MATCHES remote (= overlapping brackets).
-                                                let bad_now = (l1 < l2) == (r1 < r2);
-                                                let bad_after = (l1s < l2s) == (r1 < r2);
-                                                if bad_now { cost_current += w; }
-                                                if bad_after { cost_swapped += w; }
-                                            } else {
-                                                // Parallel: penalize when local order
-                                                // INVERTED vs remote (= crossing).
-                                                let bad_now = (l1 < l2) != (r1 < r2);
-                                                let bad_after = (l1s < l2s) != (r1 < r2);
-                                                if bad_now { cost_current += w; }
-                                                if bad_after { cost_swapped += w; }
-                                            }
-                                        }
-                                    }
+                        // Same-node constraint crossings.
+                        for e1 in 0..same_node_edges.len() {
+                            for e2 in (e1 + 1)..same_node_edges.len() {
+                                let (s1, d1, w1) = same_node_edges[e1];
+                                let (s2, d2, w2) = same_node_edges[e2];
+                                if let (Some(&s1p), Some(&d1p), Some(&s2p), Some(&d2p)) =
+                                    (pos.get(&s1), pos.get(&d1), pos.get(&s2), pos.get(&d2))
+                                    && s1p != s2p && d1p != d2p
+                                    && (s1p < s2p) != (d1p < d2p)
+                                {
+                                    cost += (w1 + w2) as i64;
                                 }
-                            }
-
-                            // Edge-length proximity cost: pull properties toward
-                            // their cross-node endpoints.  Properties connecting
-                            // above should be near the top; below near the bottom.
-                            // Acts as a tiebreaker when crossing costs are equal.
-                            for edges in inter_node_edges_by_target.values() {
-                                for &(local_prop, remote_prop, w) in edges {
-                                    if let Some(&lp) = pos.get(&local_prop) {
-                                        // Only evaluate if involved in the swap.
-                                        if lp != i && lp != i + 1 { continue; }
-
-                                        let remote_node =
-                                            graph.properties[remote_prop.index()].node;
-                                        let remote_layer = layer_map
-                                            .get(&LayerElement::Node(remote_node))
-                                            .copied()
-                                            .unwrap_or(k as u32);
-                                        let target_pos = if remote_layer < k as u32 {
-                                            0.0 // Remote is above → pull toward top.
-                                        } else {
-                                            (props.len() - 1) as f64 // → pull toward bottom.
-                                        };
-
-                                        let dist_now = (lp as f64 - target_pos).abs();
-                                        let lp_s = swap_pos(lp);
-                                        let dist_swap = (lp_s as f64 - target_pos).abs();
-                                        // Fractional weight so this is a tiebreaker.
-                                        cost_current += (dist_now * 0.5 * w as f64) as i64;
-                                        cost_swapped += (dist_swap * 0.5 * w as f64) as i64;
-                                    }
-                                }
-                            }
-
-                            if cost_swapped < cost_current {
-                                new_prop_order.swap(i, i + 1);
-                                swapped = true;
                             }
                         }
-                        if !swapped {
-                            break;
+
+                        // Cross-node edges inside same-node brackets.
+                        for &(s, d, w) in &same_node_edges {
+                            if let (Some(&sp), Some(&dp)) = (pos.get(&s), pos.get(&d)) {
+                                let (lo, hi) = if sp < dp { (sp, dp) } else { (dp, sp) };
+                                for &pid in order {
+                                    if !cross_node_props.contains(&pid) { continue; }
+                                    let r = pos[&pid];
+                                    if lo < r && r < hi { cost += w as i64; }
+                                }
+                            }
+                        }
+
+                        // Bracket span.
+                        for &(s, d, w) in &same_node_edges {
+                            if let (Some(&sp), Some(&dp)) = (pos.get(&s), pos.get(&d)) {
+                                cost += sp.abs_diff(dp) as i64 * w as i64;
+                            }
+                        }
+
+                        // Inter-node bipartite crossings (chiasm-aware).
+                        for (&tn, edges) in &inter_node_edges_by_target {
+                            let chiasm = target_same_domain[&tn];
+                            for e1 in 0..edges.len() {
+                                for e2 in (e1 + 1)..edges.len() {
+                                    let (lp1, rp1, w1) = edges[e1];
+                                    let (lp2, rp2, w2) = edges[e2];
+                                    if let (Some(&l1), Some(&l2)) =
+                                        (pos.get(&lp1), pos.get(&lp2))
+                                    {
+                                        let r1 = remote_indices[&rp1];
+                                        let r2 = remote_indices[&rp2];
+                                        if r1 == r2 { continue; }
+                                        let w = (w1 + w2) as i64 * 2;
+                                        let bad = if chiasm {
+                                            (l1 < l2) == (r1 < r2)
+                                        } else {
+                                            (l1 < l2) != (r1 < r2)
+                                        };
+                                        if bad { cost += w; }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Edge-length proximity.
+                        for (&lp, &(target, w)) in &proximity_targets {
+                            if let Some(&p) = pos.get(&lp) {
+                                cost += ((p as f64 - target).abs() * 0.5 * w as f64) as i64;
+                            }
+                        }
+
+                        cost
+                    };
+
+                    // Sifting: process each property by decreasing
+                    // connectivity, try every insertion position.
+                    let mut sift_order: Vec<usize> =
+                        (0..new_prop_order.len()).collect();
+                    sift_order.sort_by(|&a, &b| {
+                        let count_a = same_node_edges.iter()
+                            .filter(|(s, d, _)| *s == new_prop_order[a] || *d == new_prop_order[a])
+                            .count()
+                            + inter_node_edges_by_target.values()
+                                .flat_map(|e| e.iter())
+                                .filter(|(lp, _, _)| *lp == new_prop_order[a])
+                                .count();
+                        let count_b = same_node_edges.iter()
+                            .filter(|(s, d, _)| *s == new_prop_order[b] || *d == new_prop_order[b])
+                            .count()
+                            + inter_node_edges_by_target.values()
+                                .flat_map(|e| e.iter())
+                                .filter(|(lp, _, _)| *lp == new_prop_order[b])
+                                .count();
+                        count_b.cmp(&count_a)
+                    });
+
+                    let max_rounds = 3;
+                    for _ in 0..max_rounds {
+                        let mut improved = false;
+                        for &orig_idx in &sift_order {
+                            let pid = new_prop_order[orig_idx];
+                            // Find current position of this property.
+                            let cur = new_prop_order.iter()
+                                .position(|&p| p == pid)
+                                .unwrap();
+                            let base_cost = order_cost(&new_prop_order);
+
+                            // Remove and try every insertion position.
+                            let mut trial = new_prop_order.clone();
+                            trial.remove(cur);
+                            let mut best_pos = cur;
+                            let mut best_cost = base_cost;
+                            for ins in 0..=trial.len() {
+                                let mut candidate = trial.clone();
+                                candidate.insert(ins, pid);
+                                let c = order_cost(&candidate);
+                                if c < best_cost {
+                                    best_cost = c;
+                                    best_pos = ins;
+                                }
+                            }
+                            if best_pos != cur {
+                                let mut result = trial;
+                                result.insert(best_pos, pid);
+                                new_prop_order = result;
+                                improved = true;
+                            }
+                        }
+                        if !improved { break; }
+                    }
+                }
+
+                // Chiasm override: for same-domain constraint bundles,
+                // reverse the connected properties on this node relative
+                // to the remote node's order. Applied AFTER sifting so
+                // the chiastic (nested bracket) arrangement has the final
+                // word, overriding any sifting decisions that would create
+                // overlapping brackets.
+                //
+                // Only apply to the LOWER node of each pair to prevent
+                // double reversal (both sides reversing cancels out).
+                for (&target_node, edges) in &inter_node_edges_by_target {
+                    if edges.len() < 2 { continue; }
+                    let target_layer = layer_map
+                        .get(&LayerElement::Node(target_node))
+                        .copied()
+                        .unwrap_or(k as u32);
+                    if target_layer >= k as u32 { continue; }
+                    let local_dom = graph.nodes[node_id.index()].domain;
+                    let remote_dom = graph.nodes[target_node.index()].domain;
+                    if local_dom.is_none() || local_dom != remote_dom { continue; }
+
+                    let mut by_remote: Vec<(usize, PropId)> = edges.iter()
+                        .filter_map(|&(lp, rp, _)| {
+                            let rn = graph.properties[rp.index()].node;
+                            let ri = prop_order.prop_index(rn, rp)?;
+                            Some((ri, lp))
+                        })
+                        .collect();
+                    by_remote.sort_by_key(|&(ri, _)| ri);
+
+                    let desired_local: Vec<PropId> = by_remote.iter()
+                        .rev()
+                        .map(|&(_, lp)| lp)
+                        .collect();
+
+                    let mut slots: Vec<usize> = desired_local.iter()
+                        .filter_map(|lp| new_prop_order.iter().position(|p| p == lp))
+                        .collect();
+                    slots.sort();
+
+                    for (i, &slot) in slots.iter().enumerate() {
+                        if i < desired_local.len() {
+                            new_prop_order[slot] = desired_local[i];
                         }
                     }
                 }

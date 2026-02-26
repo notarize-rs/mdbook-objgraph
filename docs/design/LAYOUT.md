@@ -375,6 +375,47 @@ function minimize_crossings(layers, edges) → optimized_layers:
     return best
 ```
 
+##### Chiasm Pre-Seeding for Same-Domain Constraint Bundles
+
+After barycenter sorting, same-domain node pairs connected by ≥2 constraints
+receive **chiasm pre-seeding**: the connected properties on one node are
+reversed relative to the other node's order. This creates a chiastic (ABBA)
+arrangement — strictly nested brackets in the side corridor:
+
+```
+  ╭────────────────╮   prop_a → prop_x (outermost)
+  │ ╭──────────╮   │   prop_b → prop_y
+  │ │ ╭────╮   │   │   prop_c → prop_z (innermost)
+  │ │ ╰────╯   │   │
+  │ ╰──────────╯   │
+  ╰────────────────╯
+```
+
+Without chiasm pre-seeding, parallel ordering creates overlapping bracket spans
+that cause corridor collisions.
+
+##### Sifting Refinement
+
+After barycenter sorting and chiasm pre-seeding, a **sifting** pass refines
+intra-node property ordering (replacing the simpler bubble-sort approach). For
+each property, ordered by decreasing connectivity, sifting removes it from the
+list and evaluates every possible insertion position, choosing the one that
+minimizes a multi-term cost:
+
+1. **Same-node constraint crossings** — penalizes crossed src/dst pairs.
+2. **Cross-node bracket intrusion** — penalizes cross-node edges that fall
+   inside same-node bracket spans.
+3. **Bracket span** — penalizes large src-to-dst distances.
+4. **Inter-node bipartite crossings** — for same-domain pairs, penalizes
+   parallel ordering (prefers chiasm); for cross-domain pairs, penalizes
+   inverted ordering (prefers parallel).
+5. **Edge-length proximity** — pulls properties toward their cross-node
+   endpoints (above=top, below=bottom), weighted as a tiebreaker.
+
+Sifting makes non-local moves in a single step (unlike bubble sort which can
+only swap adjacent elements), allowing it to escape local minima. The sifting
+heuristic is from BDD variable reordering (Matuszewski et al., GD 1999).
+
 ##### position_of: Fractional Position for Ordering
 
 The `position_of` function returns the fractional position of a property port
