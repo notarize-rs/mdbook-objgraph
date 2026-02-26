@@ -291,7 +291,7 @@ fn sev_snp_realistic_full_pipeline() {
         "Output should contain Quote label"
     );
     assert!(
-        svg.contains("extensions.hw_id"),
+        svg.contains("sev.hwId"),
         "Output should contain realistic property names"
     );
     assert!(

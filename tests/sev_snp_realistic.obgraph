@@ -7,8 +7,10 @@
 #   - Nodes represent TBS (To Be Signed) bodies for X.509 certificates;
 #     signature verification is encoded by anchor links, not properties.
 #   - Anchor operations carry the real algorithm name (ecdsa_p384, etc.).
-#   - Flat c509-style property names with extensions.* for X.509 extensions.
-#   - Extensions with fixed/expected values (basic_constraints, key_usage)
+#   - C509 registry identifiers (camelCase) for standard extensions
+#     per draft-ietf-cose-cbor-encoded-cert-16 Figure 12.
+#   - Project-defined sev.* identifiers for AMD SEV-SNP vendor extensions.
+#   - Extensions with fixed/expected values (basicConstraints, keyUsage)
 #     are @constrained — the verifier's policy engine validates them statically.
 #   - Properties whose integrity is guaranteed by the anchor (signed TBS fields)
 #     that also serve as constraint sources are @constrained.
@@ -26,47 +28,47 @@ domain "Verifier" {
 domain "AMD SEV-SNP" {
   # Self-signed ECDSA P-384 root CA (AMD VCEK Certificate Spec §3)
   node ARK "AMD Root Key" @anchored {
-    serial_number
+    certificateSerialNumber
     issuer                           @critical
-    not_before                       @critical
-    not_after                        @critical
+    validityNotBefore                @critical
+    validityNotAfter                 @critical
     subject                          @constrained
-    subject_public_key               @constrained
-    extensions.basic_constraints     @constrained
-    extensions.key_usage             @constrained
-    extensions.subject_key_id        @constrained
-    extensions.authority_key_id      @critical
+    subjectPublicKey                 @constrained
+    basicConstraints                 @constrained
+    keyUsage                         @constrained
+    subjectKeyIdentifier             @constrained
+    authorityKeyIdentifier           @critical
   }
 
   # Intermediate CA signed by ARK
   node ASK "AMD Signing Key" {
-    serial_number
+    certificateSerialNumber
     issuer                           @critical
-    not_before                       @critical
-    not_after                        @critical
+    validityNotBefore                @critical
+    validityNotAfter                 @critical
     subject                          @constrained
-    subject_public_key               @constrained
-    extensions.basic_constraints     @constrained
-    extensions.key_usage             @constrained
-    extensions.subject_key_id        @constrained
-    extensions.authority_key_id      @critical
+    subjectPublicKey                 @constrained
+    basicConstraints                 @constrained
+    keyUsage                         @constrained
+    subjectKeyIdentifier             @constrained
+    authorityKeyIdentifier           @critical
   }
 
   # Leaf certificate with SEV-SNP custom OID extensions (1.3.6.1.4.1.3704.1.*)
   node VCEK "VCEK" {
-    serial_number
+    certificateSerialNumber
     issuer                           @critical
-    not_before                       @critical
-    not_after                        @critical
+    validityNotBefore                @critical
+    validityNotAfter                 @critical
     subject                          @constrained
-    subject_public_key               @constrained
-    extensions.key_usage             @constrained
-    extensions.authority_key_id      @critical
-    extensions.hw_id                 @constrained
-    extensions.tcb.bootloader        @constrained
-    extensions.tcb.tee               @constrained
-    extensions.tcb.snp               @constrained
-    extensions.tcb.microcode         @constrained
+    subjectPublicKey                 @constrained
+    keyUsage                         @constrained
+    authorityKeyIdentifier           @critical
+    sev.hwId                         @constrained
+    sev.tcb.bootloader               @constrained
+    sev.tcb.tee                      @constrained
+    sev.tcb.snp                      @constrained
+    sev.tcb.microcode                @constrained
   }
 
   # AMD SEV-SNP Firmware ABI Specification Table 24
@@ -115,29 +117,29 @@ domain "NIST" {
 domain "TPM" {
   # TPM manufacturer root CA
   node MfgCA "Manufacturer CA" @anchored {
-    serial_number
+    certificateSerialNumber
     issuer                           @critical
-    not_before                       @critical
-    not_after                        @critical
+    validityNotBefore                @critical
+    validityNotAfter                 @critical
     subject                          @constrained
-    subject_public_key               @constrained
-    extensions.basic_constraints     @constrained
-    extensions.key_usage             @constrained
-    extensions.subject_key_id        @constrained
-    extensions.authority_key_id      @critical
+    subjectPublicKey                 @constrained
+    basicConstraints                 @constrained
+    keyUsage                         @constrained
+    subjectKeyIdentifier             @constrained
+    authorityKeyIdentifier           @critical
   }
 
   # EK credential per TCG EK Credential Profile 2.0
   node EK "Endorsement Key" {
-    serial_number
+    certificateSerialNumber
     issuer                           @critical
-    not_before                       @critical
-    not_after                        @critical
+    validityNotBefore                @critical
+    validityNotAfter                 @critical
     subject
-    subject_public_key               @constrained
-    extensions.subject_alt_name      @critical
-    extensions.authority_key_id      @critical
-    extensions.certificate_policies  @constrained
+    subjectPublicKey                 @constrained
+    subjectAltName                   @critical
+    authorityKeyIdentifier           @critical
+    certificatePolicies              @constrained
   }
 
   # TPM key object (not a certificate)
@@ -175,11 +177,11 @@ domain "Guest vTPM" {
 
   # vTPM endorsement key certificate
   node vEK "vTPM EK" {
-    serial_number
+    certificateSerialNumber
     issuer                           @constrained
     subject                          @constrained
-    subject_public_key               @constrained
-    extensions.authority_key_id      @critical
+    subjectPublicKey                 @constrained
+    authorityKeyIdentifier           @critical
   }
 
   # vTPM attestation identity key
@@ -233,38 +235,38 @@ vTCGLog <- vQuote : pcr_replay
 
 # ARK self-signed checks
 ARK::issuer <= ARK::subject : issuer_match
-ARK::extensions.authority_key_id <= ARK::extensions.subject_key_id
-ARK::not_before <= System::current_time : time_valid
-ARK::not_after <= System::current_time : time_valid
+ARK::authorityKeyIdentifier <= ARK::subjectKeyIdentifier
+ARK::validityNotBefore <= System::current_time : time_valid
+ARK::validityNotAfter <= System::current_time : time_valid
 
 # ASK issued by ARK
 ASK::issuer <= ARK::subject : issuer_match
-ASK::extensions.authority_key_id <= ARK::extensions.subject_key_id
-ASK::not_before <= System::current_time : time_valid
-ASK::not_after <= System::current_time : time_valid
+ASK::authorityKeyIdentifier <= ARK::subjectKeyIdentifier
+ASK::validityNotBefore <= System::current_time : time_valid
+ASK::validityNotAfter <= System::current_time : time_valid
 
 # VCEK issued by ASK
 VCEK::issuer <= ASK::subject : issuer_match
-VCEK::extensions.authority_key_id <= ASK::extensions.subject_key_id
-VCEK::not_before <= System::current_time : time_valid
-VCEK::not_after <= System::current_time : time_valid
+VCEK::authorityKeyIdentifier <= ASK::subjectKeyIdentifier
+VCEK::validityNotBefore <= System::current_time : time_valid
+VCEK::validityNotAfter <= System::current_time : time_valid
 
 # ═══════════════════════════════════════════════════════════════
 # Attestation Report constraints
 # ═══════════════════════════════════════════════════════════════
 
-Report::chip_id <= VCEK::extensions.hw_id
+Report::chip_id <= VCEK::sev.hwId
 
 # TCB layered constraints:
-#   VCEK extensions.tcb <= committed_tcb <= current_tcb
+#   VCEK sev.tcb <= committed_tcb <= current_tcb
 # committed_tcb is the minimum the chip will boot; current_tcb is what's running.
 # VCEK can express older values (until committed), so each layer must be >=.
 
 # committed_tcb >= VCEK-certified TCB
-Report::tcb.committed.bootloader <= VCEK::extensions.tcb.bootloader : ge
-Report::tcb.committed.tee <= VCEK::extensions.tcb.tee : ge
-Report::tcb.committed.snp <= VCEK::extensions.tcb.snp : ge
-Report::tcb.committed.microcode <= VCEK::extensions.tcb.microcode : ge
+Report::tcb.committed.bootloader <= VCEK::sev.tcb.bootloader : ge
+Report::tcb.committed.tee <= VCEK::sev.tcb.tee : ge
+Report::tcb.committed.snp <= VCEK::sev.tcb.snp : ge
+Report::tcb.committed.microcode <= VCEK::sev.tcb.microcode : ge
 
 # current_tcb >= committed_tcb
 Report::tcb.current.bootloader <= Report::tcb.committed.bootloader : ge
@@ -286,18 +288,18 @@ Report::guest_svn <= filter(KDS::tcb_versions, NVD::cve_entries) : in
 
 # MfgCA self-signed checks
 MfgCA::issuer <= MfgCA::subject : issuer_match
-MfgCA::extensions.authority_key_id <= MfgCA::extensions.subject_key_id
-MfgCA::not_before <= System::current_time : time_valid
-MfgCA::not_after <= System::current_time : time_valid
+MfgCA::authorityKeyIdentifier <= MfgCA::subjectKeyIdentifier
+MfgCA::validityNotBefore <= System::current_time : time_valid
+MfgCA::validityNotAfter <= System::current_time : time_valid
 
 # EK issued by manufacturer
 EK::issuer <= MfgCA::subject : issuer_match
-EK::extensions.authority_key_id <= MfgCA::extensions.subject_key_id
-EK::not_before <= System::current_time : time_valid
-EK::not_after <= System::current_time : time_valid
+EK::authorityKeyIdentifier <= MfgCA::subjectKeyIdentifier
+EK::validityNotBefore <= System::current_time : time_valid
+EK::validityNotAfter <= System::current_time : time_valid
 
 # AK credential binding
-AK::public_area <= EK::subject_public_key : tpm2_activate_credential
+AK::public_area <= EK::subjectPublicKey : tpm2_activate_credential
 
 # Quote verification
 Quote::qualified_signer <= AK::public_area : sha256_name
@@ -311,10 +313,10 @@ TCGLog::digests <= Quote::quote_info.pcr_digest : pcr_replay
 # ═══════════════════════════════════════════════════════════════
 
 # vEK authority bound through GuestData
-vEK::extensions.authority_key_id <= GuestData::ak_pub_hash
+vEK::authorityKeyIdentifier <= GuestData::ak_pub_hash
 
 # vTPM key and quote chain
-vAK::public_area <= vEK::subject_public_key : tpm2_activate_credential
+vAK::public_area <= vEK::subjectPublicKey : tpm2_activate_credential
 vQuote::qualified_signer <= vAK::public_area : sha256_name
 vTCGLog::digests <= vQuote::quote_info.pcr_digest : pcr_replay
 
