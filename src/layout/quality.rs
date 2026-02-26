@@ -4,7 +4,7 @@
 //! collisions, and other layout defects. Used as a test gate and diagnostic
 //! tool during layout algorithm iteration.
 
-use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId};
+use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId, PropId};
 
 use super::{
     DerivLayout, DomainLayout, EdgeLabel, EdgePath, LayoutResult, NodeLayout, StubPath,
@@ -135,6 +135,13 @@ pub struct QualityReport {
     /// Constraint edge pairs between the same two nodes that use different port
     /// sides. (src_node, dst_node, left_count, right_count)
     pub node_pair_side_inconsistency: Vec<(NodeId, NodeId, usize, usize)>,
+
+    // ── Bracket nesting (chiasm alignment) ────────────────────────────
+    /// Same-domain constraint bundles with imperfect bracket nesting.
+    /// For vertically-stacked node pairs with ≥2 constraints, chiastic
+    /// (reversed) property ordering creates nested brackets in the corridor.
+    /// Each entry: (node_a, node_b, nesting_violations, total_pairs).
+    pub bracket_nesting_violations: Vec<(NodeId, NodeId, usize, usize)>,
 }
 
 impl QualityReport {
@@ -350,6 +357,24 @@ impl QualityReport {
                 lines.push(format!(
                     "      {} <-> {}: {}L/{}R",
                     src.0, dst.0, left, right
+                ));
+            }
+        }
+        if !self.bracket_nesting_violations.is_empty() {
+            let total_violations: usize = self
+                .bracket_nesting_violations
+                .iter()
+                .map(|&(_, _, v, _)| v)
+                .sum();
+            lines.push(format!(
+                "    Bracket nesting violations: {} (across {} bundles)",
+                total_violations,
+                self.bracket_nesting_violations.len()
+            ));
+            for &(a, b, violations, total) in &self.bracket_nesting_violations {
+                lines.push(format!(
+                    "      {} <-> {}: {}/{} pairs non-nested",
+                    a.0, b.0, violations, total
                 ));
             }
         }
@@ -622,6 +647,8 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         find_bracket_group_side_inconsistency(graph, &layout.property_order, &parsed);
     let node_pair_side_inconsistency =
         find_node_pair_side_inconsistency(graph, &parsed);
+    let bracket_nesting_violations =
+        find_bracket_nesting_violations(graph, &layout.property_order, &layout.nodes);
 
     QualityReport {
         node_overlaps,
@@ -695,6 +722,7 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         routing_direction_balance,
         bracket_group_side_inconsistency,
         node_pair_side_inconsistency,
+        bracket_nesting_violations,
     }
 }
 
@@ -2928,6 +2956,115 @@ fn find_node_pair_side_inconsistency(
         }
         if left > 0 && right > 0 {
             result.push((*src, *dst, left, right));
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Bracket nesting (chiasm alignment)
+// ---------------------------------------------------------------------------
+
+/// Find same-domain constraint bundles with imperfect bracket nesting.
+///
+/// For two vertically-stacked nodes in the same domain connected by ≥2
+/// constraints, bracket routing through a side corridor is clean when the
+/// edges are strictly nested (chiastic property ordering). This function
+/// checks each such pair and counts nesting violations — pairs of edges
+/// where the bracket spans overlap instead of nesting.
+fn find_bracket_nesting_violations(
+    graph: &Graph,
+    prop_order: &PropertyOrder,
+    nodes: &[NodeLayout],
+) -> Vec<(NodeId, NodeId, usize, usize)> {
+    use std::collections::HashMap;
+
+    // Group cross-node same-domain constraints by node pair.
+    let mut per_pair: HashMap<(NodeId, NodeId), Vec<(PropId, PropId)>> = HashMap::new();
+    for edge in &graph.edges {
+        if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+            let src_node = graph.properties[source_prop.index()].node;
+            let dst_node = graph.properties[dest_prop.index()].node;
+            if src_node == dst_node {
+                continue;
+            }
+            let same_domain = {
+                let sd = graph.nodes[src_node.index()].domain;
+                let dd = graph.nodes[dst_node.index()].domain;
+                sd.is_some() && sd == dd
+            };
+            if !same_domain {
+                continue;
+            }
+            // Normalize pair order by node ID.
+            let key = if src_node.0 <= dst_node.0 {
+                (src_node, dst_node)
+            } else {
+                (dst_node, src_node)
+            };
+            let props = if src_node.0 <= dst_node.0 {
+                (*source_prop, *dest_prop)
+            } else {
+                (*dest_prop, *source_prop)
+            };
+            per_pair.entry(key).or_default().push(props);
+        }
+    }
+
+    let node_y = |nid: NodeId| -> f64 {
+        nodes.iter().find(|nl| nl.id == nid).map(|nl| nl.y).unwrap_or(0.0)
+    };
+
+    let mut result = Vec::new();
+    for (&(node_a, node_b), edges) in &per_pair {
+        if edges.len() < 2 {
+            continue;
+        }
+
+        // Determine which node is upper (lower y) and which is lower.
+        let (upper_node, lower_node, flipped) = if node_y(node_a) <= node_y(node_b) {
+            (node_a, node_b, false)
+        } else {
+            (node_b, node_a, true)
+        };
+
+        // Collect (upper_prop_idx, lower_prop_idx) for each constraint.
+        let indices: Vec<(usize, usize)> = edges
+            .iter()
+            .filter_map(|&(prop_a, prop_b)| {
+                let (upper_prop, lower_prop) = if flipped {
+                    (prop_b, prop_a)
+                } else {
+                    (prop_a, prop_b)
+                };
+                let ui = prop_order.prop_index(upper_node, upper_prop)?;
+                let li = prop_order.prop_index(lower_node, lower_prop)?;
+                Some((ui, li))
+            })
+            .collect();
+
+        if indices.len() < 2 {
+            continue;
+        }
+
+        // Count nesting violations: pairs where bracket spans overlap
+        // instead of nesting. Nesting requires chiastic ordering:
+        // (upper_idx increases) ↔ (lower_idx decreases), or vice versa.
+        let total_pairs = indices.len() * (indices.len() - 1) / 2;
+        let mut violations = 0;
+        for i in 0..indices.len() {
+            for j in (i + 1)..indices.len() {
+                let (u1, l1) = indices[i];
+                let (u2, l2) = indices[j];
+                // Nested (chiasm): upper order opposite of lower order.
+                // Violation: upper order MATCHES lower order (parallel = overlapping).
+                if u1 != u2 && l1 != l2 && (u1 < u2) == (l1 < l2) {
+                    violations += 1;
+                }
+            }
+        }
+        if violations > 0 {
+            result.push((node_a, node_b, violations, total_pairs));
         }
     }
     result

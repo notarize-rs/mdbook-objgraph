@@ -862,7 +862,7 @@ pub fn minimize_crossings(
                 let mut infos: Vec<PropInfo> = Vec::with_capacity(props.len());
 
                 for (prop_idx, &prop_id) in props.iter().enumerate() {
-                    let bc_above = {
+                    let (bc_above, weight_above) = {
                         let mut positions: Vec<(f64, u32)> = Vec::new();
                         if let Some(ai) = above_idx {
                             let above_layer = &layers[ai];
@@ -880,10 +880,11 @@ pub fn minimize_crossings(
                                 }
                             }
                         }
-                        weighted_mean(&positions)
+                        let total_w: f64 = positions.iter().map(|(_, w)| *w as f64).sum();
+                        (weighted_mean(&positions), total_w)
                     };
 
-                    let bc_below = {
+                    let (bc_below, weight_below) = {
                         let mut positions: Vec<(f64, u32)> = Vec::new();
                         if let Some(bi) = below_idx {
                             let below_layer = &layers[bi];
@@ -901,7 +902,8 @@ pub fn minimize_crossings(
                                 }
                             }
                         }
-                        weighted_mean(&positions)
+                        let total_w: f64 = positions.iter().map(|(_, w)| *w as f64).sum();
+                        (weighted_mean(&positions), total_w)
                     };
 
                     // Compute same-node constraint contribution.
@@ -912,7 +914,7 @@ pub fn minimize_crossings(
                     // 0.25 to break the tie in favor of source-before-dest.
                     // This clusters related properties together AND
                     // establishes the correct relative ordering.
-                    let bc_same_node = {
+                    let (bc_same_node, same_weight) = {
                         let mut positions: Vec<(f64, u32)> = Vec::new();
                         for &(src_prop, dst_prop, weight) in &same_node_edges {
                             if let (Some(&src_pos), Some(&dst_pos)) = (
@@ -929,17 +931,46 @@ pub fn minimize_crossings(
                                 }
                             }
                         }
-                        weighted_mean(&positions)
+                        let total_w: f64 = positions.iter().map(|(_, w)| *w as f64).sum();
+                        (weighted_mean(&positions), total_w)
                     };
 
                     let (direction, barycenter) = match (bc_above, bc_below, bc_same_node) {
                         // Cross-layer edges present: blend with same-node
-                        (Some(a), None, Some(s)) => (0, (a + s) / 2.0),
+                        (Some(a), None, Some(s)) => {
+                            let bc = (a * weight_above + s * same_weight)
+                                / (weight_above + same_weight);
+                            (0, bc)
+                        }
                         (Some(a), None, None) => (0, a),
-                        (None, Some(b), Some(s)) => (2, (b + s) / 2.0),
+                        (None, Some(b), Some(s)) => {
+                            let bc = (b * weight_below + s * same_weight)
+                                / (weight_below + same_weight);
+                            (2, bc)
+                        }
                         (None, Some(b), None) => (2, b),
-                        (Some(a), Some(b), Some(s)) => (1, (a + b + s) / 3.0),
-                        (Some(a), Some(b), None) => (1, (a + b) / 2.0),
+                        (Some(a), Some(b), sn) => {
+                            // Weight-aware direction: classify by dominant
+                            // connection instead of always direction=1.
+                            let dir = if weight_above > weight_below * 1.5 {
+                                0 // Predominantly above
+                            } else if weight_below > weight_above * 1.5 {
+                                2 // Predominantly below
+                            } else {
+                                1 // Balanced
+                            };
+                            let bc = match sn {
+                                Some(s) => {
+                                    (a * weight_above + b * weight_below + s * same_weight)
+                                        / (weight_above + weight_below + same_weight)
+                                }
+                                None => {
+                                    (a * weight_above + b * weight_below)
+                                        / (weight_above + weight_below)
+                                }
+                            };
+                            (dir, bc)
+                        }
                         // Only same-node edges: use same-node barycenter
                         (None, None, Some(s)) => (1, s),
                         (None, None, None) => {
@@ -1054,10 +1085,16 @@ pub fn minimize_crossings(
                             }
 
                             // Cost from inter-node bipartite crossings: two edges
-                            // from this node to the same target node cross when
-                            // their local property order is inverted relative to
-                            // the remote property order.
-                            for edges in inter_node_edges_by_target.values() {
+                            // from this node to the same target node.
+                            // Same-domain pairs use chiasm (reversed) ordering to
+                            // create nested brackets; cross-domain pairs use
+                            // parallel (matching) ordering.
+                            for (&target_node, edges) in &inter_node_edges_by_target {
+                                let same_domain = {
+                                    let local_dom = graph.nodes[node_id.index()].domain;
+                                    let remote_dom = graph.nodes[target_node.index()].domain;
+                                    local_dom.is_some() && local_dom == remote_dom
+                                };
                                 for e1 in 0..edges.len() {
                                     for e2 in (e1 + 1)..edges.len() {
                                         let (lp1, rp1, w1) = edges[e1];
@@ -1065,8 +1102,6 @@ pub fn minimize_crossings(
                                         if let (Some(&l1), Some(&l2)) =
                                             (pos.get(&lp1), pos.get(&lp2))
                                         {
-                                            // Remote order is fixed (from the
-                                            // target node's current prop_order).
                                             let r1 = prop_order.prop_index(
                                                 graph.properties[rp1.index()].node, rp1,
                                             ).unwrap_or(0);
@@ -1075,16 +1110,24 @@ pub fn minimize_crossings(
                                             ).unwrap_or(0);
                                             if r1 == r2 { continue; }
 
-                                            // 2x weight: inter-node consistency
-                                            // should dominate over same-node span.
                                             let w = (w1 + w2) as i64 * 2;
-                                            let crosses_now =
-                                                (l1 < l2) != (r1 < r2);
                                             let (l1s, l2s) = (swap_pos(l1), swap_pos(l2));
-                                            let crosses_after =
-                                                (l1s < l2s) != (r1 < r2);
-                                            if crosses_now { cost_current += w; }
-                                            if crosses_after { cost_swapped += w; }
+
+                                            if same_domain {
+                                                // Chiasm: penalize when local order
+                                                // MATCHES remote (= overlapping brackets).
+                                                let bad_now = (l1 < l2) == (r1 < r2);
+                                                let bad_after = (l1s < l2s) == (r1 < r2);
+                                                if bad_now { cost_current += w; }
+                                                if bad_after { cost_swapped += w; }
+                                            } else {
+                                                // Parallel: penalize when local order
+                                                // INVERTED vs remote (= crossing).
+                                                let bad_now = (l1 < l2) != (r1 < r2);
+                                                let bad_after = (l1s < l2s) != (r1 < r2);
+                                                if bad_now { cost_current += w; }
+                                                if bad_after { cost_swapped += w; }
+                                            }
                                         }
                                     }
                                 }
