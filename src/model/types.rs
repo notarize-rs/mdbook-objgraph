@@ -38,7 +38,6 @@ macro_rules! define_id {
 
 define_id!(NodeId);
 define_id!(PropId);
-define_id!(DerivId);
 define_id!(EdgeId);
 define_id!(DomainId);
 
@@ -51,12 +50,10 @@ define_id!(DomainId);
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub properties: Vec<Property>,
-    pub derivations: Vec<Derivation>,
     pub edges: Vec<Edge>,
     pub domains: Vec<Domain>,
 
     /// Port-level adjacency: PropId -> Vec<EdgeId>.
-    /// Includes edges to/from derivation ports.
     pub prop_edges: HashMap<PropId, Vec<EdgeId>>,
 
     /// Node-level adjacency for anchors only: NodeId -> Vec<EdgeId> (children).
@@ -107,10 +104,6 @@ impl Graph {
             .unwrap_or(&[])
     }
 
-    /// Total number of elements (nodes + derivations) for layout purposes.
-    pub fn element_count(&self) -> usize {
-        self.nodes.len() + self.derivations.len()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,18 +144,6 @@ pub struct Property {
 }
 
 // ---------------------------------------------------------------------------
-// Derivation
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-pub struct Derivation {
-    pub id: DerivId,
-    pub operation: String,
-    pub inputs: Vec<PropId>,
-    pub output_prop: PropId,
-}
-
-// ---------------------------------------------------------------------------
 // Domain
 // ---------------------------------------------------------------------------
 
@@ -192,12 +173,6 @@ pub enum Edge {
         source_prop: PropId,
         operation: Option<String>,
     },
-
-    /// Derivation input: source_prop feeds into target_deriv.
-    DerivInput {
-        source_prop: PropId,
-        target_deriv: DerivId,
-    },
 }
 
 impl Edge {
@@ -211,16 +186,10 @@ impl Edge {
         matches!(self, Edge::Constraint { .. })
     }
 
-    /// Returns true if this is a DerivInput edge.
-    pub fn is_deriv_input(&self) -> bool {
-        matches!(self, Edge::DerivInput { .. })
-    }
-
     /// Edge weight for layout purposes.
     pub fn weight(&self) -> u32 {
         match self {
             Edge::Anchor { .. } => 3,
-            Edge::DerivInput { .. } => 2,
             Edge::Constraint { .. } => 1,
         }
     }

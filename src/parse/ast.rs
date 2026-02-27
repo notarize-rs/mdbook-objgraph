@@ -1,9 +1,8 @@
 //! Unvalidated AST types produced by the parser.
 //!
 //! These types mirror the input syntax exactly. No semantic validation
-//! has been performed — references may be dangling, derivations may be
-//! duplicated, etc. The model layer consumes these and produces a
-//! validated `Graph`.
+//! has been performed — references may be dangling, etc. The model layer
+//! consumes these and produces a validated `Graph`.
 
 /// A complete parsed obgraph definition.
 #[derive(Debug, Clone)]
@@ -49,52 +48,12 @@ pub struct AstAnchor {
     pub operation: Option<String>,
 }
 
-/// A constraint: `node::prop <= source_expr [: operation]`.
+/// A constraint: `node::prop <= node::prop [: operation]`.
 #[derive(Debug, Clone)]
 pub struct AstConstraint {
     pub dest_node: String,
     pub dest_prop: String,
-    pub source: AstSourceExpr,
+    pub source_node: String,
+    pub source_prop: String,
     pub operation: Option<String>,
-}
-
-/// The right-hand side of a constraint — either a property reference or a derivation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum AstSourceExpr {
-    /// A simple property reference: `node::property`.
-    PropRef {
-        node_ident: String,
-        prop_name: String,
-    },
-    /// A derivation (function call): `func(arg1, arg2, ...)`.
-    Derivation(AstDerivationExpr),
-}
-
-/// An inline derivation expression: `func(arg1, arg2, ...)`.
-/// Arguments may themselves be derivations (nesting).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AstDerivationExpr {
-    pub function: String,
-    pub args: Vec<AstSourceExpr>,
-}
-
-impl AstSourceExpr {
-    /// Returns a normalized string representation for deduplication.
-    pub fn normalized(&self) -> String {
-        match self {
-            AstSourceExpr::PropRef {
-                node_ident,
-                prop_name,
-            } => format!("{node_ident}::{prop_name}"),
-            AstSourceExpr::Derivation(d) => d.normalized(),
-        }
-    }
-}
-
-impl AstDerivationExpr {
-    /// Returns a normalized string representation for deduplication.
-    pub fn normalized(&self) -> String {
-        let args: Vec<String> = self.args.iter().map(|a| a.normalized()).collect();
-        format!("{}({})", self.function, args.join(","))
-    }
 }

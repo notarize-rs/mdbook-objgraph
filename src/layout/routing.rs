@@ -3,7 +3,7 @@
 use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId, PropId};
 
 use super::{
-    layout_endpoints, DerivLayout, DomainLayout, EdgeLabel, EdgePath, EndpointRole,
+    layout_endpoints, DomainLayout, EdgeLabel, EdgePath, EndpointRole,
     LayoutEndpoint, NodeLayout, PortSide, PortSideAssignment, CHANNEL_GAP, CORRIDOR_PAD,
     STUB_LENGTH,
 };
@@ -428,15 +428,6 @@ fn find_node_layout(node_layouts: &[NodeLayout], node_id: NodeId) -> Option<&Nod
     node_layouts.iter().find(|nl| nl.id == node_id)
 }
 
-/// Find the DerivLayout for a given DerivId.
-fn find_deriv_layout(
-    deriv_layouts: &[DerivLayout],
-    deriv_id: crate::model::types::DerivId,
-) -> Option<&DerivLayout> {
-    deriv_layouts.iter().find(|dl| dl.id == deriv_id)
-}
-
-
 /// For an intra-domain constraint, pick the corridor side that minimizes crossings.
 ///
 /// Uses the same heuristic as `same_column_outer_side`: route away from the
@@ -587,7 +578,6 @@ fn determine_constraint_side(
 ///   - Same-node constraints: grouped into contiguous bracket ladders,
 ///     each group routed to the opposite side from cross-node constraints.
 ///   - Cross-domain same-column edges: use bracket routing through the outer corridor.
-///   - DerivInput edges: use coordinate-space horizontal positions.
 ///
 /// All other assignments (same-layer different-position constraints) are
 /// preserved from the layer-space computation, which was co-optimized with
@@ -595,7 +585,6 @@ fn determine_constraint_side(
 pub fn refine_port_sides(
     graph: &Graph,
     node_layouts: &[NodeLayout],
-    deriv_layouts: &[DerivLayout],
     domain_layouts: &[DomainLayout],
     layer_sides: &PortSideAssignment,
     prop_order: &super::crossing::PropertyOrder,
@@ -815,47 +804,6 @@ pub fn refine_port_sides(
                     sides.insert((edge_id, EndpointRole::Downstream), side);
                 }
             }
-            Edge::DerivInput { source_prop, target_deriv } => {
-                // DerivInput: override with coordinate-space horizontal positions,
-                // since derivation placement happens after layer-space computations.
-                let src_node = prop_node(graph, *source_prop);
-                let src_nl = match find_node_layout(node_layouts, src_node) {
-                    Some(nl) => nl,
-                    None => continue,
-                };
-                let dl = match find_deriv_layout(deriv_layouts, *target_deriv) {
-                    Some(dl) => dl,
-                    None => continue,
-                };
-                let src_cx = src_nl.x + src_nl.width / 2.0;
-                let tgt_cx = dl.x + dl.width / 2.0;
-
-                if src_cx < tgt_cx {
-                    sides.insert((edge_id, EndpointRole::Upstream), PortSide::Right);
-                    sides.insert((edge_id, EndpointRole::Downstream), PortSide::Left);
-                } else if src_cx > tgt_cx {
-                    sides.insert((edge_id, EndpointRole::Upstream), PortSide::Left);
-                    sides.insert((edge_id, EndpointRole::Downstream), PortSide::Right);
-                } else {
-                    // Same center x — determine side from the derivation output
-                    // domain's position.
-                    let deriv = &graph.derivations[target_deriv.index()];
-                    let out_node = graph.properties[deriv.output_prop.index()].node;
-                    let out_nl = find_node_layout(node_layouts, out_node);
-                    let side = if let Some(out_nl) = out_nl {
-                        let out_cx = out_nl.x + out_nl.width / 2.0;
-                        if out_cx < tgt_cx {
-                            PortSide::Left
-                        } else {
-                            PortSide::Right
-                        }
-                    } else {
-                        PortSide::Right
-                    };
-                    sides.insert((edge_id, EndpointRole::Upstream), side);
-                    sides.insert((edge_id, EndpointRole::Downstream), side);
-                }
-            }
         }
     }
 
@@ -871,15 +819,12 @@ pub fn refine_port_sides(
 /// Each horizontal channel sits midway between the bottom of one layer's tallest
 /// node and the top of the next layer's topmost node. We detect layers by finding
 /// clusters of nodes at similar y positions.
-fn build_h_channels(node_layouts: &[NodeLayout], deriv_layouts: &[DerivLayout]) -> Vec<Channel> {
-    // Gather all distinct y-bands (top, bottom) for nodes and derivations.
+fn build_h_channels(node_layouts: &[NodeLayout]) -> Vec<Channel> {
+    // Gather all distinct y-bands (top, bottom) for nodes.
     let mut bands: Vec<(f64, f64)> = Vec::new(); // (top_y, bottom_y) per element
 
     for nl in node_layouts {
         bands.push((nl.y, nl.y + nl.height));
-    }
-    for dl in deriv_layouts {
-        bands.push((dl.y, dl.y + dl.height));
     }
 
     if bands.is_empty() {
@@ -917,13 +862,11 @@ fn build_h_channels(node_layouts: &[NodeLayout], deriv_layouts: &[DerivLayout]) 
         let x_min = node_layouts
             .iter()
             .map(|nl| nl.x)
-            .chain(deriv_layouts.iter().map(|dl| dl.x))
             .fold(f64::INFINITY, f64::min)
             - 50.0;
         let x_max = node_layouts
             .iter()
             .map(|nl| nl.x + nl.width)
-            .chain(deriv_layouts.iter().map(|dl| dl.x + dl.width))
             .fold(f64::NEG_INFINITY, f64::max)
             + 50.0;
 
@@ -952,20 +895,14 @@ struct PortDistributor {
     slots: std::collections::HashMap<(EdgeId, PropId, PortSide), usize>,
     /// Total connections per (PropId, PortSide).
     counts: std::collections::HashMap<(PropId, PortSide), usize>,
-    /// Pre-computed slot index for derivation pill side ports: (EdgeId, DerivId, PortSide) -> slot.
-    deriv_slots: std::collections::HashMap<(EdgeId, crate::model::types::DerivId, PortSide), usize>,
-    /// Total connections per (DerivId, PortSide) on the derivation pill.
-    deriv_counts: std::collections::HashMap<(crate::model::types::DerivId, PortSide), usize>,
 }
 
 impl PortDistributor {
     /// Build a distributor using coordinate-space vertical positions for slot ordering.
-    #[allow(clippy::too_many_arguments)]
     fn new(
         graph: &Graph,
         port_sides: &PortSideAssignment,
         node_layouts: &[NodeLayout],
-        deriv_layouts: &[DerivLayout],
         prop_order: &super::crossing::PropertyOrder,
     ) -> Self {
         // Count total connections per (PropId, PortSide).
@@ -978,12 +915,6 @@ impl PortDistributor {
             Vec<(EdgeId, f64)>,
         > = std::collections::HashMap::new();
 
-        // Collect derivation pill downstream connections: (DerivId, PortSide) -> Vec<(EdgeId, src_y)>.
-        let mut deriv_side_edges: std::collections::HashMap<
-            (crate::model::types::DerivId, PortSide),
-            Vec<(EdgeId, f64)>,
-        > = std::collections::HashMap::new();
-
         for (idx, edge) in graph.edges.iter().enumerate() {
             let edge_id = EdgeId(idx as u32);
             match edge {
@@ -992,31 +923,16 @@ impl PortDistributor {
                         *counts.entry((*source_prop, side)).or_insert(0) += 1;
                         // Opposite endpoint for upstream is the downstream (dest) prop.
                         let opp_y = opposite_y(graph, edge, EndpointRole::Upstream,
-                            node_layouts, deriv_layouts, prop_order);
+                            node_layouts, prop_order);
                         prop_side_edges.entry((*source_prop, side))
                             .or_default().push((edge_id, opp_y));
                     }
                     if let Some(&side) = port_sides.get(&(edge_id, EndpointRole::Downstream)) {
                         *counts.entry((*dest_prop, side)).or_insert(0) += 1;
                         let opp_y = opposite_y(graph, edge, EndpointRole::Downstream,
-                            node_layouts, deriv_layouts, prop_order);
+                            node_layouts, prop_order);
                         prop_side_edges.entry((*dest_prop, side))
                             .or_default().push((edge_id, opp_y));
-                    }
-                }
-                Edge::DerivInput { source_prop, target_deriv, .. } => {
-                    if let Some(&side) = port_sides.get(&(edge_id, EndpointRole::Upstream)) {
-                        *counts.entry((*source_prop, side)).or_insert(0) += 1;
-                        let opp_y = opposite_y(graph, edge, EndpointRole::Upstream,
-                            node_layouts, deriv_layouts, prop_order);
-                        prop_side_edges.entry((*source_prop, side))
-                            .or_default().push((edge_id, opp_y));
-                    }
-                    // Track downstream (derivation pill) side connections.
-                    if let Some(&side) = port_sides.get(&(edge_id, EndpointRole::Downstream)) {
-                        deriv_side_edges.entry((*target_deriv, side))
-                            .or_default().push((edge_id, opposite_y(graph, edge, EndpointRole::Downstream,
-                                node_layouts, deriv_layouts, prop_order)));
                     }
                 }
                 Edge::Anchor { .. } => {} // anchors use center ports
@@ -1032,18 +948,7 @@ impl PortDistributor {
             }
         }
 
-        // Sort derivation pill connections by source Y and assign slot indices.
-        let mut deriv_slots = std::collections::HashMap::new();
-        let mut deriv_counts = std::collections::HashMap::new();
-        for ((deriv_id, side), mut edges) in deriv_side_edges {
-            edges.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            deriv_counts.insert((deriv_id, side), edges.len());
-            for (slot, (edge_id, _)) in edges.iter().enumerate() {
-                deriv_slots.insert((*edge_id, deriv_id, side), slot);
-            }
-        }
-
-        PortDistributor { slots, counts, deriv_slots, deriv_counts }
+        PortDistributor { slots, counts }
     }
 
     /// Get the distributed y for a property-side connection using pre-computed slot.
@@ -1053,21 +958,6 @@ impl PortDistributor {
         nl.distributed_port_y(prop_idx, slot, total)
     }
 
-    /// Get the distributed y for a derivation pill side port.
-    ///
-    /// When multiple inputs enter the same side, distributes them vertically
-    /// along the pill's side edge to avoid overlap.
-    fn deriv_port_y(&self, dl: &DerivLayout, edge_id: EdgeId, side: PortSide) -> f64 {
-        let total = self.deriv_counts.get(&(dl.id, side)).copied().unwrap_or(1);
-        let slot = self.deriv_slots.get(&(edge_id, dl.id, side)).copied().unwrap_or(0);
-        if total <= 1 {
-            return dl.y + dl.height / 2.0;
-        }
-        // Distribute slots evenly within the pill height.
-        let segment = dl.height / (total as f64 + 1.0);
-        let y = dl.y + segment * (slot as f64 + 1.0);
-        (y / 2.0).round() * 2.0
-    }
 }
 
 /// Get the physical Y coordinate of the opposite endpoint for port slot ordering.
@@ -1076,7 +966,6 @@ fn opposite_y(
     edge: &Edge,
     my_role: EndpointRole,
     node_layouts: &[NodeLayout],
-    deriv_layouts: &[DerivLayout],
     prop_order: &super::crossing::PropertyOrder,
 ) -> f64 {
     let (upstream, downstream) = layout_endpoints(edge);
@@ -1099,11 +988,6 @@ fn opposite_y(
                 })
                 .unwrap_or(0.0)
         }
-        LayoutEndpoint::Deriv(did) => {
-            find_deriv_layout(deriv_layouts, *did)
-                .map(|dl| dl.y + dl.height / 2.0)
-                .unwrap_or(0.0)
-        }
     }
 }
 
@@ -1117,7 +1001,6 @@ fn port_position(
     edge_id: EdgeId,
     role: EndpointRole,
     node_layouts: &[NodeLayout],
-    deriv_layouts: &[DerivLayout],
     port_sides: &PortSideAssignment,
     distributor: &PortDistributor,
     prop_order: &super::crossing::PropertyOrder,
@@ -1175,51 +1058,6 @@ fn port_position(
                         None => nl.port_y(prop_idx),
                     };
                     Some((x, y, side))
-                }
-            }
-        }
-        Edge::DerivInput {
-            source_prop,
-            target_deriv,
-        } => {
-            let side = port_sides.get(&(edge_id, role)).copied();
-            match role {
-                EndpointRole::Upstream => {
-                    let node_id = prop_node(graph, *source_prop);
-                    let nl = find_node_layout(node_layouts, node_id)?;
-                    let prop_idx = prop_order.prop_index(node_id, *source_prop)?;
-                    let x = match side {
-                        Some(PortSide::Left) => nl.port_left_x(),
-                        Some(PortSide::Right) | None => nl.port_right_x(),
-                    };
-                    let y = match side {
-                        Some(s) => distributor.port_y(nl, prop_idx, edge_id, *source_prop, s),
-                        None => nl.port_y(prop_idx),
-                    };
-                    Some((x, y, side))
-                }
-                EndpointRole::Downstream => {
-                    // Downstream of DerivInput connects to derivation pill
-                    // at the assigned side (left or right), with vertical
-                    // distribution when multiple inputs share the same side.
-                    // Falls back to top-center if no side is assigned.
-                    let dl = find_deriv_layout(deriv_layouts, *target_deriv)?;
-                    let side = port_sides.get(&(edge_id, role)).copied();
-                    match side {
-                        Some(s) => {
-                            let x = match s {
-                                PortSide::Left => dl.x,
-                                PortSide::Right => dl.x + dl.width,
-                            };
-                            // Distribute multiple inputs vertically along the pill side.
-                            let y = distributor.deriv_port_y(dl, edge_id, s);
-                            Some((x, y, Some(s)))
-                        }
-                        None => {
-                            // No side assigned — connect to top center.
-                            Some((dl.x + dl.width / 2.0, dl.y, None))
-                        }
-                    }
                 }
             }
         }
@@ -1511,8 +1349,7 @@ fn shorten_route_for_arrowhead(route: &mut Route) {
 fn edge_priority(edge: &Edge) -> u32 {
     match edge {
         Edge::Anchor { .. } => 0,
-        Edge::DerivInput { .. } => 1,
-        Edge::Constraint { .. } => 2,
+        Edge::Constraint { .. } => 1,
     }
 }
 
@@ -1524,7 +1361,6 @@ fn edge_vertical_midpoint(
     graph: &Graph,
     edge: &Edge,
     node_layouts: &[NodeLayout],
-    deriv_layouts: &[DerivLayout],
     prop_order: &super::crossing::PropertyOrder,
 ) -> f64 {
     let endpoint_y = |ep: &LayoutEndpoint| -> Option<f64> {
@@ -1538,10 +1374,6 @@ fn edge_vertical_midpoint(
                 let nl = find_node_layout(node_layouts, nid)?;
                 let idx = prop_order.prop_index(nid, *pid)?;
                 Some(nl.port_y(idx))
-            }
-            LayoutEndpoint::Deriv(did) => {
-                let dl = find_deriv_layout(deriv_layouts, *did)?;
-                Some(dl.y + dl.height / 2.0)
             }
         }
     };
@@ -1558,22 +1390,21 @@ fn edge_vertical_midpoint(
 
 /// Route all edges using orthogonal corridor-based routing.
 ///
-/// Edges are routed in priority order (anchors first, then deriv inputs, then
-/// constraints), with topology-aware secondary sorting by vertical midpoint
-/// so corridor channels are allocated top-to-bottom.
+/// Edges are routed in priority order (anchors first, then constraints),
+/// with topology-aware secondary sorting by vertical midpoint so corridor
+/// channels are allocated top-to-bottom.
 pub fn route_all_edges(
     graph: &Graph,
     node_layouts: &[NodeLayout],
-    deriv_layouts: &[DerivLayout],
     domain_layouts: &[DomainLayout],
     port_sides: &PortSideAssignment,
     prop_order: &super::crossing::PropertyOrder,
 ) -> Vec<Route> {
-    let mut h_channels = build_h_channels(node_layouts, deriv_layouts);
+    let mut h_channels = build_h_channels(node_layouts);
     let mut corridors = build_corridors(domain_layouts, node_layouts, graph);
 
     let distributor = PortDistributor::new(
-        graph, port_sides, node_layouts, deriv_layouts, prop_order,
+        graph, port_sides, node_layouts, prop_order,
     );
 
     // Build a priority-sorted list of edge indices with topology-aware secondary sort.
@@ -1582,8 +1413,8 @@ pub fn route_all_edges(
         let pa = edge_priority(&graph.edges[a]);
         let pb = edge_priority(&graph.edges[b]);
         pa.cmp(&pb).then_with(|| {
-            let ma = edge_vertical_midpoint(graph, &graph.edges[a], node_layouts, deriv_layouts, prop_order);
-            let mb = edge_vertical_midpoint(graph, &graph.edges[b], node_layouts, deriv_layouts, prop_order);
+            let ma = edge_vertical_midpoint(graph, &graph.edges[a], node_layouts, prop_order);
+            let mb = edge_vertical_midpoint(graph, &graph.edges[b], node_layouts, prop_order);
             ma.partial_cmp(&mb).unwrap_or(std::cmp::Ordering::Equal)
         })
     });
@@ -1599,7 +1430,6 @@ pub fn route_all_edges(
             edge_id,
             EndpointRole::Upstream,
             node_layouts,
-            deriv_layouts,
             port_sides,
             &distributor,
             prop_order,
@@ -1609,7 +1439,6 @@ pub fn route_all_edges(
             edge_id,
             EndpointRole::Downstream,
             node_layouts,
-            deriv_layouts,
             port_sides,
             &distributor,
             prop_order,
@@ -1629,12 +1458,6 @@ pub fn route_all_edges(
         // Intra-domain edges: both endpoints use the same domain's corridors.
         // Cross-domain constraint edges: use (None, None) to select the
         // inter-column gap corridor.
-        // DerivInput edges: use the source domain's corridors for both
-        // endpoints.  Derivation pills sit outside domains (in inter-domain
-        // space), so there is no natural "target domain".  Using the source
-        // domain's nearby corridor avoids sending the edge across the entire
-        // layout to a distant gap corridor, which would cross many constraint
-        // edges in the gap.
         let (src_domain, tgt_domain) = {
             let edge = &graph.edges[idx];
             match edge {
@@ -1649,23 +1472,6 @@ pub fn route_all_edges(
                     let sd = graph.nodes[src_nid.index()].domain;
                     let td = graph.nodes[tgt_nid.index()].domain;
                     if sd == td { (sd, td) } else { (None, None) }
-                }
-                Edge::DerivInput {
-                    source_prop,
-                    target_deriv,
-                } => {
-                    if super::is_deriv_cross_domain(graph, *target_deriv) {
-                        // Cross-domain derivation: route through the
-                        // inter-column gap corridor like other cross-domain
-                        // edges.
-                        (None, None)
-                    } else {
-                        // Intra-domain derivation: all inputs + output in
-                        // the same domain — use domain corridors.
-                        let src_nid = prop_node(graph, *source_prop);
-                        let sd = graph.nodes[src_nid.index()].domain;
-                        (sd, sd)
-                    }
                 }
             }
         };
@@ -1727,13 +1533,6 @@ fn fix_bracket_nesting_channels(graph: &Graph, routes: &mut [Route]) {
         let (src_node, dst_node) = match edge {
             Edge::Constraint { source_prop, dest_prop, .. } => {
                 (prop_node(graph, *source_prop), prop_node(graph, *dest_prop))
-            }
-            Edge::DerivInput {
-                source_prop,
-                target_deriv,
-            } => {
-                let deriv = &graph.derivations[target_deriv.index()];
-                (prop_node(graph, *source_prop), prop_node(graph, deriv.output_prop))
             }
             _ => continue,
         };
@@ -2257,7 +2056,7 @@ mod tests {
         Graph {
             nodes,
             properties,
-            derivations: vec![],
+
             edges,
             domains: vec![],
             prop_edges,
@@ -2312,10 +2111,9 @@ mod tests {
                 height: 52.0,
             },
         ];
-        let deriv_layouts: Vec<DerivLayout> = vec![];
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
-        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &PortSideAssignment::new(), &prop_order);
-        let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides, &prop_order);
+        let port_sides = refine_port_sides(&graph, &node_layouts, &[], &PortSideAssignment::new(), &prop_order);
+        let routes = route_all_edges(&graph, &node_layouts, &[], &port_sides, &prop_order);
 
         // Find the link route (edge 0).
         let link_route = routes.iter().find(|r| r.edge_id == EdgeId(0)).unwrap();
@@ -2353,10 +2151,9 @@ mod tests {
         // that has at least horizontal and vertical components.
         let graph = test_graph();
         let node_layouts = test_node_layouts();
-        let deriv_layouts: Vec<DerivLayout> = vec![];
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
-        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &PortSideAssignment::new(), &prop_order);
-        let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides, &prop_order);
+        let port_sides = refine_port_sides(&graph, &node_layouts, &[], &PortSideAssignment::new(), &prop_order);
+        let routes = route_all_edges(&graph, &node_layouts, &[], &port_sides, &prop_order);
 
         // Find the constraint route (edge 1).
         let constraint_route = routes.iter().find(|r| r.edge_id == EdgeId(1)).unwrap();
@@ -2401,10 +2198,9 @@ mod tests {
                 height: 52.0,
             },
         ];
-        let deriv_layouts: Vec<DerivLayout> = vec![];
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
-        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &PortSideAssignment::new(), &prop_order);
-        let routes = route_all_edges(&graph, &node_layouts, &deriv_layouts, &[], &port_sides, &prop_order);
+        let port_sides = refine_port_sides(&graph, &node_layouts, &[], &PortSideAssignment::new(), &prop_order);
+        let routes = route_all_edges(&graph, &node_layouts, &[], &port_sides, &prop_order);
 
         // Find the link route (edge 0).
         let link_route = routes.iter().find(|r| r.edge_id == EdgeId(0)).unwrap();
@@ -2460,9 +2256,8 @@ mod tests {
         layer_sides.insert((EdgeId(1), EndpointRole::Upstream), PortSide::Right);
         layer_sides.insert((EdgeId(1), EndpointRole::Downstream), PortSide::Left);
 
-        let deriv_layouts: Vec<DerivLayout> = vec![];
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
-        let sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &layer_sides, &prop_order);
+        let sides = refine_port_sides(&graph, &node_layouts, &[], &layer_sides, &prop_order);
 
         // Edge 0 is a Link: no side assignments.
         assert!(!sides.contains_key(&(EdgeId(0), EndpointRole::Upstream)));
@@ -2509,9 +2304,8 @@ mod tests {
         layer_sides.insert((EdgeId(1), EndpointRole::Upstream), PortSide::Right);
         layer_sides.insert((EdgeId(1), EndpointRole::Downstream), PortSide::Right);
 
-        let deriv_layouts: Vec<DerivLayout> = vec![];
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
-        let sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &layer_sides, &prop_order);
+        let sides = refine_port_sides(&graph, &node_layouts, &[], &layer_sides, &prop_order);
 
         // Same center x: layer-space assigned Right; no cross-domain override.
         assert_eq!(
@@ -2565,7 +2359,7 @@ mod tests {
         let graph = Graph {
             nodes,
             properties,
-            derivations: vec![],
+
             edges,
             domains: vec![],
             prop_edges,
@@ -2586,9 +2380,8 @@ mod tests {
         layer_sides.insert((EdgeId(0), EndpointRole::Upstream), PortSide::Right);
         layer_sides.insert((EdgeId(0), EndpointRole::Downstream), PortSide::Right);
 
-        let deriv_layouts: Vec<DerivLayout> = vec![];
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
-        let sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &[], &layer_sides, &prop_order);
+        let sides = refine_port_sides(&graph, &node_layouts, &[], &layer_sides, &prop_order);
 
         // Self-loop: both Right (from layer-space, preserved by refinement).
         assert_eq!(
@@ -2848,7 +2641,7 @@ mod tests {
             },
         ];
 
-        let h_channels = build_h_channels(&node_layouts, &[]);
+        let h_channels = build_h_channels(&node_layouts);
 
         // Should have exactly one horizontal channel between the two layers.
         assert_eq!(h_channels.len(), 1);
@@ -2888,7 +2681,7 @@ mod tests {
         let graph = Graph {
             nodes: vec![],
             properties: vec![],
-            derivations: vec![],
+
             edges: vec![],
             domains: vec![
                 crate::model::types::Domain {
@@ -3009,7 +2802,7 @@ mod tests {
         let graph = Graph {
             nodes,
             properties,
-            derivations: vec![],
+
             edges,
             domains,
             prop_edges,
@@ -3058,7 +2851,6 @@ mod tests {
             },
         ];
 
-        let deriv_layouts: Vec<DerivLayout> = vec![];
 
         // Simulate layer-space: A is left of B → Upstream=Right, Downstream=Left.
         let mut layer_sides = PortSideAssignment::new();
@@ -3066,12 +2858,11 @@ mod tests {
         layer_sides.insert((EdgeId(0), EndpointRole::Downstream), PortSide::Left);
 
         let prop_order = crate::layout::crossing::PropertyOrder::from_graph(&graph);
-        let port_sides = refine_port_sides(&graph, &node_layouts, &deriv_layouts, &domain_layouts, &layer_sides, &prop_order);
+        let port_sides = refine_port_sides(&graph, &node_layouts, &domain_layouts, &layer_sides, &prop_order);
 
         let routes = route_all_edges(
             &graph,
             &node_layouts,
-            &deriv_layouts,
             &domain_layouts,
             &port_sides,
             &prop_order,

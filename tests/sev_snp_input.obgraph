@@ -170,4 +170,4 @@ vTCGLog::event_entries <= vQuote::pcr_digest : replay_validates
 Report::chip_id <= TCGLog::event_entries : contains
 GuestData::nonce <= Challenge::nonce
 Quote::nonce <= Challenge::nonce
-Report::tcb_version <= filter(KDS::supported_tcbs, NVD::cve_list) : in
+# Report::tcb_version <= filter(KDS::supported_tcbs, NVD::cve_list) : in

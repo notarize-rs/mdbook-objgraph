@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::long_edge::{LayerEntry, LayerItem, LongEdge};
 use super::{EndpointRole, PortSide, PortSideAssignment};
-use crate::model::types::{DerivId, Edge, EdgeId, Graph, NodeId, PropId};
+use crate::model::types::{Edge, EdgeId, Graph, NodeId, PropId};
 
 /// Maximum iterations for crossing minimization (per ELK convention).
 pub const MAX_ITERATIONS: usize = 24;
@@ -17,7 +17,6 @@ pub const MAX_ITERATIONS: usize = 24;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum LayerElement {
     Node(NodeId),
-    Derivation(DerivId),
     Segment(EdgeId, u32),
 }
 
@@ -76,26 +75,18 @@ impl PropertyOrder {
 }
 
 // ---------------------------------------------------------------------------
-// Edge → logical property pair
+// Edge -> logical property pair
 // ---------------------------------------------------------------------------
 
-/// For Constraint and DerivInput edges, returns (source_prop, dest_prop).
-/// For DerivInput, dest_prop is the derivation's output_prop (attributed to
-/// the destination node). Returns None for Anchor edges.
-fn edge_prop_pair(graph: &Graph, edge: &Edge) -> Option<(PropId, PropId)> {
+/// For Constraint edges, returns (source_prop, dest_prop).
+/// Returns None for Anchor edges.
+fn edge_prop_pair(_graph: &Graph, edge: &Edge) -> Option<(PropId, PropId)> {
     match edge {
         Edge::Constraint {
             source_prop,
             dest_prop,
             ..
         } => Some((*source_prop, *dest_prop)),
-        Edge::DerivInput {
-            source_prop,
-            target_deriv,
-        } => {
-            let deriv = &graph.derivations[target_deriv.index()];
-            Some((*source_prop, deriv.output_prop))
-        }
         Edge::Anchor { .. } => None,
     }
 }
@@ -142,7 +133,6 @@ fn position_of_element(
     for (i, item) in layer.items.iter().enumerate() {
         let matches = match (element, item) {
             (LayerElement::Node(a), LayerItem::Node(b)) => a == b,
-            (LayerElement::Derivation(a), LayerItem::Derivation(b)) => a == b,
             (LayerElement::Segment(a_eid, a_layer), LayerItem::Segment(b_eid, b_layer)) => {
                 a_eid == b_eid && a_layer == b_layer
             }
@@ -289,59 +279,6 @@ fn edge_endpoints(
                 vec![]
             }
         }
-        Edge::DerivInput {
-            source_prop,
-            target_deriv,
-            ..
-        } => {
-            let src_node = graph.properties[source_prop.index()].node;
-            let src = LayerElement::Node(src_node);
-            let dst = LayerElement::Derivation(*target_deriv);
-            if let (Some(&src_layer), Some(&dst_layer)) =
-                (layer_map.get(&src), layer_map.get(&dst))
-            {
-                if let Some(le) = long_edges.iter().find(|le| le.edge_id == edge_id) {
-                    let mut pairs = Vec::new();
-                    let mut prev_ep = EdgeEndpoint {
-                        element: src,
-                        prop: Some(*source_prop),
-                    };
-                    let mut prev_layer = src_layer;
-
-                    let mut intermediate_layers: Vec<u32> =
-                        le.positions.keys().copied().collect();
-                    intermediate_layers.sort();
-
-                    for &mid_layer in &intermediate_layers {
-                        let seg = LayerElement::Segment(edge_id, mid_layer);
-                        let seg_ep = EdgeEndpoint { element: seg, prop: None };
-                        pairs.push((prev_ep, prev_layer, seg_ep, mid_layer));
-                        prev_ep = seg_ep;
-                        prev_layer = mid_layer;
-                    }
-                    let dst_ep = EdgeEndpoint {
-                        element: dst,
-                        prop: None,
-                    };
-                    pairs.push((prev_ep, prev_layer, dst_ep, dst_layer));
-                    return pairs;
-                }
-                vec![(
-                    EdgeEndpoint {
-                        element: src,
-                        prop: Some(*source_prop),
-                    },
-                    src_layer,
-                    EdgeEndpoint {
-                        element: dst,
-                        prop: None,
-                    },
-                    dst_layer,
-                )]
-            } else {
-                vec![]
-            }
-        }
     }
 }
 
@@ -352,7 +289,6 @@ fn build_layer_map(layers: &[LayerEntry]) -> HashMap<LayerElement, u32> {
         for item in &layer.items {
             let elem = match item {
                 LayerItem::Node(id) => LayerElement::Node(*id),
-                LayerItem::Derivation(id) => LayerElement::Derivation(*id),
                 LayerItem::Segment(eid, l) => LayerElement::Segment(*eid, *l),
             };
             map.insert(elem, layer_idx as u32);
@@ -451,7 +387,7 @@ fn resolve_position(
                     let num_props = prop_order.num_props(node_id);
                     let prop_gap = 1.0 / (num_props as f64 + 1.0);
 
-                    // Center within slot range: 0..total-1 → -0.5..+0.5
+                    // Center within slot range: 0..total-1 -> -0.5..+0.5
                     let centered = if total > 1 {
                         (slot as f64 / (total - 1) as f64) - 0.5
                     } else {
@@ -527,7 +463,6 @@ fn count_crossings_internal(
         for item in &layer_a.items {
             let elem = match item {
                 LayerItem::Node(id) => LayerElement::Node(*id),
-                LayerItem::Derivation(id) => LayerElement::Derivation(*id),
                 LayerItem::Segment(eid, l) => LayerElement::Segment(*eid, *l),
             };
             map.insert(elem, layer_a_idx);
@@ -535,7 +470,6 @@ fn count_crossings_internal(
         for item in &layer_b.items {
             let elem = match item {
                 LayerItem::Node(id) => LayerElement::Node(*id),
-                LayerItem::Derivation(id) => LayerElement::Derivation(*id),
                 LayerItem::Segment(eid, l) => LayerElement::Segment(*eid, *l),
             };
             map.insert(elem, layer_b_idx);
@@ -828,21 +762,15 @@ pub fn minimize_crossings(
                                 else { None }
                             } else { None }
                         }
-                        Edge::DerivInput { source_prop, .. } => {
-                            if graph.properties[source_prop.index()].node == node_id {
-                                Some(*source_prop)
-                            } else { None }
-                        }
                         _ => None,
                     })
                     .collect();
 
-                // Collect inter-node edge pairs (Constraint + DerivInput) for
+                // Collect inter-node edge pairs (Constraint) for
                 // bipartite crossing detection.  For edges from this node to the
                 // same target node, crossings occur when source property order is
                 // inverted relative to target property order.  We record
                 // (local_prop, remote_prop, weight) and group by target node.
-                // DerivInput edges use deriv.output_prop as the logical dest_prop.
                 let mut inter_node_edges_by_target: HashMap<NodeId, Vec<(PropId, PropId, u32)>> =
                     HashMap::new();
                 for edge in &graph.edges {
@@ -1000,7 +928,7 @@ pub fn minimize_crossings(
                         // Only same-node edges: use same-node barycenter
                         (None, None, Some(s)) => (1, s),
                         (None, None, None) => {
-                            // Unconnected — keep current relative position
+                            // Unconnected -- keep current relative position
                             (1, prop_idx as f64)
                         }
                     };
@@ -1024,7 +952,7 @@ pub fn minimize_crossings(
                 // For each property (ordered by connectivity), remove it
                 // from the list and try every insertion position, picking
                 // the one that minimizes total cost.  Unlike bubble sort,
-                // sifting can make non-local moves — critical for chiasm
+                // sifting can make non-local moves -- critical for chiasm
                 // alignment where the optimal position may be many steps
                 // away from the current one.
                 if !same_node_edges.is_empty() {
@@ -1261,11 +1189,11 @@ pub fn minimize_crossings(
                         let props = prop_order.props_of(*node_id).to_vec();
                         let mut connected_bcs: Vec<f64> = Vec::new();
 
-                        // Also check for Link edges (node-level, not property-level)
+                        // Also check for Anchor edges (node-level, not property-level)
                         let mut node_level_positions: Vec<(f64, u32)> = Vec::new();
 
                         for ae in &adj_edges {
-                            // Check if this is a node-level edge (Link)
+                            // Check if this is a node-level edge (Anchor)
                             let is_upper_node = matches!(
                                 &ae.upper,
                                 EdgeEndpoint {
@@ -1363,42 +1291,6 @@ pub fn minimize_crossings(
                             item_idx as f64
                         }
                     }
-                    LayerItem::Derivation(deriv_id) => {
-                        // Derivation barycenter from connected edges
-                        let mut positions: Vec<(f64, u32)> = Vec::new();
-                        let elem = LayerElement::Derivation(*deriv_id);
-
-                        for ae in &adj_edges {
-                            let is_upper = ae.upper.element == elem
-                                && layer_map.get(&ae.upper.element) == Some(&(k as u32));
-                            let is_lower = ae.lower.element == elem
-                                && layer_map.get(&ae.lower.element) == Some(&(k as u32));
-
-                            if is_upper {
-                                let pos = resolve_position(
-                                    &ae.lower,
-                                    adj_layer,
-                                    graph,
-                                    &prop_order,
-                                    long_edges,
-                                    &empty_epo, ae.edge_id, &empty_ps, EndpointRole::Downstream,
-                                );
-                                positions.push((pos, ae.weight));
-                            } else if is_lower {
-                                let pos = resolve_position(
-                                    &ae.upper,
-                                    adj_layer,
-                                    graph,
-                                    &prop_order,
-                                    long_edges,
-                                    &empty_epo, ae.edge_id, &empty_ps, EndpointRole::Upstream,
-                                );
-                                positions.push((pos, ae.weight));
-                            }
-                        }
-
-                        weighted_mean(&positions).unwrap_or(item_idx as f64)
-                    }
                     LayerItem::Segment(edge_id, _seg_layer) => {
                         // Segment barycenter = position of same edge in adjacent layer
                         position_of_segment(
@@ -1469,7 +1361,7 @@ pub fn minimize_crossings(
 /// minimization, ensuring port slot assignment (Phase 6b) is consistent with
 /// property ordering (Phase 3b).
 ///
-/// For each property that participates in Constraint or DerivInput edges, we
+/// For each property that participates in Constraint edges, we
 /// collect those edges and sort them by the opposite endpoint's position:
 /// `(layer_index, item_position + prop_fraction)`.  Anchor edges are skipped
 /// (they use center ports).
@@ -1496,15 +1388,6 @@ pub fn compute_edge_port_order(
                 // For dest_prop: opposite endpoint is source_prop
                 if let Some(key) = opposite_sort_key(*source_prop, graph, layers, &layer_map, long_edges, prop_order) {
                     prop_entries.entry(*dest_prop).or_default().push((key.0, key.1, edge_id));
-                }
-            }
-            Edge::DerivInput { source_prop, target_deriv, .. } => {
-                // For source_prop: opposite endpoint is the derivation
-                let elem = LayerElement::Derivation(*target_deriv);
-                if let Some(&layer_idx) = layer_map.get(&elem) {
-                    let layer = &layers[layer_idx as usize];
-                    let item_pos = position_of_element(&elem, layer).unwrap_or(0.0);
-                    prop_entries.entry(*source_prop).or_default().push((layer_idx as f64, item_pos, edge_id));
                 }
             }
         }
@@ -1588,37 +1471,6 @@ fn compute_layer_space_port_sides(
                     );
                 }
             }
-            Edge::DerivInput { source_prop, target_deriv } => {
-                let src_node = graph.properties[source_prop.index()].node;
-                let src_elem = LayerElement::Node(src_node);
-                let dst_elem = LayerElement::Derivation(*target_deriv);
-
-                // For DerivInput, derive a dummy node for the counter (use src_node).
-                let src_pos = layer_map.get(&src_elem)
-                    .and_then(|&l| position_of_element(&src_elem, &layers[l as usize]));
-                let dst_pos = layer_map.get(&dst_elem)
-                    .and_then(|&l| position_of_element(&dst_elem, &layers[l as usize]));
-
-                match (src_pos, dst_pos) {
-                    (Some(sp), Some(dp)) if (sp - dp).abs() > 0.01 => {
-                        if sp < dp {
-                            sides.insert((edge_id, EndpointRole::Upstream), PortSide::Right);
-                            sides.insert((edge_id, EndpointRole::Downstream), PortSide::Left);
-                        } else {
-                            sides.insert((edge_id, EndpointRole::Upstream), PortSide::Left);
-                            sides.insert((edge_id, EndpointRole::Downstream), PortSide::Right);
-                        }
-                    }
-                    _ => {
-                        // Same position or missing: alternate
-                        let cnt = same_pos_counter.entry(src_node).or_insert(0);
-                        let side = if (*cnt).is_multiple_of(2) { PortSide::Right } else { PortSide::Left };
-                        *cnt += 1;
-                        sides.insert((edge_id, EndpointRole::Upstream), side);
-                        sides.insert((edge_id, EndpointRole::Downstream), side);
-                    }
-                }
-            }
         }
     }
 
@@ -1654,7 +1506,7 @@ fn assign_side_between_nodes(
             }
         }
         _ => {
-            // Same position or missing — alternate via per-node counter
+            // Same position or missing -- alternate via per-node counter
             let cnt = same_pos_counter.entry(src_node).or_insert(0);
             let side = if (*cnt).is_multiple_of(2) { PortSide::Right } else { PortSide::Left };
             *cnt += 1;
@@ -1690,7 +1542,6 @@ mod tests {
     fn make_graph(
         nodes: Vec<Node>,
         properties: Vec<Property>,
-        derivations: Vec<Derivation>,
         edges: Vec<Edge>,
     ) -> Graph {
         let mut prop_edges: HashMap<PropId, Vec<EdgeId>> = HashMap::new();
@@ -1712,23 +1563,12 @@ mod tests {
                     prop_edges.entry(*source_prop).or_default().push(eid);
                     prop_edges.entry(*dest_prop).or_default().push(eid);
                 }
-                Edge::DerivInput {
-                    source_prop,
-                    target_deriv,
-                    ..
-                } => {
-                    prop_edges.entry(*source_prop).or_default().push(eid);
-                    // Also register the derivation's output prop
-                    let deriv = &derivations[target_deriv.index()];
-                    prop_edges.entry(deriv.output_prop).or_default().push(eid);
-                }
             }
         }
 
         Graph {
             nodes,
             properties,
-            derivations,
             edges,
             domains: vec![],
             prop_edges,
@@ -1765,7 +1605,7 @@ mod tests {
     fn test_no_crossings_simple() {
         // Layer 0: [Node(0)]
         // Layer 1: [Node(1)]
-        // Edge: Link from Node(0) to Node(1)
+        // Edge: Anchor from Node(0) to Node(1)
         let nodes = vec![
             make_node(0, "A", vec![]),
             make_node(1, "B", vec![]),
@@ -1775,7 +1615,7 @@ mod tests {
             child: NodeId(1),
             operation: None,
         }];
-        let graph = make_graph(nodes, vec![], vec![], edges);
+        let graph = make_graph(nodes, vec![], edges);
 
         let layer_a = LayerEntry {
             items: vec![LayerItem::Node(NodeId(0))],
@@ -1789,14 +1629,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 2: Two edges that cross → cost = w(e1) + w(e2)
+    // Test 2: Two edges that cross -> cost = w(e1) + w(e2)
     // -----------------------------------------------------------------------
     #[test]
     fn test_two_crossing_links() {
         // Layer 0: [Node(0), Node(1)]
         // Layer 1: [Node(2), Node(3)]
-        // Edge 0: Link Node(0) -> Node(3) (crosses with edge 1)
-        // Edge 1: Link Node(1) -> Node(2) (crosses with edge 0)
+        // Edge 0: Anchor Node(0) -> Node(3) (crosses with edge 1)
+        // Edge 1: Anchor Node(1) -> Node(2) (crosses with edge 0)
         let nodes = vec![
             make_node(0, "A", vec![]),
             make_node(1, "B", vec![]),
@@ -1815,7 +1655,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, vec![], vec![], edges);
+        let graph = make_graph(nodes, vec![], edges);
 
         let layer_a = LayerEntry {
             items: vec![LayerItem::Node(NodeId(0)), LayerItem::Node(NodeId(1))],
@@ -1825,7 +1665,7 @@ mod tests {
         };
 
         let crossings = count_crossings(&layer_a, &layer_b, &graph);
-        // Both edges are Links with weight 3. Cost = 3 + 3 = 6
+        // Both edges are Anchors with weight 3. Cost = 3 + 3 = 6
         assert_eq!(crossings, 6);
     }
 
@@ -1863,7 +1703,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let layer_a = LayerEntry {
             items: vec![LayerItem::Node(NodeId(0)), LayerItem::Node(NodeId(1))],
@@ -1922,7 +1762,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let mut layers = vec![
             LayerEntry {
@@ -1968,8 +1808,8 @@ mod tests {
         // Layer 2: [Node(4), Node(5)]
         //
         // Edges that create crossings between layers 0-1 and 1-2:
-        // Link: 0->3, 1->2 (cross in layer 0-1)
-        // Link: 2->5, 3->4 (cross in layer 1-2)
+        // Anchor: 0->3, 1->2 (cross in layer 0-1)
+        // Anchor: 2->5, 3->4 (cross in layer 1-2)
 
         let nodes = vec![
             make_node(0, "A", vec![]),
@@ -2001,7 +1841,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, vec![], vec![], edges);
+        let graph = make_graph(nodes, vec![], edges);
 
         let mut layers = vec![
             LayerEntry {
@@ -2053,8 +1893,8 @@ mod tests {
         // Layer 2: [Node(3), Node(4)]
         //
         // Edge 0 is a long edge: Node(0) -> Node(3), passing through layer 1
-        // Edge 1: Link Node(1) -> Node(2)
-        // Edge 2: Link Node(2) -> Node(4)
+        // Edge 1: Anchor Node(1) -> Node(2)
+        // Edge 2: Anchor Node(2) -> Node(4)
         //
         // The segment in layer 1 should be positioned based on its
         // connection to Node(0) in layer 0.
@@ -2083,7 +1923,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, vec![], vec![], edges);
+        let graph = make_graph(nodes, vec![], edges);
 
         let mut layers = vec![
             LayerEntry {
@@ -2145,7 +1985,7 @@ mod tests {
             make_prop(1, 0, "p1"),
             make_prop(2, 0, "p2"),
         ];
-        let graph = make_graph(nodes, properties, vec![], vec![]);
+        let graph = make_graph(nodes, properties, vec![]);
         let prop_order = PropertyOrder::from_graph(&graph);
 
         let layer = LayerEntry {
@@ -2171,7 +2011,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_empty_layers() {
-        let graph = make_graph(vec![], vec![], vec![], vec![]);
+        let graph = make_graph(vec![], vec![], vec![]);
         let mut layers: Vec<LayerEntry> = vec![];
         let mut long_edges = vec![];
         let _ = minimize_crossings(&mut layers, &mut long_edges, &graph);
@@ -2184,7 +2024,7 @@ mod tests {
     #[test]
     fn test_single_layer() {
         let nodes = vec![make_node(0, "A", vec![])];
-        let graph = make_graph(nodes, vec![], vec![], vec![]);
+        let graph = make_graph(nodes, vec![], vec![]);
         let mut layers = vec![LayerEntry {
             items: vec![LayerItem::Node(NodeId(0))],
         }];
@@ -2201,7 +2041,7 @@ mod tests {
         // Layer 0: [Node(0), Node(1)]  (fixed)
         // Layer 1: [Node(3), Node(2)]  (initially crossed)
         // Edges: 0->2, 1->3
-        // Initially: 0 (pos 0) -> 2 (pos 1), 1 (pos 1) -> 3 (pos 0) → cross
+        // Initially: 0 (pos 0) -> 2 (pos 1), 1 (pos 1) -> 3 (pos 0) -> cross
         // After reorder layer 1 to [Node(2), Node(3)]: no cross
 
         let nodes = vec![
@@ -2222,7 +2062,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, vec![], vec![], edges);
+        let graph = make_graph(nodes, vec![], edges);
 
         let mut layers = vec![
             LayerEntry {
@@ -2279,7 +2119,7 @@ mod tests {
         // Initial order: [p0, p1, p2, p3]
         // Expected after: sources (p2, p3) should move above their targets,
         // producing an ordering like [p2, p3, p0, p1] or [p3, p2, p1, p0]
-        // — the key invariant is that p2 appears before p0 and p3 before p1.
+        // -- the key invariant is that p2 appears before p0 and p3 before p1.
         //
         // We need at least 2 layers so the sweep runs, but the node only
         // appears in one layer.  The second layer is a dummy.
@@ -2314,7 +2154,7 @@ mod tests {
                 operation: Some("ge".to_string()),
             },
         ];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let mut layers = vec![
             LayerEntry {
@@ -2356,11 +2196,8 @@ mod tests {
         //   p0 -> p2  and  p1 -> p3
         // These are "parallel" (non-crossing) when sources and targets
         // maintain the same relative order.  Initial order [p0, p1, p2, p3]
-        // already has p0 before p2 and p1 before p3 — should be preserved
+        // already has p0 before p2 and p1 before p3 -- should be preserved
         // or improved.
-        //
-        // Crossing would occur if the result had p0 after p2 or p1 after p3
-        // in positions that cause the constraint edges to visually cross.
 
         let nodes = vec![
             make_node(0, "Node", vec![0, 1, 2, 3]),
@@ -2389,7 +2226,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let mut layers = vec![
             LayerEntry {
@@ -2476,7 +2313,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let mut layers = vec![
             LayerEntry {
@@ -2548,7 +2385,7 @@ mod tests {
             Edge::Constraint { source_prop: PropId(0), dest_prop: PropId(1), operation: None }, // edge 4 -> TgtA
             Edge::Constraint { source_prop: PropId(0), dest_prop: PropId(2), operation: None }, // edge 5 -> TgtB
         ];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         // Layer 0: [Src], Layer 1: [TgtA, TgtB, TgtC] in position order
         let mut layers = vec![
@@ -2564,7 +2401,7 @@ mod tests {
         let (_, edge_port_order, _) = minimize_crossings(&mut layers, &mut long_edges, &graph);
 
         // Source prop (PropId(0)) should have edges sorted by target position:
-        // TgtA(pos 0) → edge 4, TgtB(pos 1) → edge 5, TgtC(pos 2) → edge 3
+        // TgtA(pos 0) -> edge 4, TgtB(pos 1) -> edge 5, TgtC(pos 2) -> edge 3
         let src_edges = &edge_port_order[&PropId(0)];
         assert_eq!(src_edges.len(), 3, "Source prop should have 3 edges");
 
@@ -2610,7 +2447,7 @@ mod tests {
             // p0 -> p1 (target closer up)
             Edge::Constraint { source_prop: PropId(0), dest_prop: PropId(1), operation: None },
         ];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let mut layers = vec![
             LayerEntry { items: vec![LayerItem::Node(NodeId(0))] },

@@ -641,12 +641,6 @@ fn print_check_text(
                 report.nodes_outside_domain.len()
             );
         }
-        if !report.derivs_inside_domains.is_empty() {
-            println!(
-                "    derivations inside domains: {}",
-                report.derivs_inside_domains.len()
-            );
-        }
         if !report.free_nodes_inside_domains.is_empty() {
             println!(
                 "    free nodes inside domains: {}",
@@ -669,18 +663,6 @@ fn print_check_text(
             println!(
                 "    channel collisions: {}",
                 report.channel_collisions.len()
-            );
-        }
-        if !report.node_deriv_overlaps.is_empty() {
-            println!(
-                "    node-derivation overlaps: {}",
-                report.node_deriv_overlaps.len()
-            );
-        }
-        if !report.deriv_deriv_overlaps.is_empty() {
-            println!(
-                "    derivation-derivation overlaps: {}",
-                report.deriv_deriv_overlaps.len()
             );
         }
         if !report.intra_edges_in_wrong_corridor.is_empty() {
@@ -708,10 +690,6 @@ fn print_check_text(
         warn!(label_domain_overlaps, "label-domain overlaps");
         warn!(arrowhead_domain_overlaps, "arrowhead-domain overlaps");
         warn!(stub_domain_overlaps, "stub-domain overlaps");
-        warn!(edge_deriv_overlaps, "edge-derivation overlaps");
-        warn!(label_deriv_overlaps, "label-derivation overlaps");
-        warn!(arrowhead_deriv_overlaps, "arrowhead-derivation overlaps");
-        warn!(stub_deriv_overlaps, "stub-derivation overlaps");
         warn!(edge_label_overlaps, "edge-label overlaps");
         warn!(edge_arrowhead_overlaps, "edge-arrowhead overlaps");
         warn!(edge_stub_overlaps, "edge-stub overlaps");
@@ -764,7 +742,6 @@ fn quality_to_json(
     req!(node_overlaps, "node_overlaps");
     req!(domain_overlaps, "domain_overlaps");
     req!(nodes_outside_domain, "nodes_outside_domain");
-    req!(derivs_inside_domains, "derivs_inside_domains");
     req!(free_nodes_inside_domains, "free_nodes_inside_domains");
     req!(domain_contiguity_violations, "domain_contiguity_violations");
     req!(
@@ -772,8 +749,6 @@ fn quality_to_json(
         "inter_domain_edges_in_intra_corridors"
     );
     req!(channel_collisions, "channel_collisions");
-    req!(node_deriv_overlaps, "node_deriv_overlaps");
-    req!(deriv_deriv_overlaps, "deriv_deriv_overlaps");
     req!(intra_edges_in_wrong_corridor, "intra_edges_in_wrong_corridor");
 
     let mut collisions = Vec::new();
@@ -800,10 +775,6 @@ fn quality_to_json(
     col!(label_domain_overlaps, "label_domain_overlaps");
     col!(arrowhead_domain_overlaps, "arrowhead_domain_overlaps");
     col!(stub_domain_overlaps, "stub_domain_overlaps");
-    col!(edge_deriv_overlaps, "edge_deriv_overlaps");
-    col!(label_deriv_overlaps, "label_deriv_overlaps");
-    col!(arrowhead_deriv_overlaps, "arrowhead_deriv_overlaps");
-    col!(stub_deriv_overlaps, "stub_deriv_overlaps");
     col!(edge_label_overlaps, "edge_label_overlaps");
     col!(edge_arrowhead_overlaps, "edge_arrowhead_overlaps");
     col!(edge_stub_overlaps, "edge_stub_overlaps");
@@ -1039,7 +1010,6 @@ fn run_inspect(args: InspectArgs) -> i32 {
                             "intra"
                         }
                     }
-                    Edge::DerivInput { .. } => "deriv",
                 };
                 println!("  [{kind:>5}] {desc}");
                 println!("          path: {}", ep.svg_path);
@@ -1079,18 +1049,6 @@ fn run_inspect(args: InspectArgs) -> i32 {
                     dl.height,
                 );
             }
-
-            println!("\n=== Derivations ===");
-            for dl in &layout.derivations {
-                println!(
-                    "  deriv_{}: x={:.0}..{:.0} y={:.0}..{:.0}",
-                    dl.id.index(),
-                    dl.x,
-                    dl.x + dl.width,
-                    dl.y,
-                    dl.y + dl.height,
-                );
-            }
         }
         InspectFormat::Json => {
             let edges: Vec<serde_json::Value> = layout
@@ -1121,7 +1079,6 @@ fn run_inspect(args: InspectArgs) -> i32 {
                                 "intra"
                             }
                         }
-                        Edge::DerivInput { .. } => "deriv",
                     };
                     serde_json::json!({
                         "id": ep.edge_id.index(),
@@ -1167,25 +1124,10 @@ fn run_inspect(args: InspectArgs) -> i32 {
                 })
                 .collect();
 
-            let derivations: Vec<serde_json::Value> = layout
-                .derivations
-                .iter()
-                .map(|dl| {
-                    serde_json::json!({
-                        "id": dl.id.index(),
-                        "x": dl.x,
-                        "y": dl.y,
-                        "width": dl.width,
-                        "height": dl.height,
-                    })
-                })
-                .collect();
-
             let output = serde_json::json!({
                 "edges": edges,
                 "nodes": nodes,
                 "domains": domains,
-                "derivations": derivations,
             });
 
             println!(
@@ -1232,19 +1174,6 @@ fn edge_description(
                 dst_node.ident,
                 dst_pname,
                 operation.as_deref().unwrap_or("(none)"),
-            )
-        }
-        Edge::DerivInput {
-            source_prop,
-            target_deriv,
-        } => {
-            let src_node = &graph.nodes[graph.properties[source_prop.index()].node.index()];
-            let src_pname = &graph.properties[source_prop.index()].name;
-            format!(
-                "{}::{} \u{2192} deriv_{}",
-                src_node.ident,
-                src_pname,
-                target_deriv.index(),
             )
         }
     }

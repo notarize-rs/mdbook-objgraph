@@ -7,7 +7,7 @@ pub mod quality;
 pub mod routing;
 
 use crate::model::types::{
-    DerivId, DomainId, Edge, EdgeId, Graph, NodeId, PropId,
+    DomainId, Edge, EdgeId, Graph, NodeId, PropId,
 };
 
 use long_edge::{LayerEntry, LayerItem};
@@ -33,8 +33,6 @@ pub const INTER_NODE_GAP: f64 = 28.0;
 pub const NODE_H_SPACING: f64 = 40.0;
 /// Vertical gap between node layers.
 pub const LAYER_V_SPACING: f64 = 48.0;
-/// Vertical gap for derivation layers.
-pub const DERIV_V_SPACING: f64 = 24.0;
 /// Domain title area height (pad 12 + cap-height 8 + pad 12).
 pub const DOMAIN_TITLE_HEIGHT: f64 = 32.0;
 /// Extra domain padding beyond corridor space.
@@ -51,10 +49,6 @@ pub const EDGE_SPACING: f64 = 8.0;
 pub const STUB_LENGTH: f64 = 10.0;
 /// All arrowheads are 6×6; path endpoint offset by this amount.
 pub const ARROWHEAD_SIZE: f64 = 6.0;
-/// Derivation pill height (matches row height).
-pub const PILL_HEIGHT: f64 = 20.0;
-/// Horizontal padding inside derivation pill (left/right).
-pub const PILL_CONTENT_PAD: f64 = 12.0;
 /// Character width estimate for monospace text.
 pub const CHAR_WIDTH: f64 = 5.5;
 /// Character width factor for proportional (sans-serif) label text.
@@ -85,8 +79,6 @@ pub const DOMAIN_FONT_SIZE: f64 = 10.0;
 pub const ANCHOR_LABEL_SIZE: f64 = 8.0;
 /// Constraint edge label text.
 pub const CONSTRAINT_LABEL_SIZE: f64 = 6.0;
-/// Derivation pill label text (monospace).
-pub const PILL_FONT_SIZE: f64 = 8.0;
 
 // ---------------------------------------------------------------------------
 // Layout result types (DESIGN.md §5.5)
@@ -95,12 +87,10 @@ pub const PILL_FONT_SIZE: f64 = 8.0;
 #[derive(Debug, Clone)]
 pub struct LayoutResult {
     pub nodes: Vec<NodeLayout>,
-    pub derivations: Vec<DerivLayout>,
     pub domains: Vec<DomainLayout>,
     pub anchors: Vec<EdgePath>,
     pub intra_domain_constraints: Vec<EdgePath>,
     pub cross_domain_constraints: Vec<CrossDomainPaths>,
-    pub cross_domain_deriv_chains: Vec<DerivChain>,
     pub property_order: crossing::PropertyOrder,
     pub width: f64,
     pub height: f64,
@@ -162,15 +152,6 @@ impl NodeLayout {
     pub fn anchor_port_bottom_y(&self) -> f64 {
         self.y + self.height
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct DerivLayout {
-    pub id: DerivId,
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -247,14 +228,6 @@ impl EdgeLabel {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DerivChain {
-    pub deriv_id: DerivId,
-    pub participants: Vec<NodeId>,
-    pub full_paths: Vec<EdgePath>,
-    pub stub_paths: Vec<StubPath>,
-}
-
 /// A short dotted stub near the destination port of a cross-domain constraint.
 #[derive(Debug, Clone)]
 pub struct StubPath {
@@ -299,7 +272,7 @@ pub enum EndpointRole {
 pub type PortSideAssignment = std::collections::HashMap<(EdgeId, EndpointRole), PortSide>;
 
 // ---------------------------------------------------------------------------
-// Node / derivation dimension helpers
+// Node dimension helpers
 // ---------------------------------------------------------------------------
 
 /// Compute the minimum width required by a single node (private helper).
@@ -332,17 +305,6 @@ pub fn node_height(graph: &Graph, node_id: NodeId) -> f64 {
     HEADER_HEIGHT + node.properties.len() as f64 * ROW_HEIGHT
 }
 
-/// Compute the width of a derivation node.
-pub fn deriv_width(graph: &Graph, deriv_id: DerivId) -> f64 {
-    let deriv = &graph.derivations[deriv_id.index()];
-    deriv.operation.len() as f64 * CHAR_WIDTH + PILL_CONTENT_PAD * 2.0
-}
-
-/// Compute the height of a derivation pill.
-pub fn deriv_height() -> f64 {
-    PILL_HEIGHT
-}
-
 // ---------------------------------------------------------------------------
 // Layout endpoint mapping (DESIGN.md §4.2.6)
 // ---------------------------------------------------------------------------
@@ -353,7 +315,6 @@ pub fn deriv_height() -> f64 {
 pub enum LayoutEndpoint {
     Node(NodeId),
     Prop(PropId),
-    Deriv(DerivId),
 }
 
 /// Returns (upstream, downstream) layout endpoints for an edge.
@@ -368,13 +329,6 @@ pub fn layout_endpoints(edge: &Edge) -> (LayoutEndpoint, LayoutEndpoint) {
             ..
         } => {
             (LayoutEndpoint::Prop(*source_prop), LayoutEndpoint::Prop(*dest_prop))
-        }
-        Edge::DerivInput {
-            source_prop,
-            target_deriv,
-            ..
-        } => {
-            (LayoutEndpoint::Prop(*source_prop), LayoutEndpoint::Deriv(*target_deriv))
         }
     }
 }
@@ -477,83 +431,6 @@ fn tree_center_nodes(
     if min_x.is_finite() && min_x < -1e-9 {
         for nl in node_layouts.iter_mut() {
             nl.x -= min_x;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Derivation re-centering post-processor
-// ---------------------------------------------------------------------------
-
-/// Re-center derivation pills horizontally over their connected input nodes
-/// after all node positioning is finalized.
-///
-/// Derivations are initially positioned by Brandes-Kopf (Phase 4), but
-/// subsequent phases (tree centering 4b, columnar layout 5b, vertical
-/// compaction 5c) shift node x-positions without updating derivation
-/// positions.  This pass recomputes each derivation's x-coordinate to be
-/// centered on the mean x-center of its input source nodes.
-///
-/// Vertical positioning is handled by `separate_column_elements_vertically`
-/// (Phase 5c) which places cross-domain derivations as column elements with
-/// proper gap spacing relative to domains.  We also adjust the y-coordinate
-/// here: if both connected layers (input nodes above, output node below) are
-/// available, place the derivation at the vertical midpoint -- but only when
-/// that midpoint does not fall inside any domain bounding box.
-fn recenter_derivations(
-    deriv_layouts: &mut [DerivLayout],
-    node_layouts: &[NodeLayout],
-    domain_layouts: &[DomainLayout],
-    graph: &Graph,
-) {
-    for deriv in &graph.derivations {
-        let dl = &deriv_layouts[deriv.id.index()];
-        let dw = dl.width;
-        let dh = dl.height;
-
-        // Collect x-centers and bottom y of input source nodes.
-        let mut input_x_centers: Vec<f64> = Vec::new();
-        let mut input_bottom_y = f64::NEG_INFINITY;
-        for &input_prop in &deriv.inputs {
-            let src_node = graph.properties[input_prop.index()].node;
-            let nl = &node_layouts[src_node.index()];
-            input_x_centers.push(nl.x + nl.width / 2.0);
-            input_bottom_y = input_bottom_y.max(nl.y + nl.height);
-        }
-
-        // Output node top y.
-        let out_node = graph.properties[deriv.output_prop.index()].node;
-        let out_nl = &node_layouts[out_node.index()];
-        let output_top_y = out_nl.y;
-
-        // --- X centering ---
-        if !input_x_centers.is_empty() {
-            let mean_x: f64 =
-                input_x_centers.iter().sum::<f64>() / input_x_centers.len() as f64;
-            deriv_layouts[deriv.id.index()].x = mean_x - dw / 2.0;
-        }
-
-        // --- Y adjustment ---
-        // Try the midpoint between input node bottoms and output node top.
-        // Only use it if the resulting pill rectangle does not intersect
-        // any domain bounding box.
-        if input_bottom_y.is_finite() {
-            let mid_y = (input_bottom_y + output_top_y) / 2.0;
-            let candidate_y = mid_y - dh / 2.0;
-            let candidate_x = deriv_layouts[deriv.id.index()].x;
-
-            let overlaps_domain = domain_layouts.iter().any(|dom| {
-                // AABB overlap test.
-                candidate_x < dom.x + dom.width
-                    && candidate_x + dw > dom.x
-                    && candidate_y < dom.y + dom.height
-                    && candidate_y + dh > dom.y
-            });
-
-            if !overlaps_domain {
-                deriv_layouts[deriv.id.index()].y = candidate_y;
-            }
-            // Otherwise keep the y from vertical compaction (Phase 5c).
         }
     }
 }
@@ -741,8 +618,8 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     let (prop_order, _edge_port_order, _layer_port_sides) =
         crossing::minimize_crossings(&mut layers, &mut long_edges, graph);
 
-    // Phase 4: Coordinate assignment (Brandes-Köpf)
-    let (mut node_layouts, mut deriv_layouts) =
+    // Phase 4: Coordinate assignment (Brandes-Kopf)
+    let mut node_layouts =
         coordinate::assign_coordinates(&layers, &long_edges, &assignment, graph);
 
     // Phase 4b: Tree centering — re-center each parent over its intra-domain
@@ -756,32 +633,25 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // dedicated gap corridors for cross-domain edge routing.
     domain::columnar_layout(&mut node_layouts, &mut domain_layouts, graph);
 
-    // Phase 5c: Compact vertical separation — place domains, free nodes, and
-    // cross-domain derivations with tight inter-element gaps.
+    // Phase 5c: Compact vertical separation — place domains and free nodes
+    // with tight inter-element gaps.
     domain::separate_column_elements_vertically(
         &mut node_layouts,
-        &mut deriv_layouts,
         &mut domain_layouts,
         graph,
     );
 
-    // Phase 5d: Re-center derivations over their (now-shifted) input nodes.
-    // Phases 4b, 5b, and 5c move nodes without updating derivation positions.
-    // This pass recomputes derivation x (centered on input nodes) and
-    // conditionally adjusts y (midpoint between layers, avoiding domains).
-    recenter_derivations(&mut deriv_layouts, &node_layouts, &domain_layouts, graph);
-
     // Phase 5e: Normalize — shift all elements so that the minimum x and y are >= 0.
     // This must happen before edge routing so that SVG path coordinates match the
     // final node/domain positions.
-    normalize_positions(&mut node_layouts, &mut deriv_layouts, &mut domain_layouts);
+    normalize_positions(&mut node_layouts, &mut domain_layouts);
 
     // Phase 6a: Assign port sides from coordinate-space geometry.
     // Layer-space port sides from Phase 3b feed the sweep's crossing detection
     // but are not used here — coordinate-space positions are more accurate for
     // physical routing decisions.
     let port_sides = routing::refine_port_sides(
-        graph, &node_layouts, &deriv_layouts, &domain_layouts,
+        graph, &node_layouts, &domain_layouts,
         &PortSideAssignment::new(), &prop_order,
     );
 
@@ -799,13 +669,12 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     let routes = routing::route_all_edges(
         graph,
         &node_layouts,
-        &deriv_layouts,
         &domain_layouts,
         &port_sides,
         &prop_order,
     );
 
-    // Classify edges into anchors, derivation edges, and constraints.
+    // Classify edges into anchors and constraints.
     //
     // Labels are placed using a collision-aware candidate selection:
     // each edge generates multiple candidate label positions and the
@@ -830,10 +699,6 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // Already-placed label bounding boxes for collision detection.
     let mut placed_label_bbs: Vec<(f64, f64, f64, f64)> = Vec::new();
 
-    // Collect DerivInput edge paths by derivation for post-loop classification.
-    let mut deriv_edge_paths: std::collections::HashMap<DerivId, Vec<(EdgePath, usize)>> =
-        std::collections::HashMap::new();
-
     // Pre-parse edge segments for edge-label collision checking.
     let edge_segments: Vec<Vec<LineSeg>> = routes
         .iter()
@@ -851,7 +716,7 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         let label_text = edge_operation(edge);
         let label_font_size = match edge {
             Edge::Anchor { .. } => ANCHOR_LABEL_SIZE,
-            Edge::Constraint { .. } | Edge::DerivInput { .. } => CONSTRAINT_LABEL_SIZE,
+            Edge::Constraint { .. } => CONSTRAINT_LABEL_SIZE,
         };
         let label = label_text.map(|text| {
             let candidates = routing::route_label_candidates(route);
@@ -886,13 +751,6 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
             Edge::Anchor { .. } => {
                 anchors.push(edge_path);
             }
-            Edge::DerivInput { target_deriv, .. } => {
-                // Collect by derivation; classified after the loop.
-                deriv_edge_paths
-                    .entry(*target_deriv)
-                    .or_default()
-                    .push((edge_path, route_idx));
-            }
             Edge::Constraint {
                 source_prop,
                 dest_prop,
@@ -923,47 +781,6 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         }
     }
 
-    // Classify DerivInput edges: intra-domain derivations are always-visible,
-    // cross-domain derivations get show/hide with stubs (DerivChain).
-    let mut cross_domain_deriv_chains: Vec<DerivChain> = Vec::new();
-    for (deriv_id, edge_entries) in deriv_edge_paths {
-        if is_deriv_cross_domain(graph, deriv_id) {
-            let deriv = &graph.derivations[deriv_id.index()];
-            let mut participants: Vec<NodeId> = deriv
-                .inputs
-                .iter()
-                .map(|&pid| graph.properties[pid.index()].node)
-                .collect();
-            let output_node = graph.properties[deriv.output_prop.index()].node;
-            participants.push(output_node);
-            participants.sort_unstable();
-            participants.dedup();
-
-            let mut full_paths = Vec::new();
-            let mut stub_paths = Vec::new();
-            for (ep, ri) in edge_entries {
-                let stub_route = routing::generate_stub(&routes[ri]);
-                let dotted_svg = routing::route_to_svg_path(&stub_route);
-                stub_paths.push(StubPath {
-                    edge_id: ep.edge_id,
-                    dotted_svg,
-                });
-                full_paths.push(ep);
-            }
-
-            cross_domain_deriv_chains.push(DerivChain {
-                deriv_id,
-                participants,
-                full_paths,
-                stub_paths,
-            });
-        } else {
-            for (ep, _ri) in edge_entries {
-                intra_domain_constraints.push(ep);
-            }
-        }
-    }
-
     // Phase 7: Clamp edge label positions so they stay within the content
     // bounding box.  Labels placed near the canvas edge (especially the left
     // edge at x ≈ 0) can extend beyond the content area; clamping prevents
@@ -979,10 +796,6 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         for nl in &node_layouts {
             content_max_x = content_max_x.max(nl.x + nl.width);
             content_max_y = content_max_y.max(nl.y + nl.height);
-        }
-        for dl in &deriv_layouts {
-            content_max_x = content_max_x.max(dl.x + dl.width);
-            content_max_y = content_max_y.max(dl.y + dl.height);
         }
         for dl in &domain_layouts {
             content_max_x = content_max_x.max(dl.x + dl.width);
@@ -1020,16 +833,14 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
 
     // Compute overall dimensions, accounting for label overflow.
     let (width, height, content_offset_x) =
-        compute_dimensions(&node_layouts, &deriv_layouts, &domain_layouts, &all_labels);
+        compute_dimensions(&node_layouts, &domain_layouts, &all_labels);
 
     Ok(LayoutResult {
         nodes: node_layouts,
-        derivations: deriv_layouts,
         domains: domain_layouts,
         anchors,
         intra_domain_constraints,
         cross_domain_constraints,
-        cross_domain_deriv_chains,
         property_order: prop_order,
         width,
         height,
@@ -1042,7 +853,6 @@ fn edge_operation(edge: &Edge) -> Option<String> {
     match edge {
         Edge::Anchor { operation, .. } => operation.clone(),
         Edge::Constraint { operation, .. } => operation.clone(),
-        Edge::DerivInput { .. } => None,
     }
 }
 
@@ -1057,40 +867,21 @@ fn is_cross_domain_constraint(graph: &Graph, src_node: NodeId, dst_node: NodeId)
     }
 }
 
-/// Returns true if a derivation's inputs span multiple domains (or any
-/// input/output is domain-less).  Cross-domain derivations route through
-/// inter-domain gap corridors and use show/hide with stubs.
-pub(crate) fn is_deriv_cross_domain(graph: &Graph, deriv_id: DerivId) -> bool {
-    let deriv = &graph.derivations[deriv_id.index()];
-    let output_domain =
-        graph.nodes[graph.properties[deriv.output_prop.index()].node.index()].domain;
-    let mut all_doms: Vec<Option<DomainId>> = deriv
-        .inputs
-        .iter()
-        .map(|&pid| graph.nodes[graph.properties[pid.index()].node.index()].domain)
-        .collect();
-    all_doms.push(output_domain);
-    !(all_doms.iter().all(|d| *d == all_doms[0]) && all_doms[0].is_some())
-}
-
 /// Shift all layout elements so that the minimum x and y are >= 0.
 /// This is needed because domain title areas can extend above the first node,
 /// producing negative y coordinates.
 fn normalize_positions(
     node_layouts: &mut [NodeLayout],
-    deriv_layouts: &mut [DerivLayout],
     domain_layouts: &mut [DomainLayout],
 ) {
     let min_x = node_layouts
         .iter()
         .map(|nl| nl.x)
-        .chain(deriv_layouts.iter().map(|dl| dl.x))
         .chain(domain_layouts.iter().map(|dl| dl.x))
         .fold(f64::INFINITY, f64::min);
     let min_y = node_layouts
         .iter()
         .map(|nl| nl.y)
-        .chain(deriv_layouts.iter().map(|dl| dl.y))
         .chain(domain_layouts.iter().map(|dl| dl.y))
         .fold(f64::INFINITY, f64::min);
 
@@ -1101,10 +892,6 @@ fn normalize_positions(
         for nl in node_layouts.iter_mut() {
             nl.x += shift_x;
             nl.y += shift_y;
-        }
-        for dl in deriv_layouts.iter_mut() {
-            dl.x += shift_x;
-            dl.y += shift_y;
         }
         for dl in domain_layouts.iter_mut() {
             dl.x += shift_x;
@@ -1121,11 +908,10 @@ fn normalize_positions(
 /// extend past the left edge of the content area.
 fn compute_dimensions(
     node_layouts: &[NodeLayout],
-    deriv_layouts: &[DerivLayout],
     domain_layouts: &[DomainLayout],
     labels: &[&EdgeLabel],
 ) -> (f64, f64, f64) {
-    // Content bounding box (nodes, derivations, domains).
+    // Content bounding box (nodes, domains).
     let mut content_min_x = 0.0_f64;
     let mut content_max_x = 0.0_f64;
     let mut max_y = 0.0_f64;
@@ -1134,11 +920,6 @@ fn compute_dimensions(
         content_min_x = content_min_x.min(nl.x);
         content_max_x = content_max_x.max(nl.x + nl.width);
         max_y = max_y.max(nl.y + nl.height);
-    }
-    for dl in deriv_layouts {
-        content_min_x = content_min_x.min(dl.x);
-        content_max_x = content_max_x.max(dl.x + dl.width);
-        max_y = max_y.max(dl.y + dl.height);
     }
     for dl in domain_layouts {
         content_min_x = content_min_x.min(dl.x);
@@ -1233,7 +1014,7 @@ mod tests {
             width: 100.0,
             height: 50.0,
         }];
-        let (w, h, offset) = compute_dimensions(&nodes, &[], &[], &[]);
+        let (w, h, offset) = compute_dimensions(&nodes, &[], &[]);
         // width = 100 + 2*20 = 140, height = 50 + 40 = 90, no offset
         assert!((w - 140.0).abs() < 1e-9);
         assert!((h - 90.0).abs() < 1e-9);
@@ -1259,7 +1040,7 @@ mod tests {
             font_size: 8.0,
         };
         let labels = vec![&lbl];
-        let (w, h, offset) = compute_dimensions(&nodes, &[], &[], &labels);
+        let (w, h, offset) = compute_dimensions(&nodes, &[], &labels);
         // Label bounding_x = (-16, 10), padded = (-24, 18)
         // content_offset_x = 24 (to compensate for -24 padded left overflow)
         assert!((offset - 24.0).abs() < 1e-9);
@@ -1287,7 +1068,7 @@ mod tests {
             font_size: 6.0,
         };
         let labels = vec![&lbl];
-        let (w, _h, offset) = compute_dimensions(&nodes, &[], &[], &labels);
+        let (w, _h, offset) = compute_dimensions(&nodes, &[], &labels);
         // Label bounding_x = (90, 129), padded right = 137
         // No left overflow (padded left = 82 > 0), so offset = 0
         assert!((offset).abs() < 1e-9);
@@ -1323,7 +1104,7 @@ mod tests {
             font_size: 6.0,
         };
         let labels = vec![&lbl_left, &lbl_right];
-        let (w, _h, offset) = compute_dimensions(&nodes, &[], &[], &labels);
+        let (w, _h, offset) = compute_dimensions(&nodes, &[], &labels);
         // Left label padded: (-42, 13), right label padded: (82, 137)
         // content_offset_x = 42
         assert!((offset - 42.0).abs() < 1e-9);

@@ -1,10 +1,8 @@
 pub mod ast;
-pub mod dedup;
 pub mod lexer;
 
 use ast::{
-    AstConstraint, AstDerivationExpr, AstDomain, AstGraph, AstAnchor, AstNode, AstProperty,
-    AstSourceExpr,
+    AstConstraint, AstDomain, AstGraph, AstAnchor, AstNode, AstProperty,
 };
 use crate::ObgraphError;
 use lexer::{Lexer, Spanned, Token};
@@ -141,63 +139,15 @@ impl Parser {
     }
 
     // -----------------------------------------------------------------------
-    // Parse a source expression (right-hand side of a constraint).
+    // Parse a property reference: ident '::' prop_name
     //
-    //   source_expr ← derivation / prop_ref
-    //   derivation  ← ident '(' arg_list ')'
-    //   prop_ref    ← ident '::' prop_name
-    //
-    // Both start with an identifier, so we look ahead one token.
+    // Returns (node_ident, prop_name).
     // -----------------------------------------------------------------------
-    fn parse_source_expr(&mut self) -> Result<AstSourceExpr, ObgraphError> {
-        let func_or_node = self.expect_ident()?;
-
-        match self.peek() {
-            Token::LParen => {
-                // Derivation: func(arg_list)
-                self.advance(); // consume '('
-                let args = self.parse_arg_list()?;
-                self.expect(&Token::RParen)?;
-                Ok(AstSourceExpr::Derivation(AstDerivationExpr {
-                    function: func_or_node,
-                    args,
-                }))
-            }
-            Token::ColonColon => {
-                // PropRef: node::prop_name
-                self.advance(); // consume '::'
-                let prop = self.parse_prop_name()?;
-                Ok(AstSourceExpr::PropRef {
-                    node_ident: func_or_node,
-                    prop_name: prop,
-                })
-            }
-            _ => {
-                let (line, col) = self.here();
-                Err(ObgraphError::Parse {
-                    line,
-                    col,
-                    message: format!(
-                        "expected `(` for derivation or `::` for property reference after `{func_or_node}`"
-                    ),
-                })
-            }
-        }
-    }
-
-    /// Parse a comma-separated argument list for a derivation expression.
-    fn parse_arg_list(&mut self) -> Result<Vec<AstSourceExpr>, ObgraphError> {
-        let mut args = Vec::new();
-        // Empty arg list
-        if *self.peek() == Token::RParen {
-            return Ok(args);
-        }
-        args.push(self.parse_source_expr()?);
-        while *self.peek() == Token::Comma {
-            self.advance(); // consume ','
-            args.push(self.parse_source_expr()?);
-        }
-        Ok(args)
+    fn parse_prop_ref(&mut self) -> Result<(String, String), ObgraphError> {
+        let node_ident = self.expect_ident()?;
+        self.expect(&Token::ColonColon)?;
+        let prop_name = self.parse_prop_name()?;
+        Ok((node_ident, prop_name))
     }
 
     // -----------------------------------------------------------------------
@@ -409,7 +359,7 @@ impl Parser {
     // -----------------------------------------------------------------------
     // Parse a constraint statement.
     //
-    //   constraint ← prop_ref '<=' source_expr (':' ident)? trailing? '\n'
+    //   constraint ← prop_ref '<=' prop_ref (':' ident)? trailing? '\n'
     //
     // The `dest_node` ident and `::` have already been consumed and `prop_ref`
     // parsing has already started.  We receive dest_node and dest_prop.
@@ -420,7 +370,7 @@ impl Parser {
         dest_prop: String,
     ) -> Result<AstConstraint, ObgraphError> {
         self.expect(&Token::LeftAngleEq)?;
-        let source = self.parse_source_expr()?;
+        let (source_node, source_prop) = self.parse_prop_ref()?;
 
         let operation = if *self.peek() == Token::Colon {
             self.advance(); // consume ':'
@@ -430,7 +380,7 @@ impl Parser {
         };
 
         self.expect_newline_or_eof()?;
-        Ok(AstConstraint { dest_node, dest_prop, source, operation })
+        Ok(AstConstraint { dest_node, dest_prop, source_node, source_prop, operation })
     }
 
     // -----------------------------------------------------------------------
@@ -516,7 +466,6 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::*;
 
     // Helper: parse and unwrap.
     fn p(input: &str) -> AstGraph {
@@ -703,13 +652,8 @@ mod tests {
         let c = &g.constraints[0];
         assert_eq!(c.dest_node, "cert");
         assert_eq!(c.dest_prop, "issuer.org");
-        assert_eq!(
-            c.source,
-            AstSourceExpr::PropRef {
-                node_ident: "ca".into(),
-                prop_name: "subject.org".into(),
-            }
-        );
+        assert_eq!(c.source_node, "ca");
+        assert_eq!(c.source_prop, "subject.org");
         assert_eq!(c.operation, None);
     }
 
@@ -718,39 +662,6 @@ mod tests {
         let g = p("cert::signature <= ca::public_key : verified_by\n");
         let c = &g.constraints[0];
         assert_eq!(c.operation, Some("verified_by".into()));
-    }
-
-    #[test]
-    fn test_constraint_with_derivation() {
-        let g = p("cert::subject.common_name <= combine(ca::subject.common_name, ca::subject.org)\n");
-        let c = &g.constraints[0];
-        match &c.source {
-            AstSourceExpr::Derivation(d) => {
-                assert_eq!(d.function, "combine");
-                assert_eq!(d.args.len(), 2);
-            }
-            _ => panic!("expected derivation"),
-        }
-    }
-
-    #[test]
-    fn test_constraint_nested_derivation() {
-        let g = p("out::p <= outer(inner(a::x, b::y), c::z)\n");
-        let c = &g.constraints[0];
-        match &c.source {
-            AstSourceExpr::Derivation(d) => {
-                assert_eq!(d.function, "outer");
-                assert_eq!(d.args.len(), 2);
-                match &d.args[0] {
-                    AstSourceExpr::Derivation(inner) => {
-                        assert_eq!(inner.function, "inner");
-                        assert_eq!(inner.args.len(), 2);
-                    }
-                    _ => panic!("expected inner derivation"),
-                }
-            }
-            _ => panic!("expected outer derivation"),
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -771,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_mixed_top_level() {
-        let g = p("node a {\n}\nb <- a\na::p <= a::q\n");
+        let g = p("node a {\n  p\n  q\n}\nb <- a\na::p <= a::q\n");
         assert_eq!(g.nodes.len(), 1);
         assert_eq!(g.anchors.len(), 1);
         assert_eq!(g.constraints.len(), 1);
@@ -907,13 +818,8 @@ cert::subject.common_name <= revocation::crl : not_in
         let c0 = &g.constraints[0];
         assert_eq!(c0.dest_node, "cert");
         assert_eq!(c0.dest_prop, "issuer.common_name");
-        assert_eq!(
-            c0.source,
-            AstSourceExpr::PropRef {
-                node_ident: "ca".into(),
-                prop_name: "subject.common_name".into(),
-            }
-        );
+        assert_eq!(c0.source_node, "ca");
+        assert_eq!(c0.source_prop, "subject.common_name");
 
         let c2 = &g.constraints[2];
         assert_eq!(c2.dest_prop, "signature");

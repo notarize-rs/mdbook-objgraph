@@ -3,8 +3,7 @@
 use std::fmt::Write;
 
 use crate::layout::{
-    LayoutResult, CONTENT_PAD, DOMAIN_TITLE_HEIGHT, DOT_RADIUS, HEADER_HEIGHT, PILL_HEIGHT,
-    ROW_HEIGHT,
+    LayoutResult, CONTENT_PAD, DOMAIN_TITLE_HEIGHT, DOT_RADIUS, HEADER_HEIGHT, ROW_HEIGHT,
 };
 use crate::model::state::StateResult;
 use crate::model::types::{Edge, EdgeId, Graph, NodeId};
@@ -70,10 +69,7 @@ pub fn generate_svg(graph: &Graph, layout: &LayoutResult, state: &StateResult) -
     // Layer 1: edges
     write_edges(&mut out, graph, layout, state);
 
-    // Layer 2: derivation nodes
-    write_derivations(&mut out, graph, layout);
-
-    // Layer 3: nodes
+    // Layer 2: nodes
     write_nodes(&mut out, graph, layout, state);
 
     // Close global margin group
@@ -140,12 +136,10 @@ fn write_domains(out: &mut String, layout: &LayoutResult) {
 ///
 /// - Anchor: valid if parent is anchored+verified.
 /// - Constraint: valid if source node is anchored and source prop is constrained.
-/// - DerivInput: valid if source node is anchored and source prop is constrained.
 ///
-/// Note: constraints and derivation inputs require only "anchored" (not
-/// "verified") on the source node, matching the propagation algorithm.
-/// The stronger "verified" gate applies only to anchor edges (child
-/// anchoring).
+/// Note: constraints require only "anchored" (not "verified") on the source
+/// node, matching the propagation algorithm.  The stronger "verified" gate
+/// applies only to anchor edges (child anchoring).
 fn is_edge_valid(edge_id: EdgeId, graph: &Graph, state: &StateResult) -> bool {
     let edge = &graph.edges[edge_id.index()];
     match edge {
@@ -153,11 +147,6 @@ fn is_edge_valid(edge_id: EdgeId, graph: &Graph, state: &StateResult) -> bool {
             state.is_node_anchored(*parent) && state.is_node_verified(graph, *parent)
         }
         Edge::Constraint { source_prop, .. } => {
-            let src_node_id = graph.properties[source_prop.index()].node;
-            state.is_node_anchored(src_node_id)
-                && state.is_prop_constrained(*source_prop)
-        }
-        Edge::DerivInput { source_prop, .. } => {
             let src_node_id = graph.properties[source_prop.index()].node;
             state.is_node_anchored(src_node_id)
                 && state.is_prop_constrained(*source_prop)
@@ -197,7 +186,7 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
     }
     writeln!(out, r#"      </g>"#).unwrap();
 
-    // --- Intra-domain constraint and derivation input paths ---
+    // --- Intra-domain constraint paths ---
     writeln!(out, r#"      <g class="obgraph-constraints-intra">"#).unwrap();
     for ep in &layout.intra_domain_constraints {
         let valid = is_edge_valid(ep.edge_id, graph, state);
@@ -281,11 +270,6 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
     }
     writeln!(out, r#"      </g>"#).unwrap();
 
-    // --- Cross-domain derivation chains ---
-    writeln!(out, r#"      <g class="obgraph-deriv-chains">"#).unwrap();
-    write_deriv_chains(out, layout, graph);
-    writeln!(out, r#"      </g>"#).unwrap();
-
     writeln!(out, r#"    </g>"#).unwrap();
 }
 
@@ -307,141 +291,12 @@ fn props_attr(edge_id: EdgeId, graph: &Graph) -> String {
             dest_prop,
             ..
         } => format!("{},{}", source_prop.0, dest_prop.0),
-        Edge::DerivInput {
-            source_prop,
-            target_deriv,
-            ..
-        } => {
-            let output_prop = graph.derivations[target_deriv.index()].output_prop;
-            format!("{},{}", source_prop.0, output_prop.0)
-        }
         Edge::Anchor { .. } => String::new(),
     }
 }
 
-/// Write cross-domain derivation chain groups.
-fn write_deriv_chains(out: &mut String, layout: &LayoutResult, graph: &Graph) {
-    for chain in &layout.cross_domain_deriv_chains {
-        let participants_str = participants_attr(&chain.participants);
-
-        // Collect all prop IDs connected by edges in this chain.
-        let mut all_props: Vec<u32> = Vec::new();
-        for ep in &chain.full_paths {
-            let edge = &graph.edges[ep.edge_id.index()];
-            match edge {
-                Edge::Constraint {
-                    source_prop,
-                    dest_prop,
-                    ..
-                } => {
-                    all_props.push(source_prop.0);
-                    all_props.push(dest_prop.0);
-                }
-                Edge::DerivInput {
-                    source_prop,
-                    target_deriv,
-                    ..
-                } => {
-                    all_props.push(source_prop.0);
-                    all_props.push(graph.derivations[target_deriv.index()].output_prop.0);
-                }
-                _ => {}
-            }
-        }
-        all_props.sort();
-        all_props.dedup();
-        let props_str = all_props
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-
-        writeln!(
-            out,
-            r#"      <g class="obgraph-deriv-chain" data-deriv="{id}" data-participants="{p}" data-props="{props}">"#,
-            id = chain.deriv_id.0,
-            p = participants_str,
-            props = props_str
-        )
-        .unwrap();
-
-        // Full paths (hidden by default, shown on hover/select)
-        for ep in &chain.full_paths {
-            writeln!(
-                out,
-                r#"        <path class="obgraph-constraint-full" d="{d}" data-edge="{id}" data-participants="{p}"/>"#,
-                d = ep.svg_path,
-                id = ep.edge_id.0,
-                p = participants_str,
-            )
-            .unwrap();
-        }
-
-        // Stub paths (shown by default, hidden on hover/select)
-        for sp in &chain.stub_paths {
-            if !sp.dotted_svg.is_empty() {
-                writeln!(
-                    out,
-                    r#"        <path class="obgraph-constraint-stub obgraph-stub-dotted" d="{d}" data-edge="{id}" data-participants="{p}" marker-end="url(#arrow-constraint-valid)"/>"#,
-                    d = sp.dotted_svg,
-                    id = sp.edge_id.0,
-                    p = participants_str,
-                )
-                .unwrap();
-            }
-        }
-
-        writeln!(out, r#"      </g>"#).unwrap();
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Layer 2: derivation nodes
-// ---------------------------------------------------------------------------
-
-fn write_derivations(out: &mut String, graph: &Graph, layout: &LayoutResult) {
-    writeln!(out, r#"    <g class="obgraph-derivations">"#).unwrap();
-
-    for dl in &layout.derivations {
-        let deriv = &graph.derivations[dl.id.index()];
-
-        // Rounded pill shape
-        let cx = dl.x + dl.width / 2.0;
-        let cy = dl.y + dl.height / 2.0;
-        let rx = PILL_HEIGHT / 2.0;
-
-        writeln!(
-            out,
-            r#"      <g class="obgraph-derivation" data-deriv="{id}">"#,
-            id = dl.id.0
-        )
-        .unwrap();
-        writeln!(
-            out,
-            r#"        <rect class="obgraph-pill" x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}"/>"#,
-            x = dl.x,
-            y = dl.y,
-            w = dl.width,
-            h = dl.height,
-            rx = rx
-        )
-        .unwrap();
-        writeln!(
-            out,
-            r#"        <text class="obgraph-pill-label" x="{x}" y="{y}" text-anchor="middle" dominant-baseline="central">{op}</text>"#,
-            x = cx,
-            y = cy,
-            op = escape_xml(&deriv.operation)
-        )
-        .unwrap();
-        writeln!(out, r#"      </g>"#).unwrap();
-    }
-
-    writeln!(out, r#"    </g>"#).unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// Layer 3: nodes
+// Layer 2: nodes
 // ---------------------------------------------------------------------------
 
 fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &StateResult) {
@@ -680,7 +535,7 @@ fn write_defs(out: &mut String) {
     .unwrap();
     writeln!(out, r#"      </marker>"#).unwrap();
 
-    // Constraint/derivation arrowhead: 6×6, valid (blue)
+    // Constraint arrowhead: 6×6, valid (blue)
     writeln!(
         out,
         r#"      <marker id="arrow-constraint-valid" viewBox="0 0 6 6" refX="0" refY="3""#
@@ -698,7 +553,7 @@ fn write_defs(out: &mut String) {
     .unwrap();
     writeln!(out, r#"      </marker>"#).unwrap();
 
-    // Constraint/derivation arrowhead: 6×6, invalid (red)
+    // Constraint arrowhead: 6×6, invalid (red)
     writeln!(
         out,
         r#"      <marker id="arrow-constraint-invalid" viewBox="0 0 6 6" refX="0" refY="3""#
@@ -773,9 +628,6 @@ mod tests {
                     map.entry(*dest_prop).or_default().push(eid);
                     map.entry(*source_prop).or_default().push(eid);
                 }
-                Edge::DerivInput { source_prop, .. } => {
-                    map.entry(*source_prop).or_default().push(eid);
-                }
                 Edge::Anchor { .. } => {}
             }
         }
@@ -813,7 +665,6 @@ mod tests {
         Graph {
             nodes,
             properties,
-            derivations: vec![],
             edges,
             domains,
             prop_edges,
@@ -845,10 +696,8 @@ mod tests {
                 width: 120.0,
                 height: 28.0, // header only — no properties
             }],
-            derivations: vec![],
             domains: vec![],
             anchors: vec![],
-            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
             cross_domain_constraints: vec![],
             property_order: PropertyOrder::from_graph(&graph),
@@ -873,7 +722,6 @@ mod tests {
         assert!(svg.contains(r#"class="obgraph""#), "missing svg root class");
         assert!(svg.contains(r#"class="obgraph-nodes""#), "missing nodes layer");
         assert!(svg.contains(r#"class="obgraph-edges""#), "missing edges layer");
-        assert!(svg.contains(r#"class="obgraph-derivations""#), "missing derivations layer");
         assert!(svg.contains(r#"class="obgraph-domains""#), "missing domains layer");
         assert!(svg.contains(r#"id="arrow-anchor-valid""#), "missing arrow-anchor-valid marker");
         assert!(svg.contains(r#"id="arrow-constraint-valid""#), "missing arrow-constraint-valid marker");
@@ -968,14 +816,12 @@ mod tests {
                     height: 52.0,
                 },
             ],
-            derivations: vec![],
             domains: vec![],
             anchors: vec![EdgePath {
                 edge_id: EdgeId(0),
                 svg_path: "M 70,48 L 70,100".to_string(),
                 label: None,
             }],
-            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
             cross_domain_constraints: vec![],
             property_order: PropertyOrder::from_graph(&graph),
@@ -1091,7 +937,6 @@ mod tests {
                     height: 52.0,
                 },
             ],
-            derivations: vec![],
             domains: vec![
                 DomainLayout {
                     id: d0,
@@ -1111,7 +956,6 @@ mod tests {
                 },
             ],
             anchors: vec![],
-            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
             cross_domain_constraints: cross_vec,
             property_order: PropertyOrder::from_graph(&graph),
@@ -1190,10 +1034,8 @@ mod tests {
                 width: 120.0,
                 height: 52.0,
             }],
-            derivations: vec![],
             domains: vec![],
             anchors: vec![],
-            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
             cross_domain_constraints: vec![],
             property_order: PropertyOrder::from_graph(&graph),
@@ -1320,10 +1162,8 @@ mod tests {
                 width: 120.0,
                 height: 28.0,
             }],
-            derivations: vec![],
             domains: vec![],
             anchors: vec![],
-            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
             cross_domain_constraints: vec![],
             property_order: PropertyOrder::from_graph(&graph),
@@ -1385,22 +1225,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 13: obgraph-deriv-chains wrapper group present
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn deriv_chains_wrapper_present() {
-        let (graph, layout, trust) = minimal_graph_and_layout();
-        let svg = generate_svg(&graph, &layout, &trust);
-
-        assert!(
-            svg.contains(r#"class="obgraph-deriv-chains""#),
-            "missing obgraph-deriv-chains wrapper group"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 14: Edge validity — valid anchor gets obgraph-anchor class
+    // Test 13: Edge validity — valid anchor gets obgraph-anchor class
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1442,14 +1267,12 @@ mod tests {
                 NodeLayout { id: NodeId(0), x: 20.0, y: 20.0, width: 100.0, height: 28.0 },
                 NodeLayout { id: NodeId(1), x: 20.0, y: 100.0, width: 100.0, height: 28.0 },
             ],
-            derivations: vec![],
             domains: vec![],
             anchors: vec![EdgePath {
                 edge_id: EdgeId(0),
                 svg_path: "M 70,48 L 70,100".to_string(),
                 label: None,
             }],
-            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
             cross_domain_constraints: vec![],
             property_order: PropertyOrder::from_graph(&graph),
@@ -1534,10 +1357,8 @@ mod tests {
                 NodeLayout { id: NodeId(0), x: 20.0, y: 20.0, width: 100.0, height: 52.0 },
                 NodeLayout { id: NodeId(1), x: 200.0, y: 20.0, width: 100.0, height: 52.0 },
             ],
-            derivations: vec![],
             domains: vec![],
             anchors: vec![],
-            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![EdgePath {
                 edge_id: EdgeId(0),
                 svg_path: "M 120,46 L 200,46".to_string(),
@@ -1613,10 +1434,8 @@ mod tests {
                 width: 200.0,
                 height: 28.0,
             }],
-            derivations: vec![],
             domains: vec![],
             anchors: vec![],
-            cross_domain_deriv_chains: vec![],
             intra_domain_constraints: vec![],
             cross_domain_constraints: vec![],
             property_order: PropertyOrder::from_graph(&graph),

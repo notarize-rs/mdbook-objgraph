@@ -275,12 +275,12 @@ Report::tcb.current.snp <= Report::tcb.committed.snp : ge
 Report::tcb.current.microcode <= Report::tcb.committed.microcode : ge
 
 # committed_tcb components must be >= known-good versions (post-CVE)
-Report::tcb.committed.bootloader <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-Report::tcb.committed.tee <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-Report::tcb.committed.snp <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-Report::tcb.committed.microcode <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-
-Report::guest_svn <= filter(KDS::tcb_versions, NVD::cve_entries) : in
+# Report::tcb.committed.bootloader <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
+# Report::tcb.committed.tee <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
+# Report::tcb.committed.snp <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
+# Report::tcb.committed.microcode <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
+#
+# Report::guest_svn <= filter(KDS::tcb_versions, NVD::cve_entries) : in
 
 # ═══════════════════════════════════════════════════════════════
 # TPM chain constraints

@@ -4,10 +4,10 @@
 //! collisions, and other layout defects. Used as a test gate and diagnostic
 //! tool during layout algorithm iteration.
 
-use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId, PropId};
+use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId, PropId};
 
 use super::{
-    DerivLayout, DomainLayout, EdgeLabel, EdgePath, LayoutResult, NodeLayout, StubPath,
+    DomainLayout, EdgeLabel, EdgePath, LayoutResult, NodeLayout, StubPath,
     ARROWHEAD_SIZE, CONTENT_PAD, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT, GLOBAL_MARGIN,
 };
 
@@ -30,7 +30,6 @@ pub struct QualityReport {
     pub node_width_delta: f64,
     pub max_parent_misalignment: f64,
     pub mean_constraint_segments: f64,
-    pub derivs_inside_domains: Vec<(DerivId, DomainId)>,
     pub free_nodes_inside_domains: Vec<(NodeId, DomainId)>,
     pub domain_contiguity_violations: Vec<(DomainId, NodeId)>,
     pub inter_domain_edges_in_intra_corridors: Vec<(EdgeId, DomainId)>,
@@ -42,7 +41,6 @@ pub struct QualityReport {
     pub column_height_imbalance: f64,
 
     // ── Collision matrix: Node ───────────────────────────────────────
-    pub node_deriv_overlaps: Vec<(NodeId, DerivId)>,
     pub label_node_overlaps: Vec<(EdgeId, NodeId)>,
     pub arrowhead_node_overlaps: Vec<(EdgeId, NodeId)>,
     pub stub_node_overlaps: Vec<(EdgeId, NodeId)>,
@@ -52,13 +50,6 @@ pub struct QualityReport {
     pub label_domain_overlaps: Vec<(EdgeId, DomainId)>,
     pub arrowhead_domain_overlaps: Vec<(EdgeId, DomainId)>,
     pub stub_domain_overlaps: Vec<(EdgeId, DomainId)>,
-
-    // ── Collision matrix: Derivation ─────────────────────────────────
-    pub deriv_deriv_overlaps: Vec<(DerivId, DerivId)>,
-    pub edge_deriv_overlaps: Vec<(EdgeId, DerivId)>,
-    pub label_deriv_overlaps: Vec<(EdgeId, DerivId)>,
-    pub arrowhead_deriv_overlaps: Vec<(EdgeId, DerivId)>,
-    pub stub_deriv_overlaps: Vec<(EdgeId, DerivId)>,
 
     // ── Collision matrix: Edge ↔ other edge sub-elements ─────────────
     pub edge_label_overlaps: Vec<(EdgeId, EdgeId)>,
@@ -103,8 +94,6 @@ pub struct QualityReport {
     pub nodes_outside_canvas: Vec<(NodeId, f64)>,
     /// Domains partially or fully outside the canvas.
     pub domains_outside_canvas: Vec<(DomainId, f64)>,
-    /// Derivation pills partially or fully outside the canvas.
-    pub derivs_outside_canvas: Vec<(DerivId, f64)>,
     /// Edge segments with portions outside the canvas. (edge_id, overflow_px)
     pub edges_outside_canvas: Vec<(EdgeId, f64)>,
     /// Edge labels partially or fully outside the canvas. (edge_id, overflow_px)
@@ -163,16 +152,12 @@ impl QualityReport {
             ("Node↔Node overlaps", self.node_overlaps.len()),
             ("Domain↔Domain overlaps", self.domain_overlaps.len()),
             ("Nodes outside domain", self.nodes_outside_domain.len()),
-            ("Derivs inside domains", self.derivs_inside_domains.len()),
             ("Free nodes inside domains", self.free_nodes_inside_domains.len()),
             ("Domain contiguity violations", self.domain_contiguity_violations.len()),
             // Corridor correctness
             ("Inter-domain in intra-corridor", self.inter_domain_edges_in_intra_corridors.len()),
             ("Intra-edge in wrong corridor", self.intra_edges_in_wrong_corridor.len()),
             ("Channel collisions", self.channel_collisions.len()),
-            // Element overlap (hard)
-            ("Node↔Deriv overlaps", self.node_deriv_overlaps.len()),
-            ("Deriv↔Deriv overlaps", self.deriv_deriv_overlaps.len()),
             // Occlusion (hidden elements)
             ("Edges hidden under nodes", self.edges_hidden_under_nodes.len()),
             ("Labels hidden under nodes", self.labels_hidden_under_nodes.len()),
@@ -183,7 +168,6 @@ impl QualityReport {
             // Canvas overflow
             ("Nodes outside canvas", self.nodes_outside_canvas.len()),
             ("Domains outside canvas", self.domains_outside_canvas.len()),
-            ("Derivs outside canvas", self.derivs_outside_canvas.len()),
             ("Edges outside canvas", self.edges_outside_canvas.len()),
             ("Labels outside canvas", self.labels_outside_canvas.len()),
             ("Arrows outside canvas", self.arrowheads_outside_canvas.len()),
@@ -204,10 +188,6 @@ impl QualityReport {
             ("Label↔Domain", self.label_domain_overlaps.len()),
             ("Arrow↔Domain", self.arrowhead_domain_overlaps.len()),
             ("Stub↔Domain", self.stub_domain_overlaps.len()),
-            ("Edge↔Deriv", self.edge_deriv_overlaps.len()),
-            ("Label↔Deriv", self.label_deriv_overlaps.len()),
-            ("Arrow↔Deriv", self.arrowhead_deriv_overlaps.len()),
-            ("Stub↔Deriv", self.stub_deriv_overlaps.len()),
             ("Edge↔Label", self.edge_label_overlaps.len()),
             ("Edge↔Arrow", self.edge_arrowhead_overlaps.len()),
             ("Edge↔Stub", self.edge_stub_overlaps.len()),
@@ -261,9 +241,6 @@ impl QualityReport {
             for &(n, d) in &self.nodes_outside_domain {
                 lines.push(format!("      Node {} outside domain {}", n.0, d.0));
             }
-            for &(d, dom) in &self.derivs_inside_domains {
-                lines.push(format!("      Deriv {} inside domain {}", d.0, dom.0));
-            }
             for &(n, dom) in &self.free_nodes_inside_domains {
                 lines.push(format!("      Free node {} inside domain {}", n.0, dom.0));
             }
@@ -278,12 +255,6 @@ impl QualityReport {
             }
             for &(a, b) in &self.channel_collisions {
                 lines.push(format!("      Channel collision: edge {} vs edge {}", a.0, b.0));
-            }
-            for &(n, d) in &self.node_deriv_overlaps {
-                lines.push(format!("      Node {} overlaps deriv {}", n.0, d.0));
-            }
-            for &(d1, d2) in &self.deriv_deriv_overlaps {
-                lines.push(format!("      Deriv {} overlaps deriv {}", d1.0, d2.0));
             }
             for &(eid, nid, hidden, total) in &self.connected_edge_occlusion {
                 lines.push(format!(
@@ -441,21 +412,7 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         )
         .collect();
 
-    // Also collect deriv chain full paths.
-    let deriv_chain_paths: Vec<&EdgePath> = layout
-        .cross_domain_deriv_chains
-        .iter()
-        .flat_map(|dc| dc.full_paths.iter())
-        .collect();
-
-    // All paths including deriv chains (for comprehensive analysis).
-    let all_paths_with_derivs: Vec<&EdgePath> = all_paths
-        .iter()
-        .copied()
-        .chain(deriv_chain_paths.iter().copied())
-        .collect();
-
-    let parsed: Vec<(EdgeId, Vec<LineSeg>)> = all_paths_with_derivs
+    let parsed: Vec<(EdgeId, Vec<LineSeg>)> = all_paths
         .iter()
         .map(|ep| (ep.edge_id, parse_svg_path(&ep.svg_path)))
         .collect();
@@ -473,8 +430,6 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
     let max_parent_misalignment = compute_max_parent_misalignment(graph, &layout.nodes);
     let mean_constraint_segments =
         compute_mean_constraint_segments(&layout.intra_domain_constraints);
-    let derivs_inside_domains =
-        find_derivs_inside_domains(graph, &layout.derivations, &layout.domains);
     let free_nodes_inside_domains =
         find_free_nodes_inside_domains(graph, &layout.nodes, &layout.domains);
     let domain_contiguity_violations =
@@ -496,7 +451,7 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
 
     // ── Collect labels, arrowheads, stubs, domain titles ─────────────
 
-    let all_labels: Vec<(EdgeId, &EdgeLabel)> = all_paths_with_derivs
+    let all_labels: Vec<(EdgeId, &EdgeLabel)> = all_paths
         .iter()
         .filter_map(|ep| ep.label.as_ref().map(|l| (ep.edge_id, l)))
         .collect();
@@ -510,12 +465,6 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         .cross_domain_constraints
         .iter()
         .flat_map(|c| c.stub_paths.iter())
-        .chain(
-            layout
-                .cross_domain_deriv_chains
-                .iter()
-                .flat_map(|dc| dc.stub_paths.iter()),
-        )
         .map(|sp| (sp.edge_id, parse_stub_segments(sp)))
         .collect();
 
@@ -527,7 +476,6 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
 
     // ── New collision detectors ──────────────────────────────────────
 
-    let node_deriv_overlaps = find_node_deriv_overlaps(&layout.nodes, &layout.derivations);
     let label_node_overlaps =
         find_label_node_overlaps(graph, &layout.nodes, &all_labels);
     let arrowhead_node_overlaps =
@@ -542,16 +490,6 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         find_arrowhead_domain_overlaps(graph, &layout.domains, &all_arrowheads);
     let stub_domain_overlaps =
         find_stub_domain_overlaps(graph, &layout.domains, &all_stubs);
-
-    let deriv_deriv_overlaps = find_deriv_deriv_overlaps(&layout.derivations);
-    let edge_deriv_overlaps =
-        find_edge_deriv_overlaps(graph, &layout.derivations, &parsed);
-    let label_deriv_overlaps =
-        find_label_deriv_overlaps(&layout.derivations, &all_labels);
-    let arrowhead_deriv_overlaps =
-        find_arrowhead_deriv_overlaps(graph, &layout.derivations, &all_arrowheads);
-    let stub_deriv_overlaps =
-        find_stub_deriv_overlaps(graph, &layout.derivations, &all_stubs);
 
     let edge_label_overlaps = find_edge_label_overlaps(&parsed, &all_labels);
     let edge_arrowhead_overlaps = find_edge_arrowhead_overlaps(&parsed, &all_arrowheads);
@@ -603,13 +541,6 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         find_nodes_outside_canvas(&layout.nodes, total_width, total_height, margin_x, margin_y);
     let domains_outside_canvas =
         find_domains_outside_canvas(&layout.domains, total_width, total_height, margin_x, margin_y);
-    let derivs_outside_canvas = find_derivs_outside_canvas(
-        &layout.derivations,
-        total_width,
-        total_height,
-        margin_x,
-        margin_y,
-    );
     let edges_outside_canvas =
         find_edges_outside_canvas(&parsed, total_width, total_height, margin_x, margin_y);
     let labels_outside_canvas =
@@ -662,7 +593,6 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         node_width_delta,
         max_parent_misalignment,
         mean_constraint_segments,
-        derivs_inside_domains,
         free_nodes_inside_domains,
         domain_contiguity_violations,
         inter_domain_edges_in_intra_corridors,
@@ -672,7 +602,6 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         total_width,
         column_heights,
         column_height_imbalance,
-        node_deriv_overlaps,
         label_node_overlaps,
         arrowhead_node_overlaps,
         stub_node_overlaps,
@@ -680,11 +609,6 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         label_domain_overlaps,
         arrowhead_domain_overlaps,
         stub_domain_overlaps,
-        deriv_deriv_overlaps,
-        edge_deriv_overlaps,
-        label_deriv_overlaps,
-        arrowhead_deriv_overlaps,
-        stub_deriv_overlaps,
         edge_label_overlaps,
         edge_arrowhead_overlaps,
         edge_stub_overlaps,
@@ -707,7 +631,6 @@ pub fn analyze(graph: &Graph, layout: &LayoutResult) -> QualityReport {
         connected_edge_occlusion,
         nodes_outside_canvas,
         domains_outside_canvas,
-        derivs_outside_canvas,
         edges_outside_canvas,
         labels_outside_canvas,
         arrowheads_outside_canvas,
@@ -766,15 +689,6 @@ impl Aabb {
     }
 
     fn from_domain(dl: &DomainLayout) -> Self {
-        Self {
-            x: dl.x,
-            y: dl.y,
-            w: dl.width,
-            h: dl.height,
-        }
-    }
-
-    fn from_deriv(dl: &DerivLayout) -> Self {
         Self {
             x: dl.x,
             y: dl.y,
@@ -955,14 +869,6 @@ fn segment_crosses_aabb_border(seg: &LineSeg, aabb: &Aabb) -> bool {
     segment_intersects_aabb(seg, aabb) && !segment_fully_inside_aabb(seg, aabb)
 }
 
-/// Returns true if the edge is a DerivInput targeting this derivation.
-fn edge_connects_to_deriv(graph: &Graph, edge_id: EdgeId, deriv_id: DerivId) -> bool {
-    match &graph.edges[edge_id.index()] {
-        Edge::DerivInput { target_deriv, .. } => *target_deriv == deriv_id,
-        _ => false,
-    }
-}
-
 /// Compute a 6×6 AABB for the arrowhead at the end of an edge's last segment.
 /// Returns None if the edge has no segments.
 fn arrowhead_aabb(segs: &[LineSeg]) -> Option<Aabb> {
@@ -997,15 +903,6 @@ fn edge_endpoint_nodes(graph: &Graph, edge_id: EdgeId) -> (Option<NodeId>, Optio
             let src_node = graph.properties[source_prop.index()].node;
             let dst_node = graph.properties[dest_prop.index()].node;
             (Some(src_node), Some(dst_node))
-        }
-        Edge::DerivInput {
-            source_prop,
-            target_deriv,
-        } => {
-            let src_node = graph.properties[source_prop.index()].node;
-            let deriv = &graph.derivations[target_deriv.index()];
-            let out_node = graph.properties[deriv.output_prop.index()].node;
-            (Some(src_node), Some(out_node))
         }
     }
 }
@@ -1106,43 +1003,6 @@ fn find_nodes_outside_domain(
                 if !domain_box.contains(&node_box) {
                     violations.push((nid, domain.id));
                 }
-            }
-        }
-    }
-    violations
-}
-
-/// Find cross-domain derivation pills that overlap a domain they don't belong to.
-fn find_derivs_inside_domains(
-    graph: &Graph,
-    derivs: &[DerivLayout],
-    domains: &[DomainLayout],
-) -> Vec<(DerivId, DomainId)> {
-    let mut violations = Vec::new();
-    for deriv in &graph.derivations {
-        // Collect input/output domains.
-        let mut involved: std::collections::HashSet<DomainId> = std::collections::HashSet::new();
-        for &pid in &deriv.inputs {
-            if let Some(did) = graph.nodes[graph.properties[pid.index()].node.index()].domain {
-                involved.insert(did);
-            }
-        }
-        if let Some(did) = graph.nodes[graph.properties[deriv.output_prop.index()].node.index()].domain {
-            involved.insert(did);
-        }
-        let is_cross_domain = involved.len() > 1
-            || deriv.inputs.iter().any(|&pid| {
-                graph.nodes[graph.properties[pid.index()].node.index()].domain.is_none()
-            });
-        if !is_cross_domain {
-            continue;
-        }
-        let dl = &derivs[deriv.id.index()];
-        let deriv_box = Aabb::from_deriv(dl);
-        for domain_dl in domains {
-            let domain_box = Aabb::from_domain(domain_dl);
-            if deriv_box.intersects(&domain_box) {
-                violations.push((deriv.id, domain_dl.id));
             }
         }
     }
@@ -1272,14 +1132,6 @@ fn edge_connects_to_node(graph: &Graph, edge_id: EdgeId, node_id: NodeId) -> boo
             let src_node = graph.properties[source_prop.index()].node;
             let dst_node = graph.properties[dest_prop.index()].node;
             src_node == node_id || dst_node == node_id
-        }
-        crate::model::types::Edge::DerivInput {
-            source_prop,
-            target_deriv: _,
-        } => {
-            let src_node = graph.properties[source_prop.index()].node;
-            // Derivation nodes don't have a NodeId, so only check source.
-            src_node == node_id
         }
     }
 }
@@ -1498,35 +1350,19 @@ fn find_channel_collisions(
                     graph.properties[dest_prop.index()].node,
                 ]
             }
-            Edge::DerivInput { source_prop, .. } => {
-                vec![graph.properties[source_prop.index()].node]
-            }
         }
     };
 
-    // Two edges share a common endpoint (node or derivation).
+    // Two edges share a common endpoint node.
     let shares_endpoint = |a: EdgeId, b: EdgeId| -> bool {
         let nodes_a = edge_nodes(a);
         let nodes_b = edge_nodes(b);
-        if nodes_a.iter().any(|n| nodes_b.contains(n)) {
-            return true;
-        }
-        // Also check shared target derivation for DerivInput pairs.
-        let deriv_a = match &graph.edges[a.index()] {
-            Edge::DerivInput { target_deriv, .. } => Some(target_deriv),
-            _ => None,
-        };
-        let deriv_b = match &graph.edges[b.index()] {
-            Edge::DerivInput { target_deriv, .. } => Some(target_deriv),
-            _ => None,
-        };
-        deriv_a.is_some() && deriv_a == deriv_b
+        nodes_a.iter().any(|n| nodes_b.contains(n))
     };
 
-    // Both edges use center-port routing (Anchors sharing a node, or
-    // DerivInputs converging to the same derivation target).
+    // Both edges use center-port routing (Anchors sharing a node).
     let both_center_port = |a: EdgeId, b: EdgeId| -> bool {
-        let is_center = |e: &Edge| matches!(e, Edge::Anchor { .. } | Edge::DerivInput { .. });
+        let is_center = |e: &Edge| matches!(e, Edge::Anchor { .. });
         is_center(&graph.edges[a.index()]) && is_center(&graph.edges[b.index()])
     };
 
@@ -1540,7 +1376,7 @@ fn find_channel_collisions(
             }
             // Same x (within tolerance) and overlapping y-ranges.
             if (x_a - x_b).abs() < 0.5 && y_max_a > y_min_b + 0.5 && y_max_b > y_min_a + 0.5 {
-                // Exempt center-port edges that share a node or derivation.
+                // Exempt center-port edges that share a node.
                 if both_center_port(eid_a, eid_b) && shares_endpoint(eid_a, eid_b) {
                     continue;
                 }
@@ -1646,23 +1482,6 @@ fn compute_column_heights(domains: &[DomainLayout]) -> Vec<f64> {
 // ---------------------------------------------------------------------------
 // Collision matrix detectors (27 new pairs)
 // ---------------------------------------------------------------------------
-
-fn find_node_deriv_overlaps(
-    nodes: &[NodeLayout],
-    derivs: &[DerivLayout],
-) -> Vec<(NodeId, DerivId)> {
-    let mut out = Vec::new();
-    for n in nodes {
-        let nb = Aabb::from_node(n);
-        for d in derivs {
-            let db = Aabb::from_deriv(d);
-            if nb.intersects(&db) {
-                out.push((n.id, d.id));
-            }
-        }
-    }
-    out
-}
 
 fn find_label_node_overlaps(
     graph: &Graph,
@@ -1800,97 +1619,6 @@ fn find_stub_domain_overlaps(
             let db = Aabb::from_domain(dl);
             if segs.iter().any(|s| segment_intersects_aabb(s, &db)) {
                 out.push((*eid, dl.id));
-            }
-        }
-    }
-    out
-}
-
-fn find_deriv_deriv_overlaps(derivs: &[DerivLayout]) -> Vec<(DerivId, DerivId)> {
-    let mut out = Vec::new();
-    for i in 0..derivs.len() {
-        let a = Aabb::from_deriv(&derivs[i]);
-        for j in (i + 1)..derivs.len() {
-            let b = Aabb::from_deriv(&derivs[j]);
-            if a.intersects(&b) {
-                out.push((derivs[i].id, derivs[j].id));
-            }
-        }
-    }
-    out
-}
-
-fn find_edge_deriv_overlaps(
-    graph: &Graph,
-    derivs: &[DerivLayout],
-    edges: &[(EdgeId, Vec<LineSeg>)],
-) -> Vec<(EdgeId, DerivId)> {
-    let mut out = Vec::new();
-    for &(eid, ref segs) in edges {
-        for d in derivs {
-            if edge_connects_to_deriv(graph, eid, d.id) {
-                continue;
-            }
-            let db = Aabb::from_deriv(d);
-            if segs.iter().any(|s| segment_intersects_aabb(s, &db)) {
-                out.push((eid, d.id));
-            }
-        }
-    }
-    out
-}
-
-fn find_label_deriv_overlaps(
-    derivs: &[DerivLayout],
-    labels: &[(EdgeId, &EdgeLabel)],
-) -> Vec<(EdgeId, DerivId)> {
-    let mut out = Vec::new();
-    for &(eid, label) in labels {
-        let lb = Aabb::from_label(label);
-        for d in derivs {
-            let db = Aabb::from_deriv(d);
-            if lb.intersects(&db) {
-                out.push((eid, d.id));
-            }
-        }
-    }
-    out
-}
-
-fn find_arrowhead_deriv_overlaps(
-    graph: &Graph,
-    derivs: &[DerivLayout],
-    arrowheads: &[(EdgeId, Aabb)],
-) -> Vec<(EdgeId, DerivId)> {
-    let mut out = Vec::new();
-    for &(eid, ref ab) in arrowheads {
-        for d in derivs {
-            if edge_connects_to_deriv(graph, eid, d.id) {
-                continue;
-            }
-            let db = Aabb::from_deriv(d);
-            if ab.intersects(&db) {
-                out.push((eid, d.id));
-            }
-        }
-    }
-    out
-}
-
-fn find_stub_deriv_overlaps(
-    graph: &Graph,
-    derivs: &[DerivLayout],
-    stubs: &[(EdgeId, Vec<LineSeg>)],
-) -> Vec<(EdgeId, DerivId)> {
-    let mut out = Vec::new();
-    for (eid, segs) in stubs {
-        for d in derivs {
-            if edge_connects_to_deriv(graph, *eid, d.id) {
-                continue;
-            }
-            let db = Aabb::from_deriv(d);
-            if segs.iter().any(|s| segment_intersects_aabb(s, &db)) {
-                out.push((*eid, d.id));
             }
         }
     }
@@ -2437,29 +2165,6 @@ fn find_domains_outside_canvas(
     margin_y: f64,
 ) -> Vec<(DomainId, f64)> {
     domains
-        .iter()
-        .filter_map(|d| {
-            let ab = Aabb {
-                x: d.x,
-                y: d.y,
-                w: d.width,
-                h: d.height,
-            };
-            let overflow =
-                content_aabb_overflow(&ab, canvas_w, canvas_h, margin_x, margin_y);
-            if overflow > 0.5 { Some((d.id, overflow)) } else { None }
-        })
-        .collect()
-}
-
-fn find_derivs_outside_canvas(
-    derivs: &[DerivLayout],
-    canvas_w: f64,
-    canvas_h: f64,
-    margin_x: f64,
-    margin_y: f64,
-) -> Vec<(DerivId, f64)> {
-    derivs
         .iter()
         .filter_map(|d| {
             let ab = Aabb {

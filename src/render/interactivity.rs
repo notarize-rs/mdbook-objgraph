@@ -53,7 +53,6 @@ pub fn js() -> &'static str {
 
   function updateEdges() {
     svg.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
-      if (p.closest('.obgraph-deriv-chain')) return;
       if (isEdgeVisible(p)) {
         p.classList.add('obgraph-active');
       } else {
@@ -61,30 +60,11 @@ pub fn js() -> &'static str {
       }
     });
     svg.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
-      if (p.closest('.obgraph-deriv-chain')) return;
       if (isEdgeVisible(p)) {
         p.classList.add('obgraph-hidden');
       } else {
         p.classList.remove('obgraph-hidden');
       }
-    });
-    // Derivation chain atomic toggling
-    svg.querySelectorAll('.obgraph-deriv-chain').forEach(function(g) {
-      var vis = isEdgeVisible(g);
-      g.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
-        if (vis) {
-          p.classList.add('obgraph-active');
-        } else {
-          p.classList.remove('obgraph-active');
-        }
-      });
-      g.querySelectorAll('.obgraph-constraint-stub').forEach(function(p) {
-        if (vis) {
-          p.classList.add('obgraph-hidden');
-        } else {
-          p.classList.remove('obgraph-hidden');
-        }
-      });
     });
   }
 

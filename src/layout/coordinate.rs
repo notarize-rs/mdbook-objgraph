@@ -9,13 +9,13 @@
 
 use std::collections::HashMap;
 
-use crate::model::types::{DerivId, Graph, NodeId};
+use crate::model::types::{Graph, NodeId};
 
 use super::layer_assign::LayerAssignment;
 use super::long_edge::{LayerEntry, LayerItem, LongEdge};
 use super::{
-    deriv_height, deriv_width, node_height, node_width, DerivLayout, NodeLayout,
-    DERIV_V_SPACING, INTER_NODE_GAP, NODE_H_SPACING, ROW_HEIGHT,
+    node_height, node_width, NodeLayout,
+    INTER_NODE_GAP, NODE_H_SPACING,
 };
 
 // ---------------------------------------------------------------------------
@@ -23,8 +23,8 @@ use super::{
 // ---------------------------------------------------------------------------
 
 /// A unified identifier for any element that participates in layer ordering.
-/// Nodes, derivations, and long-edge segments are all flattened into a single
-/// index space so Brandes-Kopf can treat them uniformly.
+/// Nodes and long-edge segments are flattened into a single index space so
+/// Brandes-Kopf can treat them uniformly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ElemId(u32);
 
@@ -34,8 +34,6 @@ struct ElemMap {
     kinds: Vec<ElemKind>,
     /// NodeId -> ElemId
     node_to_elem: HashMap<NodeId, ElemId>,
-    /// DerivId -> ElemId
-    deriv_to_elem: HashMap<DerivId, ElemId>,
     /// (EdgeId, layer) -> ElemId for long-edge segments
     #[allow(dead_code)]
     seg_to_elem: HashMap<(crate::model::types::EdgeId, u32), ElemId>,
@@ -47,7 +45,6 @@ struct ElemMap {
 #[allow(dead_code)]
 enum ElemKind {
     Node(NodeId),
-    Derivation(DerivId),
     Segment(crate::model::types::EdgeId, u32),
 }
 
@@ -55,7 +52,6 @@ enum ElemKind {
 fn build_elem_map(layers: &[LayerEntry]) -> ElemMap {
     let mut kinds = Vec::new();
     let mut node_to_elem = HashMap::new();
-    let mut deriv_to_elem = HashMap::new();
     let mut seg_to_elem = HashMap::new();
 
     for layer in layers {
@@ -65,12 +61,6 @@ fn build_elem_map(layers: &[LayerEntry]) -> ElemMap {
                 LayerItem::Node(nid) => {
                     node_to_elem.entry(*nid).or_insert_with(|| {
                         kinds.push(ElemKind::Node(*nid));
-                        id
-                    });
-                }
-                LayerItem::Derivation(did) => {
-                    deriv_to_elem.entry(*did).or_insert_with(|| {
-                        kinds.push(ElemKind::Derivation(*did));
                         id
                     });
                 }
@@ -88,7 +78,6 @@ fn build_elem_map(layers: &[LayerEntry]) -> ElemMap {
     ElemMap {
         kinds,
         node_to_elem,
-        deriv_to_elem,
         seg_to_elem,
         count,
     }
@@ -98,7 +87,6 @@ fn build_elem_map(layers: &[LayerEntry]) -> ElemMap {
 fn item_to_elem(item: &LayerItem, emap: &ElemMap) -> ElemId {
     match item {
         LayerItem::Node(nid) => emap.node_to_elem[nid],
-        LayerItem::Derivation(did) => emap.deriv_to_elem[did],
         LayerItem::Segment(eid, layer_idx) => emap.seg_to_elem[&(*eid, *layer_idx)],
     }
 }
@@ -107,7 +95,6 @@ fn item_to_elem(item: &LayerItem, emap: &ElemMap) -> ElemId {
 fn elem_width(elem: ElemId, emap: &ElemMap, graph: &Graph) -> f64 {
     match emap.kinds[elem.0 as usize] {
         ElemKind::Node(nid) => node_width(graph, nid),
-        ElemKind::Derivation(did) => deriv_width(graph, did),
         // Long-edge segments are treated as zero-width points for spacing.
         ElemKind::Segment(_, _) => 0.0,
     }
@@ -254,28 +241,6 @@ fn build_adjacency(
                         emap.node_to_elem.get(&dst_node),
                     ) {
                         if in_pair(es, ed) { pairs.push((es, ed)); }
-                    }
-                }
-                crate::model::types::Edge::DerivInput {
-                    source_prop,
-                    target_deriv,
-                    ..
-                } => {
-                    let src_node = graph.properties[source_prop.index()].node;
-                    if let (Some(&es), Some(&ed)) = (
-                        emap.node_to_elem.get(&src_node),
-                        emap.deriv_to_elem.get(target_deriv),
-                    ) {
-                        if in_pair(es, ed) { pairs.push((es, ed)); }
-                    }
-                    // Derivation output connects to the output property's node.
-                    let deriv = &graph.derivations[target_deriv.index()];
-                    let out_node = graph.properties[deriv.output_prop.index()].node;
-                    if let (Some(&ed_elem), Some(&eo_elem)) = (
-                        emap.deriv_to_elem.get(target_deriv),
-                        emap.node_to_elem.get(&out_node),
-                    ) {
-                        if in_pair(ed_elem, eo_elem) { pairs.push((ed_elem, eo_elem)); }
                     }
                 }
             }
@@ -616,63 +581,25 @@ pub fn assign_y_coordinates(layers: &[LayerEntry], graph: &Graph) -> HashMap<u32
             continue;
         }
 
-        let is_derivation_layer = layer.items.iter().all(|item| {
-            matches!(item, LayerItem::Derivation(_))
-        });
-
         y_map.insert(li as u32, y_offset);
 
-        if is_derivation_layer {
-            y_offset += DERIV_V_SPACING + ROW_HEIGHT;
-        } else {
-            // Find max height among items in this layer.
-            let max_height = layer
-                .items
-                .iter()
-                .map(|item| match item {
-                    LayerItem::Node(nid) => node_height(graph, *nid),
-                    LayerItem::Derivation(_) => deriv_height(),
-                    LayerItem::Segment(_, _) => 0.0,
-                })
-                .fold(0.0_f64, f64::max);
-            // Use INTER_NODE_GAP for the vertical gap between layers.
-            // The initial LAYER_V_SPACING (48px) is a theoretical maximum;
-            // the mockup and vertical compaction target INTER_NODE_GAP (28px)
-            // between all adjacent elements.
-            y_offset += INTER_NODE_GAP + max_height;
-        }
+        // Find max height among items in this layer.
+        let max_height = layer
+            .items
+            .iter()
+            .map(|item| match item {
+                LayerItem::Node(nid) => node_height(graph, *nid),
+                LayerItem::Segment(_, _) => 0.0,
+            })
+            .fold(0.0_f64, f64::max);
+        // Use INTER_NODE_GAP for the vertical gap between layers.
+        // The initial LAYER_V_SPACING (48px) is a theoretical maximum;
+        // the mockup and vertical compaction target INTER_NODE_GAP (28px)
+        // between all adjacent elements.
+        y_offset += INTER_NODE_GAP + max_height;
     }
 
     y_map
-}
-
-// ---------------------------------------------------------------------------
-// Derivation centering
-// ---------------------------------------------------------------------------
-
-/// After Brandes-Kopf, center derivation nodes on the mean x-position
-/// of their input port source nodes.
-fn center_derivations(
-    x_coords: &mut [f64],
-    emap: &ElemMap,
-    graph: &Graph,
-) {
-    for deriv in &graph.derivations {
-        if let Some(&deriv_elem) = emap.deriv_to_elem.get(&deriv.id) {
-            // Collect x-positions of input source nodes.
-            let mut input_xs: Vec<f64> = Vec::new();
-            for &input_prop in &deriv.inputs {
-                let src_node = graph.properties[input_prop.index()].node;
-                if let Some(&src_elem) = emap.node_to_elem.get(&src_node) {
-                    input_xs.push(x_coords[src_elem.0 as usize]);
-                }
-            }
-            if !input_xs.is_empty() {
-                let mean_x: f64 = input_xs.iter().sum::<f64>() / input_xs.len() as f64;
-                x_coords[deriv_elem.0 as usize] = mean_x;
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -681,29 +608,25 @@ fn center_derivations(
 
 /// Run the Brandes-Kopf coordinate assignment algorithm.
 ///
-/// Produces x- and y-coordinates for all nodes and derivations.
+/// Produces x- and y-coordinates for all nodes.
 pub fn assign_coordinates(
     layers: &[LayerEntry],
     long_edges: &[LongEdge],
     _assignment: &LayerAssignment,
     graph: &Graph,
-) -> (Vec<NodeLayout>, Vec<DerivLayout>) {
+) -> Vec<NodeLayout> {
     let emap = build_elem_map(layers);
     let pos_table = build_pos_table(layers, &emap);
     let adj = build_adjacency(layers, long_edges, graph, &emap);
 
     // Phase A+B+C: balanced x-coordinates.
-    let mut x_coords = balanced_x_coordinates(layers, &adj, &emap, &pos_table, graph);
-
-    // Derivation centering.
-    center_derivations(&mut x_coords, &emap, graph);
+    let x_coords = balanced_x_coordinates(layers, &adj, &emap, &pos_table, graph);
 
     // Y-coordinates.
     let y_map = assign_y_coordinates(layers, graph);
 
     // Build output layouts.
     let mut node_layouts: Vec<NodeLayout> = Vec::with_capacity(graph.nodes.len());
-    let mut deriv_layouts: Vec<DerivLayout> = Vec::with_capacity(graph.derivations.len());
 
     // Initialize with defaults so we can index by id.
     for node in &graph.nodes {
@@ -713,15 +636,6 @@ pub fn assign_coordinates(
             y: 0.0,
             width: node_width(graph, node.id),
             height: node_height(graph, node.id),
-        });
-    }
-    for deriv in &graph.derivations {
-        deriv_layouts.push(DerivLayout {
-            id: deriv.id,
-            x: 0.0,
-            y: 0.0,
-            width: deriv_width(graph, deriv.id),
-            height: deriv_height(),
         });
     }
 
@@ -739,12 +653,6 @@ pub fn assign_coordinates(
                     nl.x = x - w / 2.0;
                     nl.y = y;
                 }
-                LayerItem::Derivation(did) => {
-                    let w = deriv_width(graph, *did);
-                    let dl = &mut deriv_layouts[did.index()];
-                    dl.x = x - w / 2.0;
-                    dl.y = y;
-                }
                 LayerItem::Segment(_, _) => {
                     // Segments don't produce layout output.
                 }
@@ -756,18 +664,14 @@ pub fn assign_coordinates(
     let min_x = node_layouts
         .iter()
         .map(|nl| nl.x)
-        .chain(deriv_layouts.iter().map(|dl| dl.x))
         .fold(f64::INFINITY, f64::min);
     if min_x.is_finite() && min_x.abs() > 1e-9 {
         for nl in &mut node_layouts {
             nl.x -= min_x;
         }
-        for dl in &mut deriv_layouts {
-            dl.x -= min_x;
-        }
     }
 
-    (node_layouts, deriv_layouts)
+    node_layouts
 }
 
 // ---------------------------------------------------------------------------
@@ -814,7 +718,6 @@ mod tests {
         Graph {
             nodes,
             properties,
-            derivations: Vec::new(),
             edges: Vec::new(),
             domains: Vec::new(),
             prop_edges: HashMap::new(),
@@ -857,7 +760,6 @@ mod tests {
         }
         LayerAssignment {
             node_layers: nl,
-            deriv_layers: HashMap::new(),
             num_layers,
         }
     }
@@ -872,7 +774,7 @@ mod tests {
         let long_edges = vec![];
         let assignment = make_layer_assignment(&[(0, 0)], 1);
 
-        let (node_layouts, _deriv_layouts) =
+        let node_layouts =
             assign_coordinates(&layers, &long_edges, &assignment, &graph);
 
         assert_eq!(node_layouts.len(), 1);
@@ -903,7 +805,7 @@ mod tests {
         let long_edges = vec![];
         let assignment = make_layer_assignment(&[(0, 0), (1, 0)], 1);
 
-        let (node_layouts, _) =
+        let node_layouts =
             assign_coordinates(&layers, &long_edges, &assignment, &graph);
 
         let left = &node_layouts[0];
@@ -935,7 +837,7 @@ mod tests {
         let long_edges = vec![];
         let assignment = make_layer_assignment(&[(0, 0), (1, 1)], 2);
 
-        let (node_layouts, _) =
+        let node_layouts =
             assign_coordinates(&layers, &long_edges, &assignment, &graph);
 
         let a = &node_layouts[0];
@@ -984,44 +886,6 @@ mod tests {
         assert!(
             (y1 - expected_y1).abs() < 1e-6,
             "Second layer y should be {}, got {}",
-            expected_y1,
-            y1
-        );
-    }
-
-    // Test: Y-coordinates with derivation layer
-    #[test]
-    fn test_y_coordinates_derivation_layer() {
-        let mut graph = make_graph(&[("A", 1)]);
-        // Add a derivation.
-        graph.derivations.push(Derivation {
-            id: DerivId(0),
-            operation: "hash".to_string(),
-            inputs: vec![PropId(0)],
-            output_prop: PropId(0), // simplified
-        });
-
-        let layers = vec![
-            LayerEntry {
-                items: vec![LayerItem::Node(NodeId(0))],
-            },
-            LayerEntry {
-                items: vec![LayerItem::Derivation(DerivId(0))],
-            },
-        ];
-
-        let y_map = assign_y_coordinates(&layers, &graph);
-
-        let y0 = y_map[&0];
-        let y1 = y_map[&1];
-
-        // Layer 0 has one node with 1 prop.
-        let h0 = HEADER_HEIGHT + 1.0 * ROW_HEIGHT;
-        let expected_y1 = y0 + INTER_NODE_GAP + h0;
-
-        assert!(
-            (y1 - expected_y1).abs() < 1e-6,
-            "Derivation layer y should be {}, got {}",
             expected_y1,
             y1
         );

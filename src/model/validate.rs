@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::types::{DerivId, Edge, Graph, NodeId, PropId};
+use super::types::{Edge, Graph, NodeId, PropId};
 use crate::ObgraphError;
 
 /// Validate a constructed graph against all rules from DESIGN.md §7.2.
@@ -17,7 +17,6 @@ pub fn validate(graph: &Graph) -> Result<(), ObgraphError> {
     check_root_node_incoming_anchor(graph)?;
     check_non_root_without_incoming_anchor(graph)?;
     check_multiple_incoming_anchors(graph)?;
-    check_nullary_derivations(graph)?;
     check_cycles(graph)?;
     Ok(())
 }
@@ -81,8 +80,8 @@ fn check_nonexistent_node_references(graph: &Graph) -> Result<(), ObgraphError> 
                     )));
                 }
             }
-            // Constraint and DerivInput reference properties, not nodes directly.
-            Edge::Constraint { .. } | Edge::DerivInput { .. } => {}
+            // Constraint references properties, not nodes directly.
+            Edge::Constraint { .. } => {}
         }
     }
     Ok(())
@@ -94,7 +93,6 @@ fn check_nonexistent_node_references(graph: &Graph) -> Result<(), ObgraphError> 
 
 fn check_nonexistent_property_references(graph: &Graph) -> Result<(), ObgraphError> {
     let prop_count = graph.properties.len();
-    let deriv_count = graph.derivations.len();
 
     for edge in &graph.edges {
         match edge {
@@ -116,34 +114,7 @@ fn check_nonexistent_property_references(graph: &Graph) -> Result<(), ObgraphErr
                     )));
                 }
             }
-            Edge::DerivInput {
-                source_prop,
-                target_deriv,
-            } => {
-                if source_prop.index() >= prop_count {
-                    return Err(ObgraphError::Validation(format!(
-                        "derivation input references nonexistent source property id {}",
-                        source_prop
-                    )));
-                }
-                if target_deriv.index() >= deriv_count {
-                    return Err(ObgraphError::Validation(format!(
-                        "derivation input references nonexistent derivation id {}",
-                        target_deriv
-                    )));
-                }
-            }
             Edge::Anchor { .. } => {}
-        }
-    }
-
-    // Also validate derivation output_prop references.
-    for deriv in &graph.derivations {
-        if deriv.output_prop.index() >= prop_count {
-            return Err(ObgraphError::Validation(format!(
-                "derivation {} has nonexistent output property id {}",
-                deriv.id, deriv.output_prop
-            )));
         }
     }
 
@@ -233,45 +204,24 @@ fn check_multiple_incoming_anchors(graph: &Graph) -> Result<(), ObgraphError> {
 }
 
 // ---------------------------------------------------------------------------
-// Rule: Nullary derivation
-// ---------------------------------------------------------------------------
-
-fn check_nullary_derivations(graph: &Graph) -> Result<(), ObgraphError> {
-    for deriv in &graph.derivations {
-        if deriv.inputs.is_empty() {
-            return Err(ObgraphError::Validation(format!(
-                "derivation '{}' (id {}) has zero inputs (derivations must have at least one input)",
-                deriv.operation, deriv.id
-            )));
-        }
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Rule: Cycle detection (Kahn's algorithm)
 // ---------------------------------------------------------------------------
 //
 // Vertex universe:
 //   - Node vertices  : 0              ..  N-1
 //   - Prop vertices  : N              ..  N+P-1
-//   - Deriv vertices : N+P            ..  N+P+D-1
 //
 // Edges (trust-flow direction):
 //   - Link          : parent-node  -> child-node
 //   - Constraint    : source_prop  -> dest_prop
-//   - DerivInput    : source_prop  -> deriv-vertex
-//   - Deriv output  : deriv-vertex -> output_prop
 
 fn check_cycles(graph: &Graph) -> Result<(), ObgraphError> {
     let n = graph.nodes.len();
     let p = graph.properties.len();
-    let d = graph.derivations.len();
-    let total = n + p + d;
+    let total = n + p;
 
     let node_vtx = |id: NodeId| -> usize { id.index() };
     let prop_vtx = |id: PropId| -> usize { n + id.index() };
-    let deriv_vtx = |id: DerivId| -> usize { n + p + id.index() };
 
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); total];
     let mut in_degree: Vec<usize> = vec![0; total];
@@ -293,18 +243,7 @@ fn check_cycles(graph: &Graph) -> Result<(), ObgraphError> {
             } => {
                 add_edge(prop_vtx(*source_prop), prop_vtx(*dest_prop));
             }
-            Edge::DerivInput {
-                source_prop,
-                target_deriv,
-            } => {
-                add_edge(prop_vtx(*source_prop), deriv_vtx(*target_deriv));
-            }
         }
-    }
-
-    // Derivation output edges: deriv -> output_prop.
-    for deriv in &graph.derivations {
-        add_edge(deriv_vtx(deriv.id), prop_vtx(deriv.output_prop));
     }
 
     // Kahn's algorithm.
@@ -328,7 +267,7 @@ fn check_cycles(graph: &Graph) -> Result<(), ObgraphError> {
 
     if visited != total {
         return Err(ObgraphError::Validation(
-            "cycle detected in the graph (anchors, constraints, and derivation edges form a cycle)"
+            "cycle detected in the graph (anchors and constraints form a cycle)"
                 .to_string(),
         ));
     }
@@ -354,7 +293,6 @@ mod tests {
         Graph {
             nodes: Vec::new(),
             properties: Vec::new(),
-            derivations: Vec::new(),
             edges: Vec::new(),
             domains: Vec::new(),
             prop_edges: HashMap::new(),
@@ -462,44 +400,6 @@ mod tests {
         assert!(validate(&g).is_ok());
     }
 
-    #[test]
-    fn valid_graph_with_derivation_passes() {
-        // root(p0, p1) -> child; deriv(p0 -> p1)
-        let mut g = single_root_graph();
-
-        g.properties.push(Property {
-            id: PropId(0),
-            node: NodeId(0),
-            name: "a".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.properties.push(Property {
-            id: PropId(1),
-            node: NodeId(0),
-            name: "b".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.nodes[0].properties = vec![PropId(0), PropId(1)];
-
-        g.derivations.push(Derivation {
-            id: DerivId(0),
-            operation: "hash".to_string(),
-            inputs: vec![PropId(0)],
-            output_prop: PropId(1),
-        });
-
-        let di_eid = EdgeId(g.edges.len() as u32);
-        g.edges.push(Edge::DerivInput {
-            source_prop: PropId(0),
-            target_deriv: DerivId(0),
-        });
-        g.prop_edges.entry(PropId(0)).or_default().push(di_eid);
-
-        assert!(validate(&g).is_ok());
-    }
-
     // ---------------------------------------------------------------------------
     // Duplicate node identifier
     // ---------------------------------------------------------------------------
@@ -601,7 +501,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Reference to nonexistent property (via Constraint / DerivInput)
+    // Reference to nonexistent property (via Constraint)
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -626,36 +526,6 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("nonexistent dest property"),
-            "unexpected error: {msg}"
-        );
-    }
-
-    #[test]
-    fn nonexistent_source_prop_in_deriv_input_fails() {
-        let mut g = single_root_graph();
-        g.properties.push(Property {
-            id: PropId(0),
-            node: NodeId(0),
-            name: "out".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.nodes[0].properties.push(PropId(0));
-        g.derivations.push(Derivation {
-            id: DerivId(0),
-            operation: "hash".to_string(),
-            inputs: vec![PropId(99)],
-            output_prop: PropId(0),
-        });
-        g.edges.push(Edge::DerivInput {
-            source_prop: PropId(99), // nonexistent
-            target_deriv: DerivId(0),
-        });
-
-        let err = validate(&g).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("nonexistent source property"),
             "unexpected error: {msg}"
         );
     }
@@ -817,76 +687,6 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Nullary derivation
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn nullary_derivation_fails() {
-        let mut g = single_root_graph();
-
-        g.properties.push(Property {
-            id: PropId(0),
-            node: NodeId(0),
-            name: "out".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.nodes[0].properties.push(PropId(0));
-
-        // Derivation with zero inputs.
-        g.derivations.push(Derivation {
-            id: DerivId(0),
-            operation: "constant".to_string(),
-            inputs: vec![], // zero inputs!
-            output_prop: PropId(0),
-        });
-
-        let err = validate(&g).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("zero inputs") || msg.contains("nullary"),
-            "unexpected error: {msg}"
-        );
-    }
-
-    #[test]
-    fn unary_derivation_passes() {
-        let mut g = single_root_graph();
-
-        g.properties.push(Property {
-            id: PropId(0),
-            node: NodeId(0),
-            name: "in".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.properties.push(Property {
-            id: PropId(1),
-            node: NodeId(0),
-            name: "out".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.nodes[0].properties = vec![PropId(0), PropId(1)];
-
-        g.derivations.push(Derivation {
-            id: DerivId(0),
-            operation: "hash".to_string(),
-            inputs: vec![PropId(0)],
-            output_prop: PropId(1),
-        });
-
-        let di_eid = EdgeId(g.edges.len() as u32);
-        g.edges.push(Edge::DerivInput {
-            source_prop: PropId(0),
-            target_deriv: DerivId(0),
-        });
-        g.prop_edges.entry(PropId(0)).or_default().push(di_eid);
-
-        assert!(validate(&g).is_ok());
-    }
-
-    // ---------------------------------------------------------------------------
     // Cycle detection — direct cycle
     // ---------------------------------------------------------------------------
 
@@ -969,104 +769,6 @@ mod tests {
             msg.contains("cycle") || msg.contains("@anchored"),
             "unexpected error: {msg}"
         );
-    }
-
-    // ---------------------------------------------------------------------------
-    // Cycle detection — transitive cycle through derivation
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn transitive_deriv_cycle_fails() {
-        // root has properties p0, p1.
-        // Derivation D: input=p1, output=p0.
-        // Constraint: p0 -> p1.
-        // Cycle: p0 --(constraint)--> p1 --(DerivInput)--> D --(output)--> p0.
-        let mut g = single_root_graph();
-
-        g.properties.push(Property {
-            id: PropId(0),
-            node: NodeId(0),
-            name: "a".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.properties.push(Property {
-            id: PropId(1),
-            node: NodeId(0),
-            name: "b".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.nodes[0].properties = vec![PropId(0), PropId(1)];
-
-        // Derivation: input p1 -> output p0
-        g.derivations.push(Derivation {
-            id: DerivId(0),
-            operation: "hash".to_string(),
-            inputs: vec![PropId(1)],
-            output_prop: PropId(0),
-        });
-
-        // DerivInput edge: p1 -> D0
-        g.edges.push(Edge::DerivInput {
-            source_prop: PropId(1),
-            target_deriv: DerivId(0),
-        });
-        // Constraint: p0 -> p1
-        g.edges.push(Edge::Constraint {
-            source_prop: PropId(0),
-            dest_prop: PropId(1),
-            operation: None,
-        });
-        // D0 output to p0 is encoded in Derivation.output_prop, not as an edge
-        // in the edge list — but check_cycles reads it from derivations directly.
-
-        let err = validate(&g).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("cycle"), "unexpected error: {msg}");
-    }
-
-    // ---------------------------------------------------------------------------
-    // Cycle detection — acyclic derivation graph passes
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn acyclic_deriv_graph_passes() {
-        // root: p0 --(DerivInput)--> D0 --(output)--> p1
-        // No back-edge.
-        let mut g = single_root_graph();
-
-        g.properties.push(Property {
-            id: PropId(0),
-            node: NodeId(0),
-            name: "in".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.properties.push(Property {
-            id: PropId(1),
-            node: NodeId(0),
-            name: "out".to_string(),
-            critical: true,
-            constrained: false,
-        });
-        g.nodes[0].properties = vec![PropId(0), PropId(1)];
-
-        g.derivations.push(Derivation {
-            id: DerivId(0),
-            operation: "hash".to_string(),
-            inputs: vec![PropId(0)],
-            output_prop: PropId(1),
-        });
-
-        let di_eid = EdgeId(g.edges.len() as u32);
-        g.edges.push(Edge::DerivInput {
-            source_prop: PropId(0),
-            target_deriv: DerivId(0),
-        });
-        g.prop_edges.entry(PropId(0)).or_default().push(di_eid);
-
-        assert!(validate(&g).is_ok());
     }
 
     // ---------------------------------------------------------------------------

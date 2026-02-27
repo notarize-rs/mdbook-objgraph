@@ -29,11 +29,6 @@ pub fn css() -> &'static str {
   --obg-domain-border: #cbd5e1;
   --obg-domain-label: #64748b;
 
-  /* Derivation pills */
-  --obg-pill-bg: #f8fafc;
-  --obg-pill-border: #cbd5e1;
-  --obg-pill-text: #64748b;
-
   background: #ffffff;
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 10px;
@@ -74,13 +69,6 @@ pub fn css() -> &'static str {
   stroke-width: 2px;
 }
 
-/* Derivation edges — blue (same as constraints) */
-.obgraph-deriv-edge {
-  fill: none;
-  stroke: var(--obg-constraint-valid);
-  stroke-width: 1px;
-}
-
 /* Intra-domain constraint — blue, 1px */
 .obgraph-constraint {
   fill: none;
@@ -88,7 +76,7 @@ pub fn css() -> &'static str {
   stroke-width: 1px;
 }
 
-/* Invalid constraint/derivation edges — red dashed, 1px */
+/* Invalid constraint edges — red dashed, 1px */
 .obgraph-constraint-invalid {
   fill: none;
   stroke: var(--obg-problem);
@@ -215,21 +203,6 @@ pub fn css() -> &'static str {
 /* Problem indicator dots */
 .obgraph-node-dot, .obgraph-prop-dot {
   fill: var(--obg-problem);
-}
-
-/* Derivation pill shape */
-.obgraph-pill {
-  fill: var(--obg-pill-bg);
-  stroke: var(--obg-pill-border);
-  stroke-width: 1px;
-}
-
-/* Derivation pill label — monospace */
-.obgraph-pill-label {
-  fill: var(--obg-pill-text);
-  font-size: 8px;
-  text-anchor: middle;
-  font-family: Menlo, Consolas, monospace;
 }
 
 /* Arrowhead fills are set directly on marker <path> elements via fill attr.

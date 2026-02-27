@@ -5,10 +5,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::model::types::{DerivId, DomainId, Edge, EdgeId, Graph, NodeId};
+use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId};
 
 use super::{
-    DerivLayout, DomainLayout, EndpointRole, NodeLayout, PortSide, PortSideAssignment,
+    DomainLayout, EndpointRole, NodeLayout, PortSide, PortSideAssignment,
     CHANNEL_GAP, CORRIDOR_PAD, DOMAIN_PADDING, DOMAIN_TITLE_HEIGHT, INTER_NODE_GAP,
 };
 
@@ -220,18 +220,6 @@ fn build_cross_domain_adjacency(
                 graph.nodes[graph.properties[source_prop.index()].node.index()].domain,
                 graph.nodes[graph.properties[dest_prop.index()].node.index()].domain,
             ),
-            Edge::DerivInput {
-                source_prop,
-                target_deriv,
-            } => {
-                let src_node = graph.properties[source_prop.index()].node;
-                let deriv = &graph.derivations[target_deriv.index()];
-                let tgt_node = graph.properties[deriv.output_prop.index()].node;
-                (
-                    graph.nodes[src_node.index()].domain,
-                    graph.nodes[tgt_node.index()].domain,
-                )
-            }
         };
 
         if let (Some(sd), Some(td)) = (src_domain, tgt_domain)
@@ -545,15 +533,6 @@ fn count_cross_domain_channels(
                 let tn = graph.properties[dest_prop.index()].node;
                 (sn, tn, graph.nodes[sn.index()].domain, graph.nodes[tn.index()].domain)
             }
-            Edge::DerivInput {
-                source_prop,
-                target_deriv,
-            } => {
-                let sn = graph.properties[source_prop.index()].node;
-                let deriv = &graph.derivations[target_deriv.index()];
-                let tn = graph.properties[deriv.output_prop.index()].node;
-                (sn, tn, graph.nodes[sn.index()].domain, graph.nodes[tn.index()].domain)
-            }
         };
 
         // Only cross-domain edges.
@@ -731,30 +710,27 @@ fn reposition_to_columns(
     }
 }
 
-/// A vertical element in a column: either a domain block, a free node, or a
-/// cross-domain derivation.
+/// A vertical element in a column: either a domain block or a free node.
 #[derive(Debug, Clone, Copy)]
 enum ColumnElement {
     Domain(usize), // index into domain_layouts
     FreeNode(NodeId),
-    CrossDomainDeriv(DerivId),
 }
 
 /// Compact vertical separation for all column elements.
 ///
 /// After compound layer assignment + Brandes-Köpf, nodes are correctly ordered
 /// but the vertical spacing is inflated by empty gap layers. This pass walks
-/// each column top-to-bottom and places elements (domains, free nodes,
-/// cross-domain derivations) with tight `INTER_NODE_GAP` spacing.
+/// each column top-to-bottom and places elements (domains, free nodes)
+/// with tight `INTER_NODE_GAP` spacing.
 ///
-/// Replaces the old `separate_domains_vertically` + `reposition_cross_domain_derivations`.
+/// Replaces the old `separate_domains_vertically`.
 pub fn separate_column_elements_vertically(
     node_layouts: &mut [NodeLayout],
-    deriv_layouts: &mut [DerivLayout],
     domain_layouts: &mut [DomainLayout],
     graph: &Graph,
 ) {
-    if domain_layouts.is_empty() && deriv_layouts.is_empty() {
+    if domain_layouts.is_empty() {
         return;
     }
 
@@ -805,66 +781,6 @@ pub fn separate_column_elements_vertically(
         }
     }
 
-    // Add cross-domain derivations.
-    // Use connected-node y-centers for sort key rather than the derivation's
-    // own stale y-coordinate (which was set by Brandes-Kopf before columnar
-    // layout shifted nodes).
-    for deriv in &graph.derivations {
-        let input_domains: Vec<Option<DomainId>> = deriv
-            .inputs
-            .iter()
-            .map(|&pid| graph.nodes[graph.properties[pid.index()].node.index()].domain)
-            .collect();
-        let output_domain =
-            graph.nodes[graph.properties[deriv.output_prop.index()].node.index()].domain;
-
-        let all_same_domain = {
-            let mut all_doms: Vec<Option<DomainId>> = input_domains.clone();
-            all_doms.push(output_domain);
-            all_doms.iter().all(|d| *d == all_doms[0]) && all_doms[0].is_some()
-        };
-
-        if !all_same_domain {
-            // Compute sort key from input node positions: just below the
-            // lowest input node.  This places the derivation immediately
-            // after the last input domain in the column, which is the
-            // natural reading order.  We do NOT include the output node
-            // (which may be in a different column with a very different y).
-            let mut input_bottom_y = f64::NEG_INFINITY;
-            for &input_prop in &deriv.inputs {
-                let src_node = graph.properties[input_prop.index()].node;
-                let nl = &node_layouts[src_node.index()];
-                input_bottom_y = input_bottom_y.max(nl.y + nl.height);
-            }
-            let y_sort_key = if input_bottom_y.is_finite() {
-                // Tiny offset past the last input node bottom, so the
-                // derivation sorts right after its input nodes' domains.
-                input_bottom_y + 1.0
-            } else {
-                deriv_layouts[deriv.id.index()].y + deriv_layouts[deriv.id.index()].height / 2.0
-            };
-
-            // Compute column from connected-node x-centers (not stale deriv x).
-            let mut input_x_sum = 0.0_f64;
-            let mut input_count = 0usize;
-            for &input_prop in &deriv.inputs {
-                let src_node = graph.properties[input_prop.index()].node;
-                let nl = &node_layouts[src_node.index()];
-                input_x_sum += nl.x + nl.width / 2.0;
-                input_count += 1;
-            }
-            let cx = if input_count > 0 {
-                input_x_sum / input_count as f64
-            } else {
-                let dl = &deriv_layouts[deriv.id.index()];
-                dl.x + dl.width / 2.0
-            };
-            let col = assign_column(cx);
-
-            columns[col].push((ColumnElement::CrossDomainDeriv(deriv.id), y_sort_key));
-        }
-    }
-
     // Step 3: Sort each column by current y-center.
     for col in &mut columns {
         col.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -906,11 +822,6 @@ pub fn separate_column_elements_vertically(
                     let nl = &mut node_layouts[nid.index()];
                     nl.y = target_top;
                     cursor = nl.y + nl.height;
-                }
-                ColumnElement::CrossDomainDeriv(did) => {
-                    let dl = &mut deriv_layouts[did.index()];
-                    dl.y = target_top;
-                    cursor = dl.y + dl.height;
                 }
             }
         }
@@ -1327,7 +1238,6 @@ mod tests {
         Graph {
             nodes,
             properties: Vec::new(),
-            derivations: Vec::new(),
             edges: Vec::new(),
             domains,
             prop_edges: HashMap::new(),

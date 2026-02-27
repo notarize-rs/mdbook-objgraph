@@ -2,13 +2,10 @@
 
 use std::collections::HashMap;
 
-use crate::parse::ast::{AstDerivationExpr, AstGraph, AstSourceExpr};
-use crate::parse::dedup::DerivDedup;
+use crate::parse::ast::AstGraph;
 use crate::ObgraphError;
 
-use super::types::{
-    DerivId, Derivation, Domain, DomainId, Edge, EdgeId, Graph, Node, NodeId, PropId, Property,
-};
+use super::types::{Domain, DomainId, Edge, EdgeId, Graph, Node, NodeId, PropId, Property};
 use super::validate;
 
 // ---------------------------------------------------------------------------
@@ -18,7 +15,6 @@ use super::validate;
 struct Builder {
     nodes: Vec<Node>,
     properties: Vec<Property>,
-    derivations: Vec<Derivation>,
     edges: Vec<Edge>,
     domains: Vec<Domain>,
 
@@ -31,12 +27,6 @@ struct Builder {
 
     /// Map from node_ident -> NodeId for quick lookup.
     node_lookup: HashMap<String, NodeId>,
-
-    /// Map from normalized derivation string -> DerivId for deduplication.
-    /// The corresponding output PropId is stored in the Derivation itself.
-    deriv_lookup: HashMap<String, DerivId>,
-
-    dedup: DerivDedup,
 }
 
 impl Builder {
@@ -44,7 +34,6 @@ impl Builder {
         Self {
             nodes: Vec::new(),
             properties: Vec::new(),
-            derivations: Vec::new(),
             edges: Vec::new(),
             domains: Vec::new(),
             prop_edges: HashMap::new(),
@@ -52,8 +41,6 @@ impl Builder {
             node_parent: HashMap::new(),
             prop_lookup: HashMap::new(),
             node_lookup: HashMap::new(),
-            deriv_lookup: HashMap::new(),
-            dedup: DerivDedup::new(),
         }
     }
 
@@ -67,10 +54,6 @@ impl Builder {
 
     fn next_prop_id(&self) -> PropId {
         PropId(self.properties.len() as u32)
-    }
-
-    fn next_deriv_id(&self) -> DerivId {
-        DerivId(self.derivations.len() as u32)
     }
 
     fn next_edge_id(&self) -> EdgeId {
@@ -146,25 +129,6 @@ impl Builder {
         Ok(id)
     }
 
-    /// Allocate an ephemeral output property for a derivation.
-    /// The property is not critical and not constrained — it never gates
-    /// node verification on its own.
-    fn alloc_deriv_output_prop(&mut self, node_id: NodeId, synth_name: &str) -> PropId {
-        let id = self.next_prop_id();
-        let prop = Property {
-            id,
-            node: node_id,
-            name: synth_name.to_string(),
-            critical: false,
-            constrained: false,
-        };
-        self.properties.push(prop);
-        // Ephemeral props are NOT registered in prop_lookup (they are
-        // not addressable by the user) and NOT added to the node's property
-        // list (they exist only in the edge graph).
-        id
-    }
-
     // -----------------------------------------------------------------------
     // Edge helpers
     // -----------------------------------------------------------------------
@@ -199,82 +163,6 @@ impl Builder {
     }
 
     // -----------------------------------------------------------------------
-    // Derivation processing
-    // -----------------------------------------------------------------------
-
-    /// Recursively ensure a derivation expression is allocated in the graph,
-    /// deduplicating by normalized string. Returns the output PropId of the
-    /// (possibly pre-existing) derivation node.
-    ///
-    /// `dest_node_id` is used only when we need to synthesize an ephemeral
-    /// output property — we attribute it to the destination node for
-    /// layout purposes.
-    fn ensure_derivation(
-        &mut self,
-        expr: &AstDerivationExpr,
-        dest_node_id: NodeId,
-    ) -> Result<PropId, ObgraphError> {
-        let key = expr.normalized();
-
-        // Fast path: already seen this derivation.
-        if let Some(&deriv_id) = self.deriv_lookup.get(&key) {
-            let output_prop = self.derivations[deriv_id.index()].output_prop;
-            return Ok(output_prop);
-        }
-
-        // Slow path: create a new derivation.
-        // 1. Resolve all input arguments to PropIds.
-        let mut input_prop_ids: Vec<PropId> = Vec::new();
-        for arg in &expr.args {
-            let input_pid = self.resolve_source_to_prop(arg, dest_node_id)?;
-            input_prop_ids.push(input_pid);
-        }
-
-        // 2. Allocate an ephemeral output property for this derivation.
-        let deriv_id = self.next_deriv_id();
-        let synth_name = format!("__deriv_{}", deriv_id.0);
-        let output_prop = self.alloc_deriv_output_prop(dest_node_id, &synth_name);
-
-        // 3. Allocate the derivation.
-        let deriv = Derivation {
-            id: deriv_id,
-            operation: expr.function.clone(),
-            inputs: input_prop_ids.clone(),
-            output_prop,
-        };
-        self.derivations.push(deriv);
-        self.deriv_lookup.insert(key, deriv_id);
-
-        // 4. Create DerivInput edges for each input.
-        for src_pid in input_prop_ids {
-            let eid = self.push_edge(Edge::DerivInput {
-                source_prop: src_pid,
-                target_deriv: deriv_id,
-            });
-            self.record_prop_edge(src_pid, eid);
-        }
-
-        Ok(output_prop)
-    }
-
-    /// Resolve any AstSourceExpr to a PropId (possibly creating derivations).
-    fn resolve_source_to_prop(
-        &mut self,
-        source: &AstSourceExpr,
-        dest_node_id: NodeId,
-    ) -> Result<PropId, ObgraphError> {
-        match source {
-            AstSourceExpr::PropRef {
-                node_ident,
-                prop_name,
-            } => self.resolve_prop(node_ident, prop_name),
-            AstSourceExpr::Derivation(deriv_expr) => {
-                self.ensure_derivation(deriv_expr, dest_node_id)
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // Final graph assembly
     // -----------------------------------------------------------------------
 
@@ -282,7 +170,6 @@ impl Builder {
         Graph {
             nodes: self.nodes,
             properties: self.properties,
-            derivations: self.derivations,
             edges: self.edges,
             domains: self.domains,
             prop_edges: self.prop_edges,
@@ -299,11 +186,10 @@ impl Builder {
 /// Build a validated `Graph` from a parsed AST.
 ///
 /// This function:
-/// 1. Allocates all nodes, properties, derivations, domains.
+/// 1. Allocates all nodes, properties, domains.
 /// 2. Resolves all references (node idents, property names).
-/// 3. Deduplicates derivation expressions.
-/// 4. Builds the adjacency indices (prop_edges, node_children, node_parent).
-/// 5. Runs validation.
+/// 3. Builds the adjacency indices (prop_edges, node_children, node_parent).
+/// 4. Runs validation.
 ///
 /// Returns the immutable `Graph` or an error.
 pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
@@ -386,18 +272,9 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
     // ------------------------------------------------------------------
     // Phase 4: Process constraints.
     // ------------------------------------------------------------------
-    // We collect constraints first so we can borrow ast without mutable
-    // aliasing issues while mutating `b`.
-    let constraints: Vec<_> = ast.constraints.iter().collect();
-
-    for ast_constraint in constraints {
-        let dest_node_id = b.resolve_node(&ast_constraint.dest_node)?;
+    for ast_constraint in &ast.constraints {
         let dest_prop_id = b.resolve_prop(&ast_constraint.dest_node, &ast_constraint.dest_prop)?;
-
-        // Dedup the source expression (for derivations).
-        let deduped_source = b.dedup.dedup(ast_constraint.source.clone());
-
-        let source_prop_id = b.resolve_source_to_prop(&deduped_source, dest_node_id)?;
+        let source_prop_id = b.resolve_prop(&ast_constraint.source_node, &ast_constraint.source_prop)?;
 
         let eid = b.push_edge(Edge::Constraint {
             dest_prop: dest_prop_id,
@@ -425,8 +302,7 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
 mod tests {
     use super::*;
     use crate::parse::ast::{
-        AstAnchor, AstConstraint, AstDerivationExpr, AstDomain, AstGraph, AstNode, AstProperty,
-        AstSourceExpr,
+        AstAnchor, AstConstraint, AstDomain, AstGraph, AstNode, AstProperty,
     };
 
     // Helper to build a minimal AstNode (non-root).
@@ -453,13 +329,6 @@ mod tests {
         }
     }
 
-    fn prop_ref(node: &str, prop: &str) -> AstSourceExpr {
-        AstSourceExpr::PropRef {
-            node_ident: node.to_string(),
-            prop_name: prop.to_string(),
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Test: empty graph
     // -----------------------------------------------------------------------
@@ -477,7 +346,6 @@ mod tests {
         assert_eq!(g.properties.len(), 0);
         assert_eq!(g.edges.len(), 0);
         assert_eq!(g.domains.len(), 0);
-        assert_eq!(g.derivations.len(), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -580,28 +448,32 @@ mod tests {
                 AstConstraint {
                     dest_node: "cert".to_string(),
                     dest_prop: "issuer.common_name".to_string(),
-                    source: prop_ref("ca", "subject.common_name"),
+                    source_node: "ca".to_string(),
+                    source_prop: "subject.common_name".to_string(),
                     operation: Some("equality".to_string()),
                 },
                 // ca::subject.org -> cert::issuer.org
                 AstConstraint {
                     dest_node: "cert".to_string(),
                     dest_prop: "issuer.org".to_string(),
-                    source: prop_ref("ca", "subject.org"),
+                    source_node: "ca".to_string(),
+                    source_prop: "subject.org".to_string(),
                     operation: Some("equality".to_string()),
                 },
                 // ca::public_key -> cert::signature
                 AstConstraint {
                     dest_node: "cert".to_string(),
                     dest_prop: "signature".to_string(),
-                    source: prop_ref("ca", "public_key"),
+                    source_node: "ca".to_string(),
+                    source_prop: "public_key".to_string(),
                     operation: Some("verified_by".to_string()),
                 },
                 // revocation::crl -> cert::subject.common_name
                 AstConstraint {
                     dest_node: "cert".to_string(),
                     dest_prop: "subject.common_name".to_string(),
-                    source: prop_ref("revocation", "crl"),
+                    source_node: "revocation".to_string(),
+                    source_prop: "crl".to_string(),
                     operation: Some("not_in".to_string()),
                 },
             ],
@@ -811,158 +683,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: derivation expressions
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_derivation_simple() {
-        // Two nodes: signer (public_key @constrained) and verifier (sig @critical).
-        // signer is a root; verifier is a child of signer via Anchor.
-        // Constraint: verifier::sig <= verify(signer::public_key) : verified_by
-        let ast = AstGraph {
-            domains: vec![],
-            nodes: vec![
-                ast_node_root("signer", vec![("public_key", false, true)], true),  // @constrained
-                ast_node("verifier", vec![("sig", true, false)]),                   // @critical
-            ],
-            anchors: vec![AstAnchor {
-                child_ident: "verifier".to_string(),
-                parent_ident: "signer".to_string(),
-                operation: None,
-            }],
-            constraints: vec![AstConstraint {
-                dest_node: "verifier".to_string(),
-                dest_prop: "sig".to_string(),
-                source: AstSourceExpr::Derivation(AstDerivationExpr {
-                    function: "verify".to_string(),
-                    args: vec![prop_ref("signer", "public_key")],
-                }),
-                operation: Some("verified_by".to_string()),
-            }],
-        };
-
-        let g = build(ast).expect("derivation graph should build");
-
-        // One derivation should be created.
-        assert_eq!(g.derivations.len(), 1);
-        let deriv = &g.derivations[0];
-        assert_eq!(deriv.id, DerivId(0));
-        assert_eq!(deriv.operation, "verify");
-        assert_eq!(deriv.inputs.len(), 1);
-        assert_eq!(deriv.inputs[0], PropId(0)); // signer::public_key
-
-        // The output_prop is an ephemeral property beyond the declared ones.
-        // Declared: P0=signer::public_key, P1=verifier::sig
-        // Ephemeral output: P2
-        assert_eq!(deriv.output_prop, PropId(2));
-
-        // Edges: E0=Anchor(signer->verifier), E1=DerivInput(P0->D0), E2=Constraint(P2->P1)
-        assert_eq!(g.edges.len(), 3);
-        assert!(g.edges[0].is_anchor());
-        assert!(g.edges[1].is_deriv_input());
-        assert!(g.edges[2].is_constraint());
-
-        match &g.edges[1] {
-            Edge::DerivInput {
-                source_prop,
-                target_deriv,
-            } => {
-                assert_eq!(*source_prop, PropId(0));
-                assert_eq!(*target_deriv, DerivId(0));
-            }
-            _ => panic!("expected DerivInput"),
-        }
-
-        match &g.edges[2] {
-            Edge::Constraint {
-                dest_prop,
-                source_prop,
-                operation,
-            } => {
-                assert_eq!(*dest_prop, PropId(1));   // verifier::sig
-                assert_eq!(*source_prop, PropId(2)); // deriv output
-                assert_eq!(operation.as_deref(), Some("verified_by"));
-            }
-            _ => panic!("expected Constraint"),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Test: derivation deduplication
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_derivation_deduplication() {
-        // Two constraints with identical derivation expressions.
-        // Both should resolve to the same DerivId and output_prop.
-        let deriv_expr = AstSourceExpr::Derivation(AstDerivationExpr {
-            function: "hash".to_string(),
-            args: vec![prop_ref("src", "data")],
-        });
-
-        let ast = AstGraph {
-            domains: vec![],
-            nodes: vec![
-                // src is a root; dst is a child of src via Anchor.
-                ast_node_root("src", vec![("data", false, true)], true),  // @constrained
-                ast_node(
-                    "dst",
-                    vec![
-                        ("hash_a", true, false),  // @critical
-                        ("hash_b", true, false),  // @critical
-                    ],
-                ),
-            ],
-            anchors: vec![AstAnchor {
-                child_ident: "dst".to_string(),
-                parent_ident: "src".to_string(),
-                operation: None,
-            }],
-            constraints: vec![
-                AstConstraint {
-                    dest_node: "dst".to_string(),
-                    dest_prop: "hash_a".to_string(),
-                    source: deriv_expr.clone(),
-                    operation: None,
-                },
-                AstConstraint {
-                    dest_node: "dst".to_string(),
-                    dest_prop: "hash_b".to_string(),
-                    source: deriv_expr.clone(),
-                    operation: None,
-                },
-            ],
-        };
-
-        let g = build(ast).expect("dedup graph should build");
-
-        // Only one derivation should exist.
-        assert_eq!(g.derivations.len(), 1);
-
-        // Both constraint edges should reference the same source_prop (the
-        // derivation's output_prop).
-        let constraint_edges: Vec<_> = g
-            .edges
-            .iter()
-            .filter(|e| e.is_constraint())
-            .collect();
-        assert_eq!(constraint_edges.len(), 2);
-
-        let src0 = match &constraint_edges[0] {
-            Edge::Constraint { source_prop, .. } => *source_prop,
-            _ => panic!(),
-        };
-        let src1 = match &constraint_edges[1] {
-            Edge::Constraint { source_prop, .. } => *source_prop,
-            _ => panic!(),
-        };
-
-        // Both constraints share the same derivation output prop.
-        assert_eq!(src0, src1);
-        assert_eq!(src0, g.derivations[0].output_prop);
-    }
-
-    // -----------------------------------------------------------------------
     // Test: duplicate node ident is rejected
     // -----------------------------------------------------------------------
 
@@ -1019,7 +739,8 @@ mod tests {
             constraints: vec![AstConstraint {
                 dest_node: "b".to_string(),
                 dest_prop: "y".to_string(),
-                source: prop_ref("a", "NONEXISTENT"),
+                source_node: "a".to_string(),
+                source_prop: "NONEXISTENT".to_string(),
                 operation: None,
             }],
         };
@@ -1054,63 +775,5 @@ mod tests {
             constraints: vec![],
         };
         assert!(build(ast).is_err());
-    }
-
-    // -----------------------------------------------------------------------
-    // Test: nested derivation
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_nested_derivation() {
-        // verifier::out <= outer(inner(src::x))
-        let inner = AstSourceExpr::Derivation(AstDerivationExpr {
-            function: "inner".to_string(),
-            args: vec![prop_ref("src", "x")],
-        });
-        let outer = AstSourceExpr::Derivation(AstDerivationExpr {
-            function: "outer".to_string(),
-            args: vec![inner],
-        });
-
-        let ast = AstGraph {
-            domains: vec![],
-            nodes: vec![
-                // src is root; verifier is its child.
-                ast_node_root("src", vec![("x", false, true)], true),     // @constrained
-                ast_node("verifier", vec![("out", true, false)]),          // @critical
-            ],
-            anchors: vec![AstAnchor {
-                child_ident: "verifier".to_string(),
-                parent_ident: "src".to_string(),
-                operation: None,
-            }],
-            constraints: vec![AstConstraint {
-                dest_node: "verifier".to_string(),
-                dest_prop: "out".to_string(),
-                source: outer,
-                operation: None,
-            }],
-        };
-
-        let g = build(ast).expect("nested derivation should build");
-
-        // Should create two derivations: inner and outer.
-        assert_eq!(g.derivations.len(), 2);
-
-        // inner derivation takes src::x (P0) as input.
-        let inner_deriv = g
-            .derivations
-            .iter()
-            .find(|d| d.operation == "inner")
-            .expect("inner derivation");
-        assert_eq!(inner_deriv.inputs, vec![PropId(0)]);
-
-        // outer derivation takes inner's output as input.
-        let outer_deriv = g
-            .derivations
-            .iter()
-            .find(|d| d.operation == "outer")
-            .expect("outer derivation");
-        assert_eq!(outer_deriv.inputs, vec![inner_deriv.output_prop]);
     }
 }

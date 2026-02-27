@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use super::types::{DerivId, Edge, Graph, NodeId, PropId};
+use super::types::{Edge, Graph, NodeId, PropId};
 
 /// The result of state propagation: per-node anchored status and per-property
 /// constrained status.
@@ -53,14 +53,6 @@ pub fn propagate(graph: &Graph) -> StateResult {
     let mut constrained_eff: HashMap<PropId, bool> =
         graph.properties.iter().map(|p| (p.id, p.constrained)).collect();
 
-    // --- Build a reverse index: PropId → Vec<DerivId> ---
-    let mut prop_to_derivs: HashMap<PropId, Vec<DerivId>> = HashMap::new();
-    for deriv in &graph.derivations {
-        for &inp in &deriv.inputs {
-            prop_to_derivs.entry(inp).or_default().push(deriv.id);
-        }
-    }
-
     // --- Helper: check if a node is verified ---
     let verified = |nid: NodeId,
                     anchored: &HashMap<NodeId, bool>,
@@ -107,7 +99,7 @@ pub fn propagate(graph: &Graph) -> StateResult {
             let prop = &graph.properties[p.index()];
             let nid = prop.node;
 
-            // Constraints and derivations only fire from anchored nodes.
+            // Constraints only fire from anchored nodes.
             // Note: we require anchored (not verified) so that same-node
             // constraints on trust-root nodes can bootstrap — e.g.
             // ARK::issuer <= ARK::subject fires when subject is constrained
@@ -130,26 +122,6 @@ pub fn propagate(graph: &Graph) -> StateResult {
                             *dest_entry = true;
                             prop_worklist.push_back(*dest_prop);
                             progress = true;
-                        }
-                    }
-                }
-
-                // Propagate through Derivations where p is an input.
-                if let Some(deriv_ids) = prop_to_derivs.get(&p) {
-                    for &did in deriv_ids {
-                        let deriv = &graph.derivations[did.index()];
-                        let all_inputs = deriv.inputs.iter().all(|inp| {
-                            constrained_eff.get(inp).copied().unwrap_or(false)
-                        });
-                        if all_inputs {
-                            let out = deriv.output_prop;
-                            let out_entry =
-                                constrained_eff.entry(out).or_insert(false);
-                            if !*out_entry {
-                                *out_entry = true;
-                                prop_worklist.push_back(out);
-                                progress = true;
-                            }
                         }
                     }
                 }
@@ -212,7 +184,7 @@ mod tests {
 
     use super::*;
     use crate::model::types::{
-        Derivation, Edge, EdgeId, Graph, Node, NodeId, Property, PropId,
+        Edge, EdgeId, Graph, Node, NodeId, Property, PropId,
     };
 
     // -----------------------------------------------------------------------
@@ -231,12 +203,6 @@ mod tests {
                     ..
                 } => {
                     map.entry(*dest_prop).or_default().push(eid);
-                    map.entry(*source_prop).or_default().push(eid);
-                }
-                Edge::DerivInput {
-                    source_prop,
-                    target_deriv: _,
-                } => {
                     map.entry(*source_prop).or_default().push(eid);
                 }
                 Edge::Anchor { .. } => {}
@@ -270,7 +236,6 @@ mod tests {
     fn make_graph(
         nodes: Vec<Node>,
         properties: Vec<Property>,
-        derivations: Vec<Derivation>,
         edges: Vec<Edge>,
     ) -> Graph {
         let prop_edges = build_prop_edges(&edges);
@@ -278,7 +243,6 @@ mod tests {
         Graph {
             nodes,
             properties,
-            derivations,
             edges,
             domains: vec![],
             prop_edges,
@@ -323,7 +287,7 @@ mod tests {
             prop(0, 0, "p0", false, true),
             prop(1, 0, "p1", false, true),
         ];
-        let graph = make_graph(nodes, properties, vec![], vec![]);
+        let graph = make_graph(nodes, properties, vec![]);
 
         let state = propagate(&graph);
 
@@ -369,7 +333,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let state = propagate(&graph);
 
@@ -403,7 +367,7 @@ mod tests {
             child: NodeId(1),
             operation: None,
         }];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let state = propagate(&graph);
 
@@ -421,123 +385,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 4: derivation — all inputs constrained → output constrained.
-    //
-    // root has P0 and P1 (@constrained).
-    // child has P2 (@critical, derivation output).
-    // Derivation D0: inputs=[P0,P1], output=P2.
-    // When P0 and P1 both constrained on verified root → D0 fires → P2
-    // constrained → child verified (P2 is the only critical prop).
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn derivation_all_inputs_constrained() {
-        let nodes = vec![
-            node(0, "root", vec![PropId(0), PropId(1)], true),
-            node(1, "child", vec![PropId(2)], false),
-        ];
-        let properties = vec![
-            prop(0, 0, "p0", false, true),
-            prop(1, 0, "p1", false, true),
-            // P2 is the derivation output — @critical, starts unconstrained
-            prop(2, 1, "p2_deriv_out", true, false),
-        ];
-        let derivations = vec![Derivation {
-            id: DerivId(0),
-            operation: "combine".to_string(),
-            inputs: vec![PropId(0), PropId(1)],
-            output_prop: PropId(2),
-        }];
-        let edges = vec![
-            Edge::Anchor {
-                parent: NodeId(0),
-                child: NodeId(1),
-                operation: None,
-            },
-            Edge::DerivInput {
-                source_prop: PropId(0),
-                target_deriv: DerivId(0),
-            },
-            Edge::DerivInput {
-                source_prop: PropId(1),
-                target_deriv: DerivId(0),
-            },
-        ];
-        let graph = make_graph(nodes, properties, derivations, edges);
-
-        let state = propagate(&graph);
-
-        assert!(state.is_prop_constrained(PropId(0)), "P0 @constrained → constrained");
-        assert!(state.is_prop_constrained(PropId(1)), "P1 @constrained → constrained");
-        assert!(
-            state.is_prop_constrained(PropId(2)),
-            "P2 deriv output: all inputs constrained → constrained"
-        );
-        assert!(state.is_node_anchored(NodeId(1)), "child anchored (parent verified)");
-        assert!(state.is_node_verified(&graph, NodeId(1)), "child verified (P2 constrained)");
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 5: derivation — one input unconstrained → output unconstrained.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn derivation_one_input_unconstrained() {
-        // root has P0 (@constrained) and P1 (@critical, no constraint → unconstrained).
-        // Derivation D0: inputs=[P0,P1], output=P2.
-        // Since P1 is unconstrained, D0 doesn't fire → P2 stays at its annotation.
-        // But P2 has constrained: true (annotation), so it IS constrained.
-        // The derivation doesn't fire because P1 is not constrained.
-        // However P2's annotation-constrained status is independent.
-
-        let nodes = vec![
-            node(0, "root", vec![PropId(0), PropId(1)], true),
-            node(1, "child", vec![PropId(2)], false),
-        ];
-        let properties = vec![
-            prop(0, 0, "p0", false, true),
-            prop(1, 0, "p1", true, false), // no incoming constraint
-            // P2 has constrained: false to truly test derivation non-firing
-            prop(2, 1, "p2_deriv_out", false, false),
-        ];
-        let derivations = vec![Derivation {
-            id: DerivId(0),
-            operation: "combine".to_string(),
-            inputs: vec![PropId(0), PropId(1)],
-            output_prop: PropId(2),
-        }];
-        let edges = vec![
-            Edge::Anchor {
-                parent: NodeId(0),
-                child: NodeId(1),
-                operation: None,
-            },
-            Edge::DerivInput {
-                source_prop: PropId(0),
-                target_deriv: DerivId(0),
-            },
-            Edge::DerivInput {
-                source_prop: PropId(1),
-                target_deriv: DerivId(0),
-            },
-        ];
-        let graph = make_graph(nodes, properties, derivations, edges);
-
-        let state = propagate(&graph);
-
-        assert!(state.is_prop_constrained(PropId(0)), "P0 @constrained → constrained");
-        assert!(
-            !state.is_prop_constrained(PropId(1)),
-            "P1 @critical, no constraint → unconstrained"
-        );
-        assert!(
-            !state.is_prop_constrained(PropId(2)),
-            "P2 deriv output: P1 unconstrained → derivation doesn't fire"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 6: PKI example from Appendix A.5.
+    // Test 4: PKI example from Appendix A.5.
     //
     // Nodes:
     //   ca        @anchored   properties: P0(subject.common_name, @constrained),
@@ -670,7 +518,7 @@ mod tests {
             },
         ];
 
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
         let state = propagate(&graph);
 
         // Root nodes: anchored and verified (no critical props)
@@ -711,7 +559,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 7: self-referential constraint on anchored root (ARK-style).
+    // Test 5: self-referential constraint on anchored root (ARK-style).
     //
     // root @anchored:
     //   P0 (subject)      @constrained
@@ -758,7 +606,7 @@ mod tests {
                 operation: None,
             },
         ];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let state = propagate(&graph);
 
@@ -791,7 +639,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 8: self-referential constraint should NOT fire on non-anchored node.
+    // Test 6: self-referential constraint should NOT fire on non-anchored node.
     //
     // A non-anchored node with a same-node constraint should NOT propagate
     // because constraint firing requires the node to be anchored.
@@ -814,7 +662,7 @@ mod tests {
             dest_prop: PropId(1),
             operation: None,
         }];
-        let graph = make_graph(nodes, properties, vec![], edges);
+        let graph = make_graph(nodes, properties, edges);
 
         let state = propagate(&graph);
 
