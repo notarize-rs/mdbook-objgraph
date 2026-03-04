@@ -93,13 +93,9 @@ fn sev_snp_quality_summary() {
     let input = include_str!("sev_snp_input.obgraph");
     let report = run_quality(input);
     eprintln!("{}", report.summary());
-    // Known requirement violations (tracked for regression):
-    //   - 6 channel collisions (from bundle routing merge)
-    //   - 4 labels occluded by nodes
-    // As layout improves, tighten this threshold toward zero.
     assert!(
-        report.error_count() <= 11,
-        "SEV-SNP should have at most 11 requirement violations (got {}):\n{}",
+        report.error_count() == 0,
+        "SEV-SNP should have zero requirement violations (got {}):\n{}",
         report.error_count(),
         report.summary()
     );
@@ -199,19 +195,12 @@ fn sev_snp_realistic_quality_summary() {
             eprintln!("    {} x {}", describe_edge(&graph, *a), describe_edge(&graph, *b));
         }
     }
-    // With derivation constraints removed, the graph topology changed
-    // significantly (KDS/NVD nodes lost their connections). This produces
-    // some layout violations that are inherent to the new topology.
-    // Track the violation count to prevent further regression.
-    let violation_count = report.inter_domain_edges_in_intra_corridors.len()
-        + report.channel_collisions.len()
-        + report.labels_hidden_under_nodes.len()
-        + report.labels_occluded_by_nodes.len()
-        + report.node_overlaps.len();
+    // All requirement violations should be zero: no inter-domain edges in
+    // intra-corridors, no channel collisions, no label/node overlaps.
     assert!(
-        violation_count <= 11,
-        "Realistic SEV-SNP should have at most 11 violations (got {}):\n{}",
-        violation_count,
+        report.error_count() == 0,
+        "Realistic SEV-SNP should have zero requirement violations (got {}):\n{}",
+        report.error_count(),
         report.summary()
     );
 }
