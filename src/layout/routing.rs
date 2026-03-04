@@ -1,4 +1,87 @@
 //! Orthogonal channel-based edge routing (DESIGN.md §4.2.6).
+//!
+//! # Edge Routing Architecture
+//!
+//! All edge routing is centralized in this module. The pipeline is:
+//!
+//! 1. **Port side assignment** (`refine_port_sides`): Determines which side
+//!    (Left or Right) each property-level port exits the node. Uses coordinate-
+//!    space geometry to override the layer-space assignments from crossing
+//!    minimization.
+//!
+//! 2. **Corridor construction** (`build_corridors`): Creates vertical channel
+//!    regions alongside domains and in inter-column gaps. Three types:
+//!    - **Intra-domain corridors**: Left/right edges of each domain. Tagged
+//!      with `domain_ids`. Used by intra-domain bracket edges.
+//!    - **Inter-column gap corridors**: Between adjacent domain columns.
+//!      Empty `domain_ids`. Used by cross-column edges.
+//!    - **Outer corridors**: Left/right edges of the entire layout. Empty
+//!      `domain_ids`. Used by same-column cross-domain edges.
+//!
+//! 3. **Edge routing** (`route_all_edges` → `route_single_edge`): Routes each
+//!    edge through corridors using H-V-H or H-V-H-V-H segment patterns.
+//!
+//! # Corridor Selection Rules — DO NOT BREAK
+//!
+//! The `edge_domain` parameter controls corridor selection:
+//! - `Some(domain_id)` → **intra-domain edge**: only corridors tagged with
+//!   that domain ID.
+//! - `None` → **cross-domain edge**: only corridors with empty `domain_ids`
+//!   (gap or outer corridors).
+//!
+//! **Invariant: Cross-domain edges must NEVER route through intra-domain
+//! corridors.** This is enforced by the `find_best_corridor_idx` filter and
+//! verified by the `inter_domain_edges_in_intra_corridors` quality check.
+//!
+//! When no corridor is found in the preferred direction, `find_corridor_channel`
+//! tries the opposite direction before falling back to an untracked offset.
+//! The opposite-direction fallback prevents cross-domain edges from landing
+//! inside intra-domain corridors when no outer corridor exists on the
+//! preferred side.
+//!
+//! # Outer Corridor Guarantee
+//!
+//! Outer corridors are ALWAYS created on both sides of the layout. When the
+//! leftmost domain is flush with x=0, the outer-left corridor extends into
+//! negative x space. The SVG `content_offset_x` mechanism compensates for
+//! negative-x content, just as it does for edge labels.
+//!
+//! The outer-left corridor uses `grows_left: true` so that new channels are
+//! allocated in the -x direction (away from the domain boundary). Without
+//! this, channel expansion would grow into the intra-domain corridor zone.
+//!
+//! # Channel Collision Prevention
+//!
+//! Each corridor tracks channel occupants with vertical extents. The
+//! `allocate_channel` method checks for vertical overlap before reusing a
+//! channel, and also checks for crossing-aware blocking by outer channels.
+//! The blind-offset fallback in `find_corridor_channel` does NOT track
+//! occupants and will cause collisions — it should never be reached if
+//! outer corridors are properly created.
+//!
+//! # Fan-Out Channel Ordering — DO NOT BREAK
+//!
+//! When a single source property (e.g., `System Clock::current_time`) fans
+//! out to many targets through the same corridor, the initial channel
+//! allocation assigns inner channels to edges with smaller vertical midpoints.
+//! This creates crossings: each outer edge's horizontal stub passes through
+//! inner edges' vertical segments.
+//!
+//! `fix_fanout_channel_order` reverses the assignment for cross-domain edges:
+//! the edge entering from the **lowest source y** gets the **outermost**
+//! corridor channel. This nests the horizontal stubs properly — the lowest-y
+//! stub is longest but no inner vertical has started yet at that y level.
+//!
+//! **Key constraints:**
+//! - Only applies to **cross-domain** constraint edges. Intra-domain brackets
+//!   are handled separately by `fix_bracket_nesting_channels`.
+//! - Edges are sub-grouped by **approach direction** (src_x > corridor_x vs
+//!   src_x < corridor_x). The corridor allocator can reuse a channel for
+//!   edges approaching from opposite sides; mixing them in a fan-out group
+//!   would swap channels between non-overlapping occupants, causing collisions.
+//! - Runs BEFORE `fix_bracket_nesting_channels`. The two passes are compatible:
+//!   bracket nesting only swaps adjacent channels within same-node pairs,
+//!   preserving the overall fan-out ordering.
 
 use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId, PropId};
 
@@ -1519,12 +1602,179 @@ pub fn route_all_edges(
         routes.push(route);
     }
 
-    // Post-route: fix bracket nesting channel assignments.
-    // For same-node-pair bracket bundles, sort corridor channels by span
-    // width (shortest span → innermost channel) to create clean nesting.
+    // Post-route channel reassignment, in two phases:
+    //
+    // Phase 1: Fan-out ordering. When multiple H-V-H bracket routes share
+    // the same corridor, order channels so that edges entering from lower y
+    // (nearer source ports) get outermost channels. This ensures horizontal
+    // stubs nest properly — no outer stub crosses an inner vertical.
+    //
+    // Phase 2: Bracket nesting. For same-node-pair brackets, swap channels
+    // to minimize within-pair crossings. This runs after fan-out ordering
+    // and only adjusts adjacent channels within a pair.
+    fix_fanout_channel_order(graph, &mut routes);
     fix_bracket_nesting_channels(graph, &mut routes);
 
     routes
+}
+
+/// Fix fan-out channel ordering for H-V-H bracket routes through shared corridors.
+///
+/// When multiple edges from the same source region fan out through a single
+/// corridor, the initial channel allocation (by routing order) assigns inner
+/// channels to edges with smaller vertical midpoints. This creates crossings:
+/// each outer edge's horizontal stub must pass through all inner edges'
+/// vertical segments.
+///
+/// The fix reverses the assignment: edges entering from lower source y get
+/// the **outermost** corridor channel. This ensures horizontal stubs nest
+/// properly — the lowest-y stub is longest but passes over no verticals,
+/// and each higher-y stub is shorter and contained within the outer stubs.
+///
+/// # Grouping
+///
+/// Routes are grouped by corridor region: edges whose vertical segment x
+/// values cluster within `CHANNEL_GAP * 3` are in the same corridor.
+/// Within each corridor cluster, channels are reassigned by ascending src_y.
+///
+/// # Interaction with `fix_bracket_nesting_channels`
+///
+/// This function runs BEFORE bracket nesting. Bracket nesting only swaps
+/// adjacent channels within same-node pairs, preserving the overall fan-out
+/// ordering. The two passes are compatible because same-node pairs have
+/// adjacent source y values, so their relative order within the fan-out
+/// doesn't affect cross-pair crossings.
+fn fix_fanout_channel_order(graph: &Graph, routes: &mut [Route]) {
+    struct FanoutEntry {
+        route_idx: usize,
+        corridor_x: f64,
+        src_y: f64,
+        src_x: f64,
+        approaches_from_right: bool, // src_x > corridor_x
+    }
+
+    let mut entries: Vec<FanoutEntry> = Vec::new();
+
+    for (ri, route) in routes.iter().enumerate() {
+        let edge = &graph.edges[route.edge_id.index()];
+        // Only cross-domain constraint edges benefit from fan-out reordering.
+        // Intra-domain brackets are handled by fix_bracket_nesting_channels.
+        let is_cross_domain = match edge {
+            Edge::Constraint { source_prop, dest_prop, .. } => {
+                let sn = graph.properties[source_prop.index()].node;
+                let dn = graph.properties[dest_prop.index()].node;
+                graph.nodes[sn.index()].domain != graph.nodes[dn.index()].domain
+            }
+            _ => false,
+        };
+        if !is_cross_domain { continue; }
+        if route.segments.len() != 3 { continue; }
+
+        let (src_x, src_y, corridor_x) = match (&route.segments[0], &route.segments[1]) {
+            (
+                Segment::Horizontal { y, x_start, .. },
+                Segment::Vertical { x, .. },
+            ) => (*x_start, *y, *x),
+            _ => continue,
+        };
+
+        let approaches_from_right = src_x > corridor_x;
+        entries.push(FanoutEntry { route_idx: ri, corridor_x, src_y, src_x, approaches_from_right });
+    }
+
+    if entries.len() < 2 { return; }
+
+    // Cluster entries by corridor region AND approach direction.
+    // Two edges share a fan-out group only if they use the same corridor
+    // AND approach from the same side. The corridor allocator can reuse
+    // a channel for edges approaching from opposite sides (non-overlapping
+    // horizontal stubs), so mixing sides would create false channel swaps.
+    //
+    // Step 1: Sort by corridor_x, cluster adjacent entries within threshold.
+    // Step 2: Sub-group each cluster by approach direction.
+    entries.sort_by(|a, b| a.corridor_x.partial_cmp(&b.corridor_x).unwrap_or(std::cmp::Ordering::Equal));
+
+    let threshold = CHANNEL_GAP * 3.0;
+    let mut raw_clusters: Vec<Vec<usize>> = Vec::new();
+    let mut current_cluster: Vec<usize> = vec![0];
+
+    for i in 1..entries.len() {
+        if (entries[i].corridor_x - entries[i - 1].corridor_x).abs() <= threshold {
+            current_cluster.push(i);
+        } else {
+            raw_clusters.push(std::mem::take(&mut current_cluster));
+            current_cluster.push(i);
+        }
+    }
+    raw_clusters.push(current_cluster);
+
+    // Sub-group by approach direction.
+    let mut clusters: Vec<Vec<usize>> = Vec::new();
+    for raw in &raw_clusters {
+        let mut from_left: Vec<usize> = Vec::new();
+        let mut from_right: Vec<usize> = Vec::new();
+        for &ci in raw {
+            if entries[ci].approaches_from_right {
+                from_right.push(ci);
+            } else {
+                from_left.push(ci);
+            }
+        }
+        if from_left.len() >= 2 { clusters.push(from_left); }
+        if from_right.len() >= 2 { clusters.push(from_right); }
+    }
+
+    for cluster_indices in &clusters {
+        // Determine corridor direction: channels grow away from source.
+        let first = &entries[cluster_indices[0]];
+        let is_right_corridor = first.corridor_x > first.src_x;
+
+        // Collect current corridor_x values and sort by distance from source
+        // (innermost first).
+        let ref_x = first.src_x;
+        let mut xs: Vec<f64> = cluster_indices.iter().map(|&ci| entries[ci].corridor_x).collect();
+        xs.sort_by(|a, b| {
+            let da = (*a - ref_x).abs();
+            let db = (*b - ref_x).abs();
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Sort cluster entries by src_y ascending (lowest enters first → outermost).
+        let mut sorted_indices: Vec<usize> = cluster_indices.clone();
+        sorted_indices.sort_by(|&a, &b| {
+            entries[a].src_y.partial_cmp(&entries[b].src_y).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Assign channels: entry with lowest src_y gets outermost (xs[last]),
+        // entry with highest src_y gets innermost (xs[0]).
+        let n = sorted_indices.len();
+        for (rank, &ci) in sorted_indices.iter().enumerate() {
+            let new_x = xs[n - 1 - rank]; // reverse: lowest src_y → outermost
+            let old_x = entries[ci].corridor_x;
+            if (new_x - old_x).abs() < 0.01 { continue; } // no change
+
+            let route = &mut routes[entries[ci].route_idx];
+
+            // Update the vertical segment x.
+            if let Segment::Vertical { x, .. } = &mut route.segments[1] {
+                *x = new_x;
+            }
+            // Update the horizontal segments' corridor-side endpoints.
+            update_corridor_endpoint(&mut route.segments[0], old_x, new_x, is_right_corridor);
+            update_corridor_endpoint(&mut route.segments[2], old_x, new_x, is_right_corridor);
+        }
+    }
+}
+
+/// Update the corridor-side endpoint of a horizontal segment.
+fn update_corridor_endpoint(seg: &mut Segment, old_x: f64, new_x: f64, _is_right: bool) {
+    if let Segment::Horizontal { x_start, x_end, .. } = seg {
+        if (*x_start - old_x).abs() < (*x_end - old_x).abs() {
+            *x_start = new_x;
+        } else {
+            *x_end = new_x;
+        }
+    }
 }
 
 /// Fix bracket nesting by reassigning corridor channel x-coordinates.
@@ -2727,9 +2977,8 @@ mod tests {
         let corridors = build_corridors(&domain_layouts, &[], &graph);
 
         // 2 domains at different x-ranges → 2 intra-domain corridors each +
-        // 1 inter-column gap + 1 outer right corridor = 6 corridors.
-        // (No outer left corridor since D0 starts at x=0.)
-        assert_eq!(corridors.len(), 6, "Expected 6 corridors, got {}", corridors.len());
+        // 1 inter-column gap + 1 outer left + 1 outer right = 7 corridors.
+        assert_eq!(corridors.len(), 7, "Expected 7 corridors, got {}", corridors.len());
 
         // D0 left corridor: x_start=0, center channel at CORRIDOR_PAD=8.
         assert!((corridors[0].channels[0].x - 8.0).abs() < 0.1);
