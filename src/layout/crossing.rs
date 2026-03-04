@@ -1,4 +1,130 @@
 //! Weighted port-aware nested barycenter crossing minimization (DESIGN.md §4.2.3).
+//!
+//! # Property Ordering: Ladder, Gravity, and Chiasm
+//!
+//! This module contains three post-loop property ordering optimizations that run
+//! **after** the main crossing minimization loop selects its best iteration. These
+//! optimizations are critical to the visual quality of the rendered graph and have
+//! been repeatedly broken by well-meaning changes. This section documents their
+//! purpose, invariants, and interactions so future maintainers do not regress them.
+//!
+//! ## Terminology
+//!
+//! - **Same-node constraint**: A constraint edge where both endpoints are properties
+//!   of the *same* node (e.g., `Report::tcb.committed.bootloader <= Report::tcb.current.bootloader`).
+//!   Rendered as a bracket on one side of the node.
+//!
+//! - **Cross-node constraint**: A constraint edge between properties of *different*
+//!   nodes (e.g., `Report::chip_id <= VCEK::sev.hwId`).
+//!
+//! - **Bracket pair**: The two properties connected by a same-node constraint. They
+//!   should be adjacent in the property order so the bracket is compact.
+//!
+//! - **Ladder pattern**: When a node has multiple same-node constraints, the pairs
+//!   interleave like rungs on a ladder: `[A_src, A_dst, B_src, B_dst, ...]`. The
+//!   brackets nest without crossing.
+//!
+//! - **Chiasm**: For same-domain constraint bundles (multiple cross-node constraints
+//!   between two nodes in the same domain), the properties on the lower node are
+//!   ordered in *reverse* relative to the upper node. This creates a nested bracket
+//!   routing pattern (like an X or chiasmus) that avoids edge crossings.
+//!
+//! ## The Three Optimizations
+//!
+//! They run in this order, which matters:
+//!
+//! ### 1. `compact_same_node_brackets()` — Local adjacency
+//!
+//! Ensures each same-node constraint pair is adjacent in the property order.
+//! The main loop's best iteration is chosen by crossing count alone, which may
+//! not be the iteration where sifting achieved optimal bracket spans. This pass
+//! fixes that. **Must run before gravity** so that gravity sees bracket pairs
+//! as atomic units and moves them together.
+//!
+//! ### 2. `apply_cross_node_gravity()` — Big positional moves
+//!
+//! Pulls properties toward their cross-node constraint partners: properties
+//! connected to nodes above migrate toward the top of the node; properties
+//! connected to nodes below migrate toward the bottom. Unconnected (neutral)
+//! properties settle in the middle. Same-node bracket pairs (made adjacent by
+//! step 1) are treated as atomic units so they move together.
+//!
+//! ### 3. `apply_chiasm_fixup()` — Reversal for nested routing
+//!
+//! For each same-domain constraint bundle, reverses the involved properties on
+//! the lower node (relative to the upper node's order). When some of those
+//! properties also participate in same-node brackets, the bracket pairs are
+//! reversed as **atomic units** — the pair's internal adjacency is preserved,
+//! but the group order is reversed. This is the "unit-aware chiasm".
+//!
+//! ### Why this order matters
+//!
+//! Compaction must be first because gravity detects bracket pairs by checking
+//! physical adjacency in the current property order. If gravity runs before
+//! compaction, non-adjacent pair members get independent scores (e.g., one
+//! neutral, one pulled-down), and compaction then overrides gravity by yanking
+//! the distant member back to the other's position. With compaction first,
+//! gravity correctly moves pairs as units to their target positions.
+//!
+//! ## Invariants — DO NOT BREAK
+//!
+//! 1. **Bracket pairs must be adjacent.** After all three passes, every same-node
+//!    constraint pair `(src, dst)` must satisfy `|position(src) - position(dst)| == 1`.
+//!    If a change causes pairs to separate, the ladder pattern is broken.
+//!
+//! 2. **Chiasm must reverse units, not individual properties.** If a property
+//!    involved in a chiasm reversal also has a bracket partner, both must move
+//!    together. Reversing individual properties would break invariant 1.
+//!
+//! 3. **Chiasm only applies to the lower node.** Applying to both nodes in a
+//!    same-domain pair would cancel out (reverse + reverse = identity).
+//!
+//! 4. **Chiasm only applies to same-domain bundles.** Cross-domain edges already
+//!    route through inter-domain corridors; reversing them would create crossings.
+//!
+//! 5. **Gravity scores: above=0, below=n-1, neutral=n/2.** Neutral properties
+//!    must NOT score 0 (their current position), or they'll tie with above-connected
+//!    properties and float to the top incorrectly.
+//!
+//! 6. **Proximity targets must accumulate, not overwrite.** A property may have
+//!    multiple cross-node edges (e.g., `Report::chip_id` connects to both
+//!    `VCEK::chip_id` and `TCGLog::event_entries`). Using `HashMap::collect()`
+//!    silently drops all but the last target. Use `Vec<(f64, u32)>` per property.
+//!
+//! ## In-Loop vs Post-Loop
+//!
+//! The main loop also contains inline chiasm and sifting logic. The in-loop
+//! chiasm override runs after sifting within each top-down sweep. The sifting
+//! cost function is chiasm-aware (it penalizes parallel ordering for same-domain
+//! bundles). However, the best iteration saved by the loop is chosen purely by
+//! crossing count, which may not reflect the best property ordering. The three
+//! post-loop passes correct for this.
+//!
+//! ## Concrete Example
+//!
+//! In the SEV-SNP realistic graph, the VCEK node has properties (bottom portion):
+//! ```text
+//! sev.hwId, sev.tcb.bootloader, sev.tcb.tee, sev.tcb.snp, sev.tcb.microcode
+//! ```
+//!
+//! The Attestation Report (AR) node, which is below VCEK in the same domain,
+//! should be ordered as:
+//! ```text
+//! tcb.committed.microcode, tcb.current.microcode,   ← pair (ladder)
+//! tcb.committed.snp,       tcb.current.snp,         ← pair
+//! tcb.committed.tee,       tcb.current.tee,          ← pair
+//! tcb.committed.bootloader, tcb.current.bootloader,  ← pair
+//! chip_id,                                           ← connects to sev.hwId
+//! version                                            ← neutral (middle)
+//! ```
+//!
+//! Note: `microcode` is at the top of AR and at the bottom of VCEK (chiasm).
+//! Each `committed`/`current` pair is adjacent (ladder). `chip_id` is pulled
+//! toward the top because it connects to the node above (gravity), but placed
+//! after the tcb pairs because the chiasm reversal puts it last among the
+//! VCEK-connected properties (VCEK has `sev.hwId` first → reversed = last).
+//! `version` has no cross-node edges and sits at the bottom (neutral = middle,
+//! but all connected properties are above it).
 
 use std::collections::{HashMap, HashSet};
 
@@ -615,6 +741,457 @@ fn prop_touches_edge<'a>(
 }
 
 // ---------------------------------------------------------------------------
+// Post-loop bracket compaction
+// ---------------------------------------------------------------------------
+
+/// Move same-node constraint pairs to be adjacent in property ordering.
+///
+/// For each node with same-node constraints, this function moves the
+/// destination property of each constraint to be immediately after its
+/// source property (preserving relative order of other properties).
+/// This creates the "ladder" pattern where paired bracket endpoints sit
+/// next to each other, minimizing bracket span.
+///
+/// # Why this is a post-loop pass
+///
+/// The main crossing minimization loop saves the iteration with the lowest
+/// total crossing count. Sifting may achieve perfect bracket adjacency in
+/// iteration 0, but a later iteration with fewer total crossings (but worse
+/// bracket spans) overwrites it. This pass restores adjacency.
+///
+/// # Runs FIRST among post-loop passes
+///
+/// Must run before `apply_cross_node_gravity()` so that gravity detects
+/// bracket pairs as adjacent units and moves them together. If gravity runs
+/// first, non-adjacent pair members get independent scores, and compaction
+/// then overrides gravity by pulling one member to the other's position.
+///
+/// # Invariant
+///
+/// After this pass, for every same-node constraint `(src, dst)`:
+/// `|prop_index(src) - prop_index(dst)| == 1`
+fn compact_same_node_brackets(prop_order: &mut PropertyOrder, graph: &Graph) {
+    use crate::model::types::Edge;
+
+    // Collect same-node constraints per node.
+    let mut per_node: HashMap<NodeId, Vec<(PropId, PropId)>> = HashMap::new();
+    for edge in &graph.edges {
+        if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+            let sn = graph.properties[source_prop.index()].node;
+            let dn = graph.properties[dest_prop.index()].node;
+            if sn == dn {
+                per_node.entry(sn).or_default().push((*source_prop, *dest_prop));
+            }
+        }
+    }
+
+    for (node_id, pairs) in per_node {
+        let mut order = prop_order.props_of(node_id).to_vec();
+        if order.len() < 2 { continue; }
+
+        // Process each pair: move the partner that comes second
+        // in the current order to be immediately after the one that comes first.
+        // Process pairs in order of current position of the first property
+        // to avoid later moves undoing earlier ones.
+        let mut sorted_pairs: Vec<(PropId, PropId)> = pairs;
+        sorted_pairs.sort_by_key(|&(s, d)| {
+            let si = order.iter().position(|p| *p == s).unwrap_or(usize::MAX);
+            let di = order.iter().position(|p| *p == d).unwrap_or(usize::MAX);
+            si.min(di)
+        });
+
+        for (src, dst) in sorted_pairs {
+            let si = match order.iter().position(|p| *p == src) {
+                Some(i) => i,
+                None => continue,
+            };
+            let di = match order.iter().position(|p| *p == dst) {
+                Some(i) => i,
+                None => continue,
+            };
+
+            // Already adjacent — nothing to do.
+            if si.abs_diff(di) == 1 { continue; }
+
+            // Move the one that comes later to be right after the earlier one.
+            let (_first_idx, second_prop) = if si < di {
+                (si, dst)
+            } else {
+                (di, src)
+            };
+
+            // Remove the second property and re-insert it after the first.
+            let remove_idx = order.iter().position(|p| *p == second_prop).unwrap();
+            order.remove(remove_idx);
+            // After removal, first_idx may have shifted.
+            let insert_after = order.iter().position(|p| {
+                *p == if si < di { src } else { dst }
+            }).unwrap();
+            order.insert(insert_after + 1, second_prop);
+        }
+
+        prop_order.set_order(node_id, order);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Post-loop cross-node gravity
+// ---------------------------------------------------------------------------
+
+/// Pull properties toward their cross-node constraint partners.
+///
+/// For each node, properties connected to nodes above are pulled toward the
+/// top; properties connected to nodes below are pulled toward the bottom.
+/// Same-node bracket pairs (made adjacent by `compact_same_node_brackets`)
+/// are treated as atomic units so they move together.
+///
+/// This preserves relative ordering within each direction group (no new
+/// crossings) while minimizing total edge length.
+///
+/// # Scoring
+///
+/// - Connected above only → score 0.0 (top of node)
+/// - Connected below only → score `n_props - 1` (bottom of node)
+/// - Mixed above/below → weighted blend between 0 and n-1
+/// - No cross-node edges (neutral) → score `n_props / 2.0` (middle)
+///
+/// **Important**: Neutral must NOT be 0 (current position) or neutral
+/// properties will tie with above-connected properties and incorrectly
+/// float to the top. This was a past bug.
+///
+/// # Runs AFTER bracket compaction, BEFORE chiasm
+///
+/// Compaction must run first so gravity sees bracket pairs as adjacent
+/// units and moves them together. If gravity runs before compaction,
+/// non-adjacent pair members get independent scores, and compaction
+/// then overrides gravity by pulling one member to the other's position.
+/// Chiasm runs after gravity to reverse the gravity-established order
+/// for same-domain bundles.
+fn apply_cross_node_gravity(
+    prop_order: &mut PropertyOrder,
+    layers: &[LayerEntry],
+    graph: &Graph,
+) {
+    let layer_map = build_layer_map(layers);
+
+    // Collect all nodes.
+    let mut all_nodes: Vec<NodeId> = Vec::new();
+    for layer in layers {
+        for item in &layer.items {
+            if let LayerItem::Node(nid) = item {
+                all_nodes.push(*nid);
+            }
+        }
+    }
+
+    for &node_id in &all_nodes {
+        let node_layer = layer_map
+            .get(&LayerElement::Node(node_id))
+            .copied()
+            .unwrap_or(0);
+        let order = prop_order.props_of(node_id).to_vec();
+        if order.len() < 2 { continue; }
+
+        // Identify same-node bracket pairs to treat as atomic units.
+        let mut paired: HashSet<PropId> = HashSet::new();
+        let mut pair_map: HashMap<PropId, PropId> = HashMap::new();
+        for edge in &graph.edges {
+            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                let sn = graph.properties[source_prop.index()].node;
+                let dn = graph.properties[dest_prop.index()].node;
+                if sn == node_id && dn == node_id {
+                    paired.insert(*source_prop);
+                    paired.insert(*dest_prop);
+                    pair_map.insert(*source_prop, *dest_prop);
+                    pair_map.insert(*dest_prop, *source_prop);
+                }
+            }
+        }
+
+        // Build units: consecutive paired properties form a unit, singletons
+        // are individual units.
+        let mut units: Vec<Vec<PropId>> = Vec::new();
+        let mut i = 0;
+        while i < order.len() {
+            let p = order[i];
+            if paired.contains(&p) && i + 1 < order.len() {
+                let next = order[i + 1];
+                if pair_map.get(&p) == Some(&next) {
+                    // Paired unit.
+                    units.push(vec![p, next]);
+                    i += 2;
+                    continue;
+                }
+            }
+            units.push(vec![p]);
+            i += 1;
+        }
+
+        // Compute gravity score for each unit.
+        // Score = weighted average target position from cross-node constraints.
+        // Properties connected above get low scores (top); below get high scores.
+        // Units with no cross-node edges keep their current position (neutral).
+        let n_props = order.len() as f64;
+        let mut unit_scores: Vec<(usize, f64)> = Vec::new(); // (unit_idx, score)
+
+        for (ui, unit) in units.iter().enumerate() {
+            let mut pull_above = 0.0_f64; // weight pulling toward top
+            let mut pull_below = 0.0_f64; // weight pulling toward bottom
+
+            for &pid in unit {
+                for edge in &graph.edges {
+                    if let Some((src_prop, dst_prop)) = edge_prop_pair(graph, edge) {
+                        let src_node = graph.properties[src_prop.index()].node;
+                        let dst_node = graph.properties[dst_prop.index()].node;
+
+                        let remote_node =
+                            if src_node == node_id && dst_node != node_id && src_prop == pid {
+                                dst_node
+                            } else if dst_node == node_id && src_node != node_id && dst_prop == pid {
+                                src_node
+                            } else {
+                                continue;
+                            };
+
+                        let remote_layer = layer_map
+                            .get(&LayerElement::Node(remote_node))
+                            .copied()
+                            .unwrap_or(node_layer);
+
+                        let w = edge.weight() as f64;
+                        if remote_layer < node_layer {
+                            pull_above += w; // connected above → pull to top
+                        } else if remote_layer > node_layer {
+                            pull_below += w; // connected below → pull to bottom
+                        }
+                    }
+                }
+            }
+
+            let score = if pull_above > 0.0 || pull_below > 0.0 {
+                // Net direction: 0 = strong pull to top, n-1 = strong pull to bottom.
+                // Score = proportion of pull_below in total pull, mapped to [0, n-1].
+                let total = pull_above + pull_below;
+                (pull_below / total) * (n_props - 1.0)
+            } else {
+                // No cross-node edges: neutral → middle of the node.
+                n_props / 2.0
+            };
+
+            unit_scores.push((ui, score));
+        }
+
+        // Stable sort units by gravity score.
+        unit_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Flatten back to property order.
+        let new_order: Vec<PropId> = unit_scores
+            .iter()
+            .flat_map(|&(ui, _)| units[ui].iter().copied())
+            .collect();
+
+        if new_order.len() == order.len() {
+            prop_order.set_order(node_id, new_order);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Post-loop chiasm fixup
+// ---------------------------------------------------------------------------
+
+/// Apply chiasm ordering to all lower nodes of same-domain constraint bundles.
+///
+/// During the crossing minimization loop, the chiasm override only runs in
+/// top-down sweeps.  If the best iteration was a bottom-up sweep, same-domain
+/// constraint bundles may have parallel (non-nested) property ordering.  This
+/// function corrects that by reversing the connected properties on the lower
+/// node relative to the upper node's order — ensuring nested bracket routing.
+///
+/// # Unit-aware reversal
+///
+/// When a property involved in a chiasm also participates in a same-node
+/// bracket (ladder pair), the bracket pair is treated as an atomic unit during
+/// reversal. The pair's internal adjacency is preserved; only the group-level
+/// order is reversed. Without this, chiasm reversal would separate bracket
+/// pairs and destroy the ladder pattern (breaking invariant 1 from the module
+/// doc).
+///
+/// # Guards
+///
+/// - Only applies to the LOWER node of each same-domain pair (prevents
+///   double-reversal which would cancel out).
+/// - Only applies to same-domain constraint bundles (cross-domain edges
+///   route through inter-domain corridors; reversing would create crossings).
+/// - Requires at least 2 edges in the bundle (a single edge has no
+///   relative ordering to reverse).
+///
+/// # Past bugs
+///
+/// - Skipping bundles entirely when any local prop had a same-node constraint
+///   prevented chiasm from working on the AR↔VCEK bundle, causing collisions.
+/// - Reversing individual properties (not unit-aware) separated bracket pairs.
+fn apply_chiasm_fixup(
+    prop_order: &mut PropertyOrder,
+    layers: &[LayerEntry],
+    _long_edges: &[LongEdge],
+    graph: &Graph,
+) {
+    let layer_map = build_layer_map(layers);
+
+    // Collect all nodes and their layer indices.
+    let mut node_layers: Vec<(NodeId, u32)> = Vec::new();
+    for (layer_idx, layer) in layers.iter().enumerate() {
+        for item in &layer.items {
+            if let LayerItem::Node(nid) = item {
+                node_layers.push((*nid, layer_idx as u32));
+            }
+        }
+    }
+
+    for &(node_id, node_layer) in &node_layers {
+        // Collect properties involved in same-node constraints (ladder members).
+        let mut same_node_props: HashSet<PropId> = HashSet::new();
+        for edge in &graph.edges {
+            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                let sn = graph.properties[source_prop.index()].node;
+                let dn = graph.properties[dest_prop.index()].node;
+                if sn == node_id && dn == node_id {
+                    same_node_props.insert(*source_prop);
+                    same_node_props.insert(*dest_prop);
+                }
+            }
+        }
+
+        // Build inter-node constraint edges grouped by target node.
+        let mut inter_node_edges_by_target: HashMap<NodeId, Vec<(PropId, PropId, u32)>> =
+            HashMap::new();
+        for edge in &graph.edges {
+            if let Some((src_prop, dst_prop)) = edge_prop_pair(graph, edge) {
+                let src_node = graph.properties[src_prop.index()].node;
+                let dst_node = graph.properties[dst_prop.index()].node;
+                if src_node == node_id && dst_node != node_id {
+                    inter_node_edges_by_target
+                        .entry(dst_node)
+                        .or_default()
+                        .push((src_prop, dst_prop, edge.weight()));
+                } else if dst_node == node_id && src_node != node_id {
+                    inter_node_edges_by_target
+                        .entry(src_node)
+                        .or_default()
+                        .push((dst_prop, src_prop, edge.weight()));
+                }
+            }
+        }
+
+        // Build same-node pair map: prop → its bracket partner.
+        let mut pair_map: HashMap<PropId, PropId> = HashMap::new();
+        for edge in &graph.edges {
+            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                let sn = graph.properties[source_prop.index()].node;
+                let dn = graph.properties[dest_prop.index()].node;
+                if sn == node_id && dn == node_id {
+                    pair_map.insert(*source_prop, *dest_prop);
+                    pair_map.insert(*dest_prop, *source_prop);
+                }
+            }
+        }
+
+        // Apply chiasm override: only for lower node of same-domain pairs.
+        // When local properties participate in same-node brackets, reverse
+        // the bracket pairs as atomic units (preserving internal adjacency).
+        for (&target_node, edges) in &inter_node_edges_by_target {
+            if edges.len() < 2 { continue; }
+
+            let target_layer = layer_map
+                .get(&LayerElement::Node(target_node))
+                .copied()
+                .unwrap_or(node_layer);
+
+            // Only apply to the lower node (higher layer index) to
+            // prevent double-reversal.
+            if target_layer >= node_layer { continue; }
+
+            let local_dom = graph.nodes[node_id.index()].domain;
+            let remote_dom = graph.nodes[target_node.index()].domain;
+            if local_dom.is_none() || local_dom != remote_dom { continue; }
+
+            // Sort local props by remote prop's index (ascending), then reverse.
+            let mut by_remote: Vec<(usize, PropId)> = edges.iter()
+                .filter_map(|&(lp, rp, _)| {
+                    let rn = graph.properties[rp.index()].node;
+                    let ri = prop_order.prop_index(rn, rp)?;
+                    Some((ri, lp))
+                })
+                .collect();
+            by_remote.sort_by_key(|&(ri, _)| ri);
+
+            // Desired order: reversed (chiastic).
+            let desired_local: Vec<PropId> = by_remote.iter()
+                .rev()
+                .map(|&(_, lp)| lp)
+                .collect();
+
+            let mut current_order = prop_order.props_of(node_id).to_vec();
+
+            // Collect slots occupied by the involved properties AND their
+            // bracket partners (so pairs move as units).
+            let mut unit_slots: Vec<(usize, Vec<PropId>)> = Vec::new();
+            for &lp in &desired_local {
+                let pos = match current_order.iter().position(|p| *p == lp) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                // Check if this prop has a bracket partner immediately adjacent.
+                if let Some(&partner) = pair_map.get(&lp) {
+                    if pos + 1 < current_order.len() && current_order[pos + 1] == partner {
+                        unit_slots.push((pos, vec![lp, partner]));
+                    } else if pos > 0 && current_order[pos - 1] == partner {
+                        unit_slots.push((pos - 1, vec![partner, lp]));
+                    } else {
+                        unit_slots.push((pos, vec![lp]));
+                    }
+                } else {
+                    unit_slots.push((pos, vec![lp]));
+                }
+            }
+
+            // Deduplicate units (a pair might appear via both partners).
+            let mut seen_slots: HashSet<usize> = HashSet::new();
+            let mut unique_units: Vec<Vec<PropId>> = Vec::new();
+            for (slot, unit) in &unit_slots {
+                if seen_slots.insert(*slot) {
+                    unique_units.push(unit.clone());
+                }
+            }
+
+            // Collect all slot positions occupied by these units.
+            let mut all_slots: Vec<usize> = Vec::new();
+            for unit in &unique_units {
+                for p in unit {
+                    if let Some(pos) = current_order.iter().position(|x| x == p) {
+                        all_slots.push(pos);
+                    }
+                }
+            }
+            all_slots.sort();
+
+            // Place reversed units into the sorted slots.
+            let reversed_flat: Vec<PropId> = unique_units.iter()
+                .flat_map(|u| u.iter().copied())
+                .collect();
+
+            if reversed_flat.len() == all_slots.len() {
+                for (i, &slot) in all_slots.iter().enumerate() {
+                    current_order[slot] = reversed_flat[i];
+                }
+                prop_order.set_order(node_id, current_order);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main algorithm
 // ---------------------------------------------------------------------------
 
@@ -649,8 +1226,8 @@ pub fn minimize_crossings(
     update_long_edge_positions(layers, long_edges);
 
     // Compute initial port sides + edge port order for crossing detection
-    let mut best_port_sides = compute_layer_space_port_sides(graph, layers);
-    let mut best_edge_port_order = compute_edge_port_order(graph, layers, long_edges, &prop_order);
+    let best_port_sides = compute_layer_space_port_sides(graph, layers);
+    let best_edge_port_order = compute_edge_port_order(graph, layers, long_edges, &prop_order);
 
     let mut best_layers = layers.clone();
     let mut best_prop_order = prop_order.clone();
@@ -1172,6 +1749,14 @@ pub fn minimize_crossings(
                 //
                 // Only apply to the LOWER node of each pair to prevent
                 // double reversal (both sides reversing cancels out).
+                //
+                // When local properties participate in same-node brackets,
+                // reverse bracket pairs as atomic units (preserving internal
+                // adjacency) — matching the post-loop apply_chiasm_fixup().
+                let pair_map_loop: HashMap<PropId, PropId> = same_node_edges
+                    .iter()
+                    .flat_map(|&(a, b, _)| [(a, b), (b, a)])
+                    .collect();
                 for (&target_node, edges) in &inter_node_edges_by_target {
                     if edges.len() < 2 { continue; }
                     let target_layer = layer_map
@@ -1197,14 +1782,55 @@ pub fn minimize_crossings(
                         .map(|&(_, lp)| lp)
                         .collect();
 
-                    let mut slots: Vec<usize> = desired_local.iter()
-                        .filter_map(|lp| new_prop_order.iter().position(|p| p == lp))
-                        .collect();
-                    slots.sort();
+                    // Unit-aware: collect bracket pairs as atomic units.
+                    let mut unit_slots: Vec<(usize, Vec<PropId>)> = Vec::new();
+                    let mut seen_slots: HashSet<usize> = HashSet::new();
+                    for &lp in &desired_local {
+                        let pos = match new_prop_order.iter().position(|p| *p == lp) {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        if let Some(&partner) = pair_map_loop.get(&lp) {
+                            if pos + 1 < new_prop_order.len()
+                                && new_prop_order[pos + 1] == partner
+                            {
+                                if seen_slots.insert(pos) {
+                                    unit_slots.push((pos, vec![lp, partner]));
+                                }
+                            } else if pos > 0
+                                && new_prop_order[pos - 1] == partner
+                            {
+                                if seen_slots.insert(pos - 1) {
+                                    unit_slots.push((pos - 1, vec![partner, lp]));
+                                }
+                            } else if seen_slots.insert(pos) {
+                                unit_slots.push((pos, vec![lp]));
+                            }
+                        } else if seen_slots.insert(pos) {
+                            unit_slots.push((pos, vec![lp]));
+                        }
+                    }
 
-                    for (i, &slot) in slots.iter().enumerate() {
-                        if i < desired_local.len() {
-                            new_prop_order[slot] = desired_local[i];
+                    // Collect all slots, place reversed units into sorted slots.
+                    let mut all_slots: Vec<usize> = Vec::new();
+                    let unique_units: Vec<Vec<PropId>> =
+                        unit_slots.into_iter().map(|(_, u)| u).collect();
+                    for unit in &unique_units {
+                        for p in unit {
+                            if let Some(pos) = new_prop_order.iter().position(|x| x == p) {
+                                all_slots.push(pos);
+                            }
+                        }
+                    }
+                    all_slots.sort();
+
+                    let reversed_flat: Vec<PropId> = unique_units.iter()
+                        .flat_map(|u| u.iter().copied())
+                        .collect();
+
+                    if reversed_flat.len() == all_slots.len() {
+                        for (i, &slot) in all_slots.iter().enumerate() {
+                            new_prop_order[slot] = reversed_flat[i];
                         }
                     }
                 }
@@ -1367,8 +1993,6 @@ pub fn minimize_crossings(
         if current_crossings < best_crossings || (current_crossings == 0 && iteration < 2) {
             best_layers = layers.clone();
             best_prop_order = prop_order.clone();
-            best_port_sides = current_port_sides;
-            best_edge_port_order = current_edge_port_order;
             best_crossings = current_crossings;
         }
 
@@ -1387,6 +2011,36 @@ pub fn minimize_crossings(
     // layers structure. Since we can't modify Graph, callers should use the
     // layer ordering. We update long edge positions for the best layout.
     update_long_edge_positions(layers, long_edges);
+
+    // ── Post-loop property ordering passes ────────────────────────────
+    //
+    // These three passes run in a specific order: compaction → gravity → chiasm.
+    // DO NOT reorder them. See the module-level documentation for rationale.
+    //
+    // The main loop selects the best iteration by crossing count alone.
+    // Property ordering quality (bracket adjacency, edge length, nested
+    // routing) may not be optimal in that iteration. These passes fix it.
+
+    // 1. Bracket compaction: ensure same-node constraint pairs are adjacent.
+    //    Must run BEFORE gravity so that gravity sees bracket pairs as atomic
+    //    units and moves them together. If gravity runs first, the pair
+    //    members get separate scores and compaction then overrides gravity
+    //    by pulling the distant member back to the other's position.
+    compact_same_node_brackets(&mut best_prop_order, graph);
+
+    // 2. Gravity: pull properties toward cross-node constraint partners.
+    //    Bracket pairs (now adjacent from step 1) are treated as atomic
+    //    units, so they move together without separating.
+    apply_cross_node_gravity(&mut best_prop_order, layers, graph);
+
+    // 3. Chiasm fixup: reverse same-domain bundles on lower nodes (unit-aware).
+    //    Must run LAST because it reverses the gravity-established order.
+    apply_chiasm_fixup(&mut best_prop_order, layers, long_edges, graph);
+
+    // Recompute edge port order and port sides after the chiasm fixup, since
+    // property ordering may have changed.
+    let best_edge_port_order = compute_edge_port_order(graph, layers, long_edges, &best_prop_order);
+    let best_port_sides = compute_layer_space_port_sides(graph, layers);
 
     (best_prop_order, best_edge_port_order, best_port_sides)
 }
