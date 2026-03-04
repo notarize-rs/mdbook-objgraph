@@ -955,7 +955,13 @@ pub fn minimize_crossings(
                 // sifting can make non-local moves -- critical for chiasm
                 // alignment where the optimal position may be many steps
                 // away from the current one.
-                if !same_node_edges.is_empty() {
+                //
+                // Guard: run sifting if the node has ANY constraint edges
+                // (same-node OR cross-node). A past bug only checked for
+                // same-node edges, preventing sifting for nodes with only
+                // cross-node constraints (bipartite crossing + proximity
+                // terms were never evaluated).
+                if !same_node_edges.is_empty() || !inter_node_edges_by_target.is_empty() {
                     // Pre-compute per-target same_domain flag.
                     let target_same_domain: HashMap<NodeId, bool> =
                         inter_node_edges_by_target.keys().map(|&tn| {
@@ -975,24 +981,49 @@ pub fn minimize_crossings(
                         }).collect();
 
                     // Pre-compute edge-length target positions per local prop.
-                    let proximity_targets: HashMap<PropId, (f64, u32)> =
-                        inter_node_edges_by_target.values().flat_map(|edges| {
-                            edges.iter().map(|&(lp, rp, w)| {
+                    // Each property may have multiple inter-node edges, so we
+                    // accumulate ALL targets in a Vec (proportional to the
+                    // remote property's position within its node).
+                    //
+                    // IMPORTANT: Do NOT use HashMap::collect() here — it
+                    // silently drops all but the last entry per key. A past
+                    // bug used collect(), causing Report::chip_id to lose its
+                    // connection to either VCEK or TCGLog.
+                    let proximity_targets: HashMap<PropId, Vec<(f64, u32)>> = {
+                        let mut map: HashMap<PropId, Vec<(f64, u32)>> = HashMap::new();
+                        for edges in inter_node_edges_by_target.values() {
+                            for &(lp, rp, w) in edges {
                                 let rn = graph.properties[rp.index()].node;
-                                let rl = layer_map
-                                    .get(&LayerElement::Node(rn))
-                                    .copied()
-                                    .unwrap_or(k as u32);
-                                let target = if rl < k as u32 {
-                                    0.0
+                                let ri = remote_indices.get(&rp).copied().unwrap_or(0);
+                                let remote_count = prop_order.props_of(rn).len().max(1);
+                                let target = if remote_count <= 1 {
+                                    (props.len() - 1) as f64 / 2.0
                                 } else {
-                                    (props.len() - 1) as f64
+                                    (ri as f64 / (remote_count - 1) as f64)
+                                        * (props.len() - 1) as f64
                                 };
-                                (lp, (target, w))
-                            })
-                        }).collect();
+                                map.entry(lp).or_default().push((target, w));
+                            }
+                        }
+                        map
+                    };
 
-                    // Cost function for a candidate ordering.
+                    // Cost function for a candidate property ordering.
+                    //
+                    // Five terms, in order of importance:
+                    //   1. Same-node constraint crossings — two same-node brackets cross.
+                    //   2. Cross-node edges inside same-node brackets — a cross-node
+                    //      edge's property sits between a bracket pair's endpoints,
+                    //      forcing the bracket to span over it.
+                    //   3. Bracket span — distance between bracket pair endpoints
+                    //      (want adjacent, i.e. span=1).
+                    //   4. Inter-node bipartite crossings (chiasm-aware) — for
+                    //      same-domain targets, PARALLEL ordering is penalized (not
+                    //      crossed). This makes sifting naturally prefer chiasm order.
+                    //   5. Edge-length proximity — each property is pulled toward a
+                    //      target position proportional to its remote partner's
+                    //      position within the remote node. Uses Vec<(f64, u32)> per
+                    //      property to handle multiple targets (see invariant 6).
                     let order_cost = |order: &[PropId]| -> i64 {
                         let pos: HashMap<PropId, usize> = order
                             .iter()
@@ -1060,10 +1091,14 @@ pub fn minimize_crossings(
                             }
                         }
 
-                        // Edge-length proximity.
-                        for (&lp, &(target, w)) in &proximity_targets {
+                        // Edge-length proximity: sum contributions from all
+                        // targets per property (fixes silent data loss when a
+                        // property has multiple inter-node edges).
+                        for (&lp, targets) in &proximity_targets {
                             if let Some(&p) = pos.get(&lp) {
-                                cost += ((p as f64 - target).abs() * 0.5 * w as f64) as i64;
+                                for &(target, w) in targets {
+                                    cost += ((p as f64 - target).abs() * 0.5 * w as f64) as i64;
+                                }
                             }
                         }
 
