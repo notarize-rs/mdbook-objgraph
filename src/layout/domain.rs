@@ -398,12 +398,8 @@ fn assign_columns(
         }
     }
 
-    // Unconnected groups go to column 0.
-    for gc in group_col.iter_mut() {
-        if gc.is_none() {
-            *gc = Some(0);
-        }
-    }
+    // Unconnected groups: defer to height-balancing below (don't
+    // unconditionally dump into column 0).
 
     // Step 4: Compute estimated group heights for balance optimization.
     // Group height = sum of estimated domain heights for all domains in the group.
@@ -459,6 +455,33 @@ fn assign_columns(
 
         group_col[sat] = Some(best_col);
         col_heights[best_col] += group_heights[sat];
+    }
+
+    // Step 5b: Balance unconnected groups across columns (same heuristic
+    // as satellites). These are domain groups with no cross-domain edges
+    // that were unreachable from the BFS hub.
+    let mut unconnected: Vec<usize> = (0..num_groups)
+        .filter(|gi| group_col[*gi].is_none())
+        .collect();
+    unconnected.sort_by(|&a, &b| {
+        group_heights[b]
+            .partial_cmp(&group_heights[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for gi in unconnected {
+        let mut best_col = 0usize;
+        let mut best_max_height = f64::INFINITY;
+        for candidate_col in 0..num_cols {
+            let mut trial = col_heights.clone();
+            trial[candidate_col] += group_heights[gi];
+            let max_h = trial.iter().copied().fold(0.0_f64, f64::max);
+            if max_h < best_max_height {
+                best_max_height = max_h;
+                best_col = candidate_col;
+            }
+        }
+        group_col[gi] = Some(best_col);
+        col_heights[best_col] += group_heights[gi];
     }
 
     // Step 6: Map group column assignments back to individual domains.
