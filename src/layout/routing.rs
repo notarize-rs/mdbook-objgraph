@@ -139,6 +139,10 @@ pub struct Corridor {
     /// Domain IDs this corridor belongs to. Empty for inter-domain corridors.
     /// Multiple IDs when same-column domains share the same corridor x-range.
     pub domain_ids: Vec<DomainId>,
+    /// When true, new channels are allocated to the LEFT (-x) of existing ones.
+    /// Used for the outer-left corridor where channels must grow away from the
+    /// adjacent domain boundary, not toward it.
+    pub grows_left: bool,
 }
 
 impl Corridor {
@@ -183,6 +187,8 @@ impl Corridor {
         // All channels overlap or would cause crossings — create a new one.
         let new_x = if self.channels.is_empty() {
             self.x_start + CORRIDOR_PAD
+        } else if self.grows_left {
+            self.channels.last().unwrap().x - CHANNEL_GAP
         } else {
             self.channels.last().unwrap().x + CHANNEL_GAP
         };
@@ -278,29 +284,34 @@ fn build_corridors(
                     occupants: Vec::new(),
                 }],
                 domain_ids: vec![],
+                grows_left: false,
             });
         }
     }
 
-    // Outer corridors: left edge (x=0 to leftmost domain) and right edge
-    // (rightmost domain to rightmost domain + outer width).
+    // Outer corridors: left edge (before leftmost domain) and right edge
+    // (after rightmost domain).  These are inter-domain corridors used by
+    // cross-domain same-column edges that route away from the inter-column
+    // gap.  ALWAYS created — if the leftmost domain is flush with x=0,
+    // the corridor extends into negative x (the SVG content_offset_x
+    // mechanism will shift the viewport to compensate, just as it does
+    // for edge labels that extend past the left boundary).
     if let (Some(leftmost), Some(rightmost)) = (sorted_domains.first(), sorted_domains.last()) {
         let left_edge = leftmost.x;
-        if left_edge > CORRIDOR_PAD + 0.5 {
-            // There's space for an outer left corridor.
-            corridors.push(Corridor {
-                x_start: 0.0,
-                x_end: left_edge,
-                channels: vec![CorridorChannel {
-                    x: CORRIDOR_PAD,
-                    occupants: Vec::new(),
-                }],
-                domain_ids: vec![],
-            });
-        }
+        let outer_width = CORRIDOR_PAD * 2.0;
+        let x_start = (left_edge - outer_width).min(0.0);
+        corridors.push(Corridor {
+            x_start,
+            x_end: left_edge,
+            channels: vec![CorridorChannel {
+                x: left_edge - CORRIDOR_PAD,
+                occupants: Vec::new(),
+            }],
+            domain_ids: vec![],
+            grows_left: true,
+        });
 
         let right_edge = rightmost.x + rightmost.width;
-        let outer_width = CORRIDOR_PAD * 2.0;
         corridors.push(Corridor {
             x_start: right_edge,
             x_end: right_edge + outer_width,
@@ -309,6 +320,7 @@ fn build_corridors(
                 occupants: Vec::new(),
             }],
             domain_ids: vec![],
+            grows_left: false,
         });
     }
 
@@ -341,6 +353,7 @@ fn merge_or_create_corridor(
             occupants: Vec::new(),
         }],
         domain_ids: vec![domain_id],
+        grows_left: false,
     });
 }
 
@@ -402,15 +415,26 @@ fn find_corridor_channel(
     y_end: f64,
     edge_domain: Option<DomainId>,
 ) -> f64 {
-    match find_best_corridor_idx(port_x, port_side, corridors, edge_domain) {
-        Some(idx) => corridors[idx].allocate_channel(edge_id, y_start, y_end),
-        None => {
-            // Fallback: no corridor found, use offset from port.
-            match port_side {
-                PortSide::Left => port_x - CORRIDOR_PAD,
-                PortSide::Right => port_x + CORRIDOR_PAD,
-            }
-        }
+    if let Some(idx) = find_best_corridor_idx(port_x, port_side, corridors, edge_domain) {
+        return corridors[idx].allocate_channel(edge_id, y_start, y_end);
+    }
+
+    // No corridor in the preferred direction.  Try the opposite direction
+    // rather than using a blind offset that could land inside an intra-domain
+    // corridor.  This is critical for cross-domain edges (edge_domain=None)
+    // where the outer corridor may only exist on one side.
+    let opposite = match port_side {
+        PortSide::Left => PortSide::Right,
+        PortSide::Right => PortSide::Left,
+    };
+    if let Some(idx) = find_best_corridor_idx(port_x, opposite, corridors, edge_domain) {
+        return corridors[idx].allocate_channel(edge_id, y_start, y_end);
+    }
+
+    // Last resort: offset from port (should not happen with outer corridors).
+    match port_side {
+        PortSide::Left => port_x - CORRIDOR_PAD,
+        PortSide::Right => port_x + CORRIDOR_PAD,
     }
 }
 
