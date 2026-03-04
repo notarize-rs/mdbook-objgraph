@@ -750,20 +750,6 @@ impl Aabb {
         px >= self.x && px <= self.x + self.w && py >= self.y && py <= self.y + self.h
     }
 
-    /// Fraction of `other` that is hidden (overlapped) by `self`.
-    /// Returns 0.0 if no overlap, 1.0 if fully contained.
-    fn overlap_fraction(&self, other: &Aabb) -> f64 {
-        let other_area = other.w * other.h;
-        if other_area <= 0.0 {
-            return 0.0;
-        }
-        let ix = (self.x + self.w).min(other.x + other.w) - self.x.max(other.x);
-        let iy = (self.y + self.h).min(other.y + other.h) - self.y.max(other.y);
-        if ix <= 0.0 || iy <= 0.0 {
-            return 0.0;
-        }
-        (ix * iy) / other_area
-    }
 }
 
 /// Test if a line segment intersects an AABB.
@@ -1893,8 +1879,9 @@ fn find_labels_hidden_under_nodes(
         let lb = Aabb::from_label(label);
         for n in nodes {
             let nb = Aabb::from_node(n);
-            // Label is occluded if >50% of its area is behind the node.
-            if nb.overlap_fraction(&lb) > 0.5 {
+            // Label is fully hidden if the node AABB fully contains the label.
+            // Partial occlusion (>50%) is caught by find_labels_occluded_by_nodes.
+            if nb.contains(&lb) {
                 out.push((eid, n.id));
             }
         }

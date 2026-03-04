@@ -493,7 +493,11 @@ fn pick_best_label_candidate(
     let text_width = text.len() as f64 * font_size * LABEL_CHAR_WIDTH_FACTOR;
 
     // Generate node-clearing candidates: for each primary candidate that would
-    // be occluded by a node, create a shifted version just outside the node.
+    // be occluded by a node, create shifted versions just outside the node.
+    // We shift in all four directions (left, right, above, below) to handle
+    // both horizontal and vertical overlap geometries.
+    let label_h = font_size;
+    let pad = 4.0;
     let mut all_candidates: Vec<(f64, f64, &'static str)> = candidates.to_vec();
     for &(cx, cy, anchor) in candidates {
         let (left, _right) = match anchor {
@@ -507,12 +511,16 @@ fn pick_best_label_candidate(
             if frac > 0.3 {
                 let node_right = node_bb.0 + node_bb.2;
                 let node_left = node_bb.0;
-                // Candidate shifted right: label starts just past node right edge.
-                let shifted_right_x = node_right + 2.0;
-                all_candidates.push((shifted_right_x, cy, "start"));
-                // Candidate shifted left: label ends just before node left edge.
-                let shifted_left_x = node_left - 2.0;
-                all_candidates.push((shifted_left_x, cy, "end"));
+                let node_top = node_bb.1;
+                let node_bottom = node_bb.1 + node_bb.3;
+                // Horizontal shifts: label placed just outside node edges.
+                all_candidates.push((node_right + pad, cy, "start"));
+                all_candidates.push((node_left - pad, cy, "end"));
+                // Vertical shifts: label placed just above or below the node.
+                let above_y = node_top - pad;
+                let below_y = node_bottom + label_h + pad;
+                all_candidates.push((cx, above_y, anchor));
+                all_candidates.push((cx, below_y, anchor));
             }
         }
     }
@@ -790,6 +798,11 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // for font-estimation error — the actual rendered text can be wider than
     // our character-counting estimate, and this margin keeps labels safely
     // inside the final canvas.
+    //
+    // IMPORTANT: clamping must not push a label INTO a node.  If the clamped
+    // position would overlap a node by >50%, we skip the clamp — a label that
+    // extends slightly past the canvas edge is better than one hidden behind
+    // a node.
     {
         let mut content_max_x = 0.0_f64;
         let mut content_max_y = 0.0_f64;
@@ -805,16 +818,34 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         let clamp_max_x = content_max_x - LABEL_OVERFLOW_PAD;
         let clamp_max_y = content_max_y;
 
+        let clamp_label = |label: &mut EdgeLabel| {
+            let before_x = label.x;
+            let before_y = label.y;
+            label.clamp_to_content_area(clamp_max_x, clamp_max_y);
+
+            // Check if the clamped position overlaps a node by >50%.
+            // If so, revert to the pre-clamp position.
+            let bb = label.bounding_box();
+            for nbb in &node_aabbs {
+                let frac = overlap_fraction(nbb, &bb);
+                if frac > 0.5 {
+                    label.x = before_x;
+                    label.y = before_y;
+                    return;
+                }
+            }
+        };
+
         for ep in anchors.iter_mut()
             .chain(intra_domain_constraints.iter_mut())
         {
             if let Some(ref mut label) = ep.label {
-                label.clamp_to_content_area(clamp_max_x, clamp_max_y);
+                clamp_label(label);
             }
         }
         for cdp in cross_domain_constraints.iter_mut() {
             if let Some(ref mut label) = cdp.full_path.label {
-                label.clamp_to_content_area(clamp_max_x, clamp_max_y);
+                clamp_label(label);
             }
         }
     }
