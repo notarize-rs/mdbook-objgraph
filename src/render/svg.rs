@@ -130,6 +130,48 @@ fn write_domains(out: &mut String, layout: &LayoutResult) {
 }
 
 // ---------------------------------------------------------------------------
+// Edge path rendering helper
+// ---------------------------------------------------------------------------
+
+/// Write an edge path element with optional label.
+///
+/// `class_prefix` is e.g. "obgraph-anchor" — appended with "-invalid" when invalid.
+/// `marker_prefix` is e.g. "arrow-anchor" — appended with "-valid"/"-invalid".
+/// `valid_color` is the label fill when the edge is valid (e.g. green or blue).
+fn write_edge_path(
+    out: &mut String,
+    ep: &crate::layout::EdgePath,
+    valid: bool,
+    class_prefix: &str,
+    marker_prefix: &str,
+    valid_color: &str,
+) {
+    let (class, marker) = if valid {
+        (class_prefix.to_string(), format!("{marker_prefix}-valid"))
+    } else {
+        (format!("{class_prefix}-invalid"), format!("{marker_prefix}-invalid"))
+    };
+    writeln!(
+        out,
+        r#"        <path class="{class}" d="{d}" data-edge="{id}" marker-end="url(#{marker})"/>"#,
+        class = class,
+        d = ep.svg_path,
+        id = ep.edge_id.0,
+        marker = marker,
+    )
+    .unwrap();
+    if let Some(lbl) = &ep.label {
+        let label_fill = if valid { valid_color } else { "#ef4444" };
+        writeln!(
+            out,
+            r##"        <text class="{cls}-label" x="{x}" y="{y}" fill="{fill}" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
+            cls = class_prefix,
+            x = lbl.x, y = lbl.y, fill = label_fill, anchor = lbl.anchor, text = escape_xml(&lbl.text)
+        ).unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Layer 1: edges
 // ---------------------------------------------------------------------------
 
@@ -162,28 +204,7 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
     writeln!(out, r#"      <g class="obgraph-anchors">"#).unwrap();
     for ep in &layout.anchors {
         let valid = is_edge_valid(ep.edge_id, graph, state);
-        let (class, marker) = if valid {
-            ("obgraph-anchor", "arrow-anchor-valid")
-        } else {
-            ("obgraph-anchor-invalid", "arrow-anchor-invalid")
-        };
-        writeln!(
-            out,
-            r#"        <path class="{class}" d="{d}" data-edge="{id}" marker-end="url(#{marker})"/>"#,
-            class = class,
-            d = ep.svg_path,
-            id = ep.edge_id.0,
-            marker = marker,
-        )
-        .unwrap();
-        if let Some(lbl) = &ep.label {
-            let label_fill = if valid { "#22c55e" } else { "#ef4444" };
-            writeln!(
-                out,
-                r##"        <text class="obgraph-anchor-label" x="{x}" y="{y}" fill="{fill}" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
-                x = lbl.x, y = lbl.y, fill = label_fill, anchor = lbl.anchor, text = escape_xml(&lbl.text)
-            ).unwrap();
-        }
+        write_edge_path(out, ep, valid, "obgraph-anchor", "arrow-anchor", "#22c55e");
     }
     writeln!(out, r#"      </g>"#).unwrap();
 
@@ -191,28 +212,7 @@ fn write_edges(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
     writeln!(out, r#"      <g class="obgraph-constraints-intra">"#).unwrap();
     for ep in &layout.intra_domain_constraints {
         let valid = is_edge_valid(ep.edge_id, graph, state);
-        let (class, marker) = if valid {
-            ("obgraph-constraint", "arrow-constraint-valid")
-        } else {
-            ("obgraph-constraint-invalid", "arrow-constraint-invalid")
-        };
-        writeln!(
-            out,
-            r#"        <path class="{class}" d="{d}" data-edge="{id}" marker-end="url(#{marker})"/>"#,
-            class = class,
-            d = ep.svg_path,
-            id = ep.edge_id.0,
-            marker = marker,
-        )
-        .unwrap();
-        if let Some(lbl) = &ep.label {
-            let label_fill = if valid { "#60a5fa" } else { "#ef4444" };
-            writeln!(
-                out,
-                r##"        <text class="obgraph-constraint-label" x="{x}" y="{y}" fill="{fill}" text-anchor="{anchor}" dominant-baseline="central">{text}</text>"##,
-                x = lbl.x, y = lbl.y, fill = label_fill, anchor = lbl.anchor, text = escape_xml(&lbl.text)
-            ).unwrap();
-        }
+        write_edge_path(out, ep, valid, "obgraph-constraint", "arrow-constraint", "#60a5fa");
     }
     writeln!(out, r#"      </g>"#).unwrap();
 
@@ -523,77 +523,18 @@ fn write_defs(out: &mut String) {
     )
     .unwrap();
 
-    // Anchor arrowhead: 6×6, valid (green)
-    writeln!(
-        out,
-        r#"      <marker id="arrow-anchor-valid" viewBox="0 0 6 6" refX="0" refY="3""#
-    )
-    .unwrap();
-    writeln!(
-        out,
-        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto">"#
-    )
-    .unwrap();
-    writeln!(
-        out,
-        r##"        <path d="M0,0 L6,3 L0,6 Z" fill="#22c55e"/>"##
-    )
-    .unwrap();
-    writeln!(out, r#"      </marker>"#).unwrap();
-
-    // Anchor arrowhead: 6×6, invalid (red)
-    writeln!(
-        out,
-        r#"      <marker id="arrow-anchor-invalid" viewBox="0 0 6 6" refX="0" refY="3""#
-    )
-    .unwrap();
-    writeln!(
-        out,
-        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto">"#
-    )
-    .unwrap();
-    writeln!(
-        out,
-        r##"        <path d="M0,0 L6,3 L0,6 Z" fill="#ef4444"/>"##
-    )
-    .unwrap();
-    writeln!(out, r#"      </marker>"#).unwrap();
-
-    // Constraint arrowhead: 6×6, valid (blue)
-    writeln!(
-        out,
-        r#"      <marker id="arrow-constraint-valid" viewBox="0 0 6 6" refX="0" refY="3""#
-    )
-    .unwrap();
-    writeln!(
-        out,
-        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto">"#
-    )
-    .unwrap();
-    writeln!(
-        out,
-        r##"        <path d="M0,0 L6,3 L0,6 Z" fill="#60a5fa"/>"##
-    )
-    .unwrap();
-    writeln!(out, r#"      </marker>"#).unwrap();
-
-    // Constraint arrowhead: 6×6, invalid (red)
-    writeln!(
-        out,
-        r#"      <marker id="arrow-constraint-invalid" viewBox="0 0 6 6" refX="0" refY="3""#
-    )
-    .unwrap();
-    writeln!(
-        out,
-        r#"              markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto">"#
-    )
-    .unwrap();
-    writeln!(
-        out,
-        r##"        <path d="M0,0 L6,3 L0,6 Z" fill="#ef4444"/>"##
-    )
-    .unwrap();
-    writeln!(out, r#"      </marker>"#).unwrap();
+    for (id, color) in [
+        ("arrow-anchor-valid", "#22c55e"),
+        ("arrow-anchor-invalid", "#ef4444"),
+        ("arrow-constraint-valid", "#60a5fa"),
+        ("arrow-constraint-invalid", "#ef4444"),
+    ] {
+        writeln!(
+            out,
+            r##"      <marker id="{id}" viewBox="0 0 6 6" refX="0" refY="3" markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="{color}"/></marker>"##,
+            id = id, color = color,
+        ).unwrap();
+    }
 
     writeln!(out, r#"    </defs>"#).unwrap();
 }
