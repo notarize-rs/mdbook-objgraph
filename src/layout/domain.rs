@@ -29,22 +29,7 @@ pub fn compute_domain_bounds(graph: &Graph, node_layouts: &[NodeLayout]) -> Vec<
                 return None;
             }
 
-            let min_x = member_layouts
-                .iter()
-                .map(|nl| nl.x)
-                .fold(f64::INFINITY, f64::min);
-            let min_y = member_layouts
-                .iter()
-                .map(|nl| nl.y)
-                .fold(f64::INFINITY, f64::min);
-            let max_x = member_layouts
-                .iter()
-                .map(|nl| nl.x + nl.width)
-                .fold(f64::NEG_INFINITY, f64::max);
-            let max_y = member_layouts
-                .iter()
-                .map(|nl| nl.y + nl.height)
-                .fold(f64::NEG_INFINITY, f64::max);
+            let (min_x, min_y, max_x, max_y) = super::node_bounds(&member_layouts).unwrap();
 
             // Left/right padding is the corridor space (CORRIDOR_PAD * 2 = 16px
             // for a single-channel corridor) plus any extra DOMAIN_PADDING (0px).
@@ -1032,17 +1017,11 @@ pub fn expand_corridors_for_edges(
         // processing, so the corridor may already be wider than the default.
         let dl_idx_tmp = domain_layouts.iter().position(|dl| dl.id == did).unwrap();
         let members: Vec<&NodeLayout> = domain.members.iter().map(|nid| &node_layouts[nid.index()]).collect();
-        let current_left_corridor = if members.is_empty() {
-            default_corridor
+        let (current_left_corridor, current_right_corridor) = if let Some((min_x, _, max_x, _)) = super::node_bounds(&members) {
+            let dl = &domain_layouts[dl_idx_tmp];
+            ((min_x - dl.x).max(default_corridor), ((dl.x + dl.width) - max_x).max(default_corridor))
         } else {
-            let min_node_x = members.iter().map(|nl| nl.x).fold(f64::INFINITY, f64::min);
-            (min_node_x - domain_layouts[dl_idx_tmp].x).max(default_corridor)
-        };
-        let current_right_corridor = if members.is_empty() {
-            default_corridor
-        } else {
-            let max_node_right = members.iter().map(|nl| nl.x + nl.width).fold(f64::NEG_INFINITY, f64::max);
-            ((domain_layouts[dl_idx_tmp].x + domain_layouts[dl_idx_tmp].width) - max_node_right).max(default_corridor)
+            (default_corridor, default_corridor)
         };
 
         // How much extra space is needed beyond the current corridor?
