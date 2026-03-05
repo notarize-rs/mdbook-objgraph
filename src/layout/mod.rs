@@ -44,7 +44,7 @@ pub const DOMAIN_TITLE_HEIGHT: f64 = 32.0;
 /// domain-to-node gap — no additional padding is specified.
 pub const DOMAIN_PADDING: f64 = 0.0;
 /// Padding from corridor edge to channel center.
-pub const CORRIDOR_PAD: f64 = 8.0;
+pub const CORRIDOR_PAD: f64 = 16.0;
 /// Padding between adjacent channels in a corridor.
 pub const CHANNEL_GAP: f64 = 4.0;
 /// Parallel edge offset in shared channels.
