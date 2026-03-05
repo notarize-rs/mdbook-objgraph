@@ -90,6 +90,26 @@ impl Parser {
         }
     }
 
+    /// Consume and return the inner string if the current token is `Ident`
+    /// or `StringLit`, else error. Used for operation labels which may be
+    /// bare identifiers (`ge`) or quoted strings (`">="`)`.
+    fn expect_label(&mut self) -> Result<String, ObgraphError> {
+        match self.peek().clone() {
+            Token::Ident(s) | Token::StringLit(s) => {
+                self.advance();
+                Ok(s)
+            }
+            _ => {
+                let (line, col) = self.here();
+                Err(ObgraphError::Parse {
+                    line,
+                    col,
+                    message: format!("expected label, found `{:?}`", self.peek()),
+                })
+            }
+        }
+    }
+
     /// Skip over `Newline` tokens.
     fn skip_newlines(&mut self) {
         while *self.peek() == Token::Newline {
@@ -384,7 +404,7 @@ impl Parser {
 
         let operation = if *self.peek() == Token::Colon {
             self.advance(); // consume ':'
-            Some(self.expect_ident()?)
+            Some(self.expect_label()?)
         } else {
             None
         };
@@ -411,7 +431,7 @@ impl Parser {
 
         let operation = if *self.peek() == Token::Colon {
             self.advance(); // consume ':'
-            Some(self.expect_ident()?)
+            Some(self.expect_label()?)
         } else {
             None
         };
