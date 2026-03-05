@@ -576,10 +576,26 @@ pub fn assign_y_coordinates(layers: &[LayerEntry], graph: &Graph) -> HashMap<u32
             })
             .fold(0.0_f64, f64::max);
         // Use INTER_NODE_GAP for the vertical gap between layers.
-        // The initial LAYER_V_SPACING (48px) is a theoretical maximum;
-        // the mockup and vertical compaction target INTER_NODE_GAP (28px)
-        // between all adjacent elements.
-        y_offset += INTER_NODE_GAP + max_height;
+        // For layers containing derivation (pill) nodes with fan-out edges,
+        // expand the gap to fit CORRIDOR_PAD + fan-out channels.
+        let pill_fanout = layer.items.iter().filter_map(|item| match item {
+            LayerItem::Node(nid) if graph.nodes[nid.index()].is_derivation() => {
+                let n = graph.edges.iter().filter(|e| {
+                    let (src, _) = graph.edge_nodes(e);
+                    src == *nid && matches!(e, crate::model::types::Edge::Constraint { .. })
+                }).count();
+                Some(n)
+            }
+            _ => None,
+        }).max().unwrap_or(0);
+
+        let gap = if pill_fanout > 1 {
+            let needed = 2.0 * super::CORRIDOR_PAD + (pill_fanout as f64 - 1.0) * super::CHANNEL_GAP;
+            INTER_NODE_GAP.max(needed)
+        } else {
+            INTER_NODE_GAP
+        };
+        y_offset += gap + max_height;
     }
 
     y_map
