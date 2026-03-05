@@ -2,7 +2,7 @@ pub mod ast;
 pub mod lexer;
 
 use ast::{
-    AstConstraint, AstDomain, AstGraph, AstAnchor, AstNode, AstProperty,
+    AstConstraint, AstDomain, AstGraph, AstAnchor, AstNode, AstProperty, AstSourceExpr,
 };
 use crate::ObgraphError;
 use lexer::{Lexer, Spanned, Token};
@@ -143,11 +143,48 @@ impl Parser {
     //
     // Returns (node_ident, prop_name).
     // -----------------------------------------------------------------------
-    fn parse_prop_ref(&mut self) -> Result<(String, String), ObgraphError> {
-        let node_ident = self.expect_ident()?;
-        self.expect(&Token::ColonColon)?;
-        let prop_name = self.parse_prop_name()?;
-        Ok((node_ident, prop_name))
+    // -----------------------------------------------------------------------
+    // Parse a source expression: either a prop_ref or a derivation call.
+    //
+    //   source_expr ← derivation / prop_ref
+    //   derivation  ← ident '(' source_expr (',' source_expr)* ')'
+    //   prop_ref    ← ident '::' prop_name
+    // -----------------------------------------------------------------------
+    fn parse_source_expr(&mut self) -> Result<AstSourceExpr, ObgraphError> {
+        let ident = self.expect_ident()?;
+        match self.peek() {
+            Token::ColonColon => {
+                // prop_ref: node::prop
+                self.advance();
+                let prop_name = self.parse_prop_name()?;
+                Ok(AstSourceExpr::PropRef { node: ident, prop: prop_name })
+            }
+            Token::LParen => {
+                // derivation: function(args...)
+                self.advance();
+                let mut args = Vec::new();
+                if *self.peek() != Token::RParen {
+                    args.push(self.parse_source_expr()?);
+                    while *self.peek() == Token::Comma {
+                        self.advance();
+                        args.push(self.parse_source_expr()?);
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                Ok(AstSourceExpr::Derivation { function: ident, args })
+            }
+            _ => {
+                let (line, col) = self.here();
+                Err(ObgraphError::Parse {
+                    line,
+                    col,
+                    message: format!(
+                        "expected `::` (prop ref) or `(` (derivation) after `{ident}`, found `{:?}`",
+                        self.peek()
+                    ),
+                })
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -370,7 +407,7 @@ impl Parser {
         dest_prop: String,
     ) -> Result<AstConstraint, ObgraphError> {
         self.expect(&Token::LeftAngleEq)?;
-        let (source_node, source_prop) = self.parse_prop_ref()?;
+        let source = self.parse_source_expr()?;
 
         let operation = if *self.peek() == Token::Colon {
             self.advance(); // consume ':'
@@ -380,7 +417,7 @@ impl Parser {
         };
 
         self.expect_newline_or_eof()?;
-        Ok(AstConstraint { dest_node, dest_prop, source_node, source_prop, operation })
+        Ok(AstConstraint { dest_node, dest_prop, source, operation })
     }
 
     // -----------------------------------------------------------------------
@@ -652,8 +689,13 @@ mod tests {
         let c = &g.constraints[0];
         assert_eq!(c.dest_node, "cert");
         assert_eq!(c.dest_prop, "issuer.org");
-        assert_eq!(c.source_node, "ca");
-        assert_eq!(c.source_prop, "subject.org");
+        match &c.source {
+            AstSourceExpr::PropRef { node, prop } => {
+                assert_eq!(node, "ca");
+                assert_eq!(prop, "subject.org");
+            }
+            _ => panic!("expected PropRef"),
+        }
         assert_eq!(c.operation, None);
     }
 
@@ -818,8 +860,13 @@ cert::subject.common_name <= revocation::crl : not_in
         let c0 = &g.constraints[0];
         assert_eq!(c0.dest_node, "cert");
         assert_eq!(c0.dest_prop, "issuer.common_name");
-        assert_eq!(c0.source_node, "ca");
-        assert_eq!(c0.source_prop, "subject.common_name");
+        match &c0.source {
+            AstSourceExpr::PropRef { node, prop } => {
+                assert_eq!(node, "ca");
+                assert_eq!(prop, "subject.common_name");
+            }
+            _ => panic!("expected PropRef"),
+        }
 
         let c2 = &g.constraints[2];
         assert_eq!(c2.dest_prop, "signature");

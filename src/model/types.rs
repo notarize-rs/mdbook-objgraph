@@ -64,9 +64,9 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// Look up a node by identifier string.
+    /// Look up a node by identifier string (skips derivation nodes).
     pub fn find_node_by_ident(&self, ident: &str) -> Option<&Node> {
-        self.nodes.iter().find(|n| n.ident == ident)
+        self.nodes.iter().find(|n| n.ident.as_deref() == Some(ident))
     }
 
     /// Look up a property by node ident and property name.
@@ -113,7 +113,8 @@ impl Graph {
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: NodeId,
-    pub ident: String,
+    /// User-visible identifier. `None` for derivation (synthetic) nodes.
+    pub ident: Option<String>,
     pub display_name: Option<String>,
     pub properties: Vec<PropId>,
     pub domain: Option<DomainId>,
@@ -122,9 +123,22 @@ pub struct Node {
 }
 
 impl Node {
-    /// The display label: display_name if set, otherwise ident.
+    /// Returns `true` for synthetic derivation nodes (`ident` is `None`).
+    pub fn is_derivation(&self) -> bool {
+        self.ident.is_none()
+    }
+
+    /// The display label: display_name if set, then ident, then a fallback.
     pub fn label(&self) -> &str {
-        self.display_name.as_deref().unwrap_or(&self.ident)
+        self.display_name.as_deref()
+            .or(self.ident.as_deref())
+            .unwrap_or("<derivation>")
+    }
+}
+
+impl fmt::Display for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.label())
     }
 }
 

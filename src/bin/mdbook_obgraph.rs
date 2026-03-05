@@ -625,8 +625,8 @@ fn print_check_text(
                     .iter()
                     .map(|(a, b)| format!(
                         "{} \u{2194} {}",
-                        graph.nodes[a.index()].ident,
-                        graph.nodes[b.index()].ident
+                        graph.nodes[a.index()],
+                        graph.nodes[b.index()]
                     ))
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -803,8 +803,8 @@ fn quality_to_json(
         .map(|(a, b)| {
             format!(
                 "{} \u{2194} {}",
-                graph.nodes[a.index()].ident,
-                graph.nodes[b.index()].ident
+                graph.nodes[a.index()],
+                graph.nodes[b.index()]
             )
         })
         .collect();
@@ -1024,7 +1024,7 @@ fn run_inspect(args: InspectArgs) -> i32 {
                     .unwrap_or("(none)");
                 println!(
                     "  {} [{}]: x={:.0}..{:.0} y={:.0}..{:.0} ({:.0}x{:.0})",
-                    node.ident,
+                    node,
                     dom,
                     nl.x,
                     nl.x + nl.width,
@@ -1153,8 +1153,8 @@ fn edge_description(
         } => {
             format!(
                 "{} \u{2190} {} : {}",
-                graph.nodes[parent.index()].ident,
-                graph.nodes[child.index()].ident,
+                graph.nodes[parent.index()],
+                graph.nodes[child.index()],
                 operation.as_deref().unwrap_or("(none)"),
             )
         }
@@ -1169,9 +1169,9 @@ fn edge_description(
             let dst_pname = &graph.properties[dest_prop.index()].name;
             format!(
                 "{}::{} \u{2192} {}::{} [{}]",
-                src_node.ident,
+                src_node,
                 src_pname,
-                dst_node.ident,
+                dst_node,
                 dst_pname,
                 operation.as_deref().unwrap_or("(none)"),
             )

@@ -28,10 +28,10 @@ pub fn validate(graph: &Graph) -> Result<(), ObgraphError> {
 fn check_duplicate_node_idents(graph: &Graph) -> Result<(), ObgraphError> {
     let mut seen: HashSet<&str> = HashSet::new();
     for node in &graph.nodes {
-        if !seen.insert(node.ident.as_str()) {
+        // Derivation nodes have no ident — skip them.
+        if let Some(ident) = node.ident.as_deref().filter(|id| !seen.insert(*id)) {
             return Err(ObgraphError::Validation(format!(
-                "duplicate node identifier: '{}'",
-                node.ident
+                "duplicate node identifier: '{ident}'"
             )));
         }
     }
@@ -50,7 +50,7 @@ fn check_duplicate_property_names(graph: &Graph) -> Result<(), ObgraphError> {
             if !seen.insert(prop.name.as_str()) {
                 return Err(ObgraphError::Validation(format!(
                     "duplicate property name '{}' in node '{}'",
-                    prop.name, node.ident
+                    prop.name, node
                 )));
             }
         }
@@ -134,7 +134,7 @@ fn check_constraint_on_constrained_prop(graph: &Graph) -> Result<(), ObgraphErro
                 return Err(ObgraphError::Validation(format!(
                     "property '{}' on node '{}' is @constrained but has an incoming constraint \
                      (contradictory: pre-satisfied properties cannot also be constrained by edges)",
-                    prop.name, node.ident
+                    prop.name, node
                 )));
             }
         }
@@ -152,7 +152,7 @@ fn check_root_node_incoming_anchor(graph: &Graph) -> Result<(), ObgraphError> {
             return Err(ObgraphError::Validation(format!(
                 "node '{}' is annotated @anchored but appears as the child in an anchor \
                  (root nodes must not have a parent)",
-                node.ident
+                node
             )));
         }
     }
@@ -169,7 +169,7 @@ fn check_non_root_without_incoming_anchor(graph: &Graph) -> Result<(), ObgraphEr
             return Err(ObgraphError::Validation(format!(
                 "node '{}' is not @anchored but has no incoming anchor \
                  (orphaned nodes must be annotated @anchored or connected to a parent)",
-                node.ident
+                node
             )));
         }
     }
@@ -193,10 +193,10 @@ fn check_multiple_incoming_anchors(graph: &Graph) -> Result<(), ObgraphError> {
     }
     for (node_id, count) in &incoming_count {
         if *count > 1 {
-            let ident = &graph.nodes[node_id.index()].ident;
+            let node = &graph.nodes[node_id.index()];
             return Err(ObgraphError::Validation(format!(
                 "node '{}' has {} incoming anchors (at most one is allowed)",
-                ident, count
+                node, count
             )));
         }
     }
@@ -306,7 +306,7 @@ mod tests {
         let mut g = empty_graph();
         g.nodes.push(Node {
             id: NodeId(0),
-            ident: "root".to_string(),
+            ident: Some("root".to_string()),
             display_name: None,
             properties: vec![],
             domain: None,
@@ -321,7 +321,7 @@ mod tests {
         let mut g = empty_graph();
         g.nodes.push(Node {
             id: NodeId(0),
-            ident: "root".to_string(),
+            ident: Some("root".to_string()),
             display_name: None,
             properties: vec![],
             domain: None,
@@ -330,7 +330,7 @@ mod tests {
         });
         g.nodes.push(Node {
             id: NodeId(1),
-            ident: "child".to_string(),
+            ident: Some("child".to_string()),
             display_name: None,
             properties: vec![],
             domain: None,
@@ -410,7 +410,7 @@ mod tests {
         for i in 0..2u32 {
             g.nodes.push(Node {
                 id: NodeId(i),
-                ident: "duplicate".to_string(),
+                ident: Some("duplicate".to_string()),
                 display_name: None,
                 properties: vec![],
                 domain: None,
@@ -628,7 +628,7 @@ mod tests {
         // Add a second node that is NOT root and has no parent.
         g.nodes.push(Node {
             id: NodeId(1),
-            ident: "orphan".to_string(),
+            ident: Some("orphan".to_string()),
             display_name: None,
             properties: vec![],
             domain: None,
@@ -655,7 +655,7 @@ mod tests {
         for i in 0..3u32 {
             g.nodes.push(Node {
                 id: NodeId(i),
-                ident: format!("n{}", i),
+                ident: Some(format!("n{}", i)),
                 display_name: None,
                 properties: vec![],
                 domain: None,
@@ -736,7 +736,7 @@ mod tests {
         for i in 0..2u32 {
             g.nodes.push(Node {
                 id: NodeId(i),
-                ident: format!("n{}", i),
+                ident: Some(format!("n{}", i)),
                 display_name: None,
                 properties: vec![],
                 domain: None,
@@ -782,7 +782,7 @@ mod tests {
         for (i, name) in ["root", "mid", "leaf"].iter().enumerate() {
             g.nodes.push(Node {
                 id: NodeId(i as u32),
-                ident: name.to_string(),
+                ident: Some(name.to_string()),
                 display_name: None,
                 properties: vec![],
                 domain: None,

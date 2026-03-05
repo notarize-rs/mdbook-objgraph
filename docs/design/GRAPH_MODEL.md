@@ -1,6 +1,6 @@
 # Graph Model
 
-This document defines the obgraph graph model: its six core primitives, the
+This document defines the obgraph graph model: its five core primitives, the
 binary state flags on nodes and properties, structural constraints, the
 constraint/derivation distinction, the Rust data structures, and the
 fixed-point state propagation algorithm.
@@ -11,16 +11,17 @@ fixed-point state propagation algorithm.
 
 ### 2.1 Core Concepts
 
-The obgraph model consists of six primitives:
+The obgraph model consists of five primitives:
 
 | Primitive      | Description                                                                                                                                                                                                                                                                                                                                                               |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Node**       | A recorded subset of properties that an observer captured about some process. When anchored from a parent, the parent is the observer and the child node is what was recorded. Nodes annotated `@anchored` are anchored directly by annotation, with no parent anchor required. Has an identifier and an optional display name.                       |
-| **Property**   | A named attribute of a node. Rendered as a row inside the node with ports on left and right sides. Properties have two independent binary state flags: `critical` (set by `@critical` annotation — participates in the node's `verified` computation) and `constrained` (set by `@constrained` annotation or a valid incoming constraint).                                |
+| **Node**       | A recorded subset of properties that an observer captured about some process. When anchored from a parent, the parent is the observer and the child node is what was recorded. Nodes annotated `@anchored` are anchored directly by annotation, with no parent anchor required. Has an optional identifier (`None` for derivation nodes) and an optional display name.    |
+| **Property**   | A named attribute of a node. Rendered as a row inside the node with ports on left and right sides. Properties have two independent binary state flags: `critical` (set by `@critical` annotation — participates in the node's `verified` computation) and `constrained` (set by `@constrained` annotation or a valid incoming constraint). For derivation nodes, the property name carries the function name (e.g. `"filter"`). |
 | **Anchor**     | A hierarchical directed edge between two nodes. The parent anchors the child: trust flows right-to-left, with the parent on the right and the child on the left. A valid anchor requires the parent to be both anchored and verified. Carries an optional operation name defining the integrity method for the relationship.                                              |
-| **Constraint** | A binary test between two properties (or derivation outputs). Takes a destination (left-hand side) and a source expression (right-hand side), applies an operation, and returns a boolean indicating compatibility. When true, trust flows from the source to the destination. Carries an optional named operation; when omitted, equality is implied.                    |
-| **Derivation** | A computation that takes one or more properties (or other derivation outputs) as inputs and produces a new unnamed ephemeral property as output. Derivations are value producers, not boolean tests. They are expressed inline as function calls within constraint source expressions. The parser deduplicates identical derivation expressions into a single graph node. |
+| **Constraint** | A binary test between two properties. Takes a destination (left-hand side) and a source expression (right-hand side), applies an operation, and returns a boolean indicating compatibility. When true, trust flows from the source to the destination. Carries an optional named operation; when omitted, equality is implied. Also used for derivation inputs (no operation). |
 | **Domain**     | A visual grouping of nodes. Domains have no identity, carry no data, and do not participate in the graph structure. They are rendered as labeled bounding boxes around their member nodes.                                                                                                                                                                                |
+
+Derivations are not a separate primitive — they are synthetic `Node`s with `ident = None` and a single property whose name is the function name. See §2.5 for details.
 
 ### 2.2 State Model
 
@@ -187,19 +188,16 @@ port-level adjacency. All indices are `u32` newtypes for type safety.
 // Index types (newtypes over u32)
 struct NodeId(u32);
 struct PropId(u32);       // global property index, unique across all nodes
-struct DerivId(u32);
 struct EdgeId(u32);
 struct DomainId(u32);
 
 struct Graph {
     nodes: Vec<Node>,
     properties: Vec<Property>,     // all properties across all nodes
-    derivations: Vec<Derivation>,
     edges: Vec<Edge>,
     domains: Vec<Domain>,
 
     // Port-level adjacency: PropId → Vec<EdgeId>
-    // Includes edges to/from derivation ports.
     prop_edges: HashMap<PropId, Vec<EdgeId>>,
 
     // Node-level adjacency for anchor edges only: NodeId → Vec<EdgeId>
@@ -209,7 +207,7 @@ struct Graph {
 
 struct Node {
     id: NodeId,
-    ident: String,
+    ident: Option<String>,         // None for derivation nodes
     display_name: Option<String>,
     properties: Vec<PropId>,       // ordered as declared
     domain: Option<DomainId>,
@@ -220,16 +218,9 @@ struct Node {
 struct Property {
     id: PropId,
     node: NodeId,
-    name: String,                  // e.g. "subject.common_name"
+    name: String,                  // e.g. "subject.common_name" or function name for derivations
     critical: bool,                // @critical: participates in node verified computation
     constrained: bool,             // @constrained: pre-satisfied by annotation
-}
-
-struct Derivation {
-    id: DerivId,
-    operation: String,
-    inputs: Vec<PropId>,           // what feeds into this derivation
-    output_prop: PropId,           // the ephemeral property this produces
 }
 
 struct Domain {
@@ -241,8 +232,7 @@ struct Domain {
 
 #### Edge Types
 
-The graph contains three edge variants, distinguished by an enum. (Derivation
-outputs are implicit — see note below.)
+The graph contains two edge variants, distinguished by an enum:
 
 ```rust
 enum Edge {
@@ -254,33 +244,40 @@ enum Edge {
     },
 
     // Property → Property (trust verification).
-    // dest_prop is verified against source_prop (or derivation output).
+    // dest_prop is verified against source_prop.
     // Field order matches syntax: dest <= source.
     // For layout purposes, source_prop is the upstream end (higher layer)
     // and dest_prop is the downstream end (lower layer).
     Constraint {
         dest_prop: PropId,
-        source_prop: PropId,        // may be an ephemeral derivation output
+        source_prop: PropId,
         operation: Option<String>,
     },
-
-    // Property → Derivation input.
-    DerivInput {
-        source_prop: PropId,
-        target_deriv: DerivId,
-    },
-
-    // Derivation output → serves as source_prop in a Constraint.
-    // The derivation's output_prop is used directly as source_prop
-    // in the Constraint edge, so this edge type is implicit:
-    // the Constraint's source_prop points to the derivation's output_prop.
 }
 ```
 
-Note: `DerivInput` edges are explicit in the graph. Derivation outputs are
-represented by the derivation's `output_prop` field — the `Constraint` edge
-references this ephemeral `PropId` directly. There is no separate `DerivOutput`
-edge type.
+#### Derivation Nodes
+
+Derivations are represented as **synthetic `Node`s** with `ident = None`. They
+have no separate type — they reuse the existing `Node` and `Constraint` edge
+types:
+
+- **`ident`**: `None` — derivation nodes are unnamed and unreferenceable from
+  user syntax.
+- **`properties`**: Exactly one property whose `name` is the function name
+  (e.g. `"filter"`). This property has `critical = false`, `constrained = false`.
+- **`is_anchored`**: `true` — always anchored by construction.
+- **`domain`**: Inferred from inputs — same domain if all inputs share one;
+  `None` if cross-domain.
+
+Inputs to a derivation are regular `Constraint` edges targeting the derivation's
+property (no operation). The derivation's property serves as `source_prop` in
+the downstream constraint. Identical derivation expressions are deduplicated by
+`(function_name, sorted input PropIds)`.
+
+The derivation output becomes constrained only when **all** incoming constraints
+are satisfied (conjunction semantics), unlike regular properties which become
+constrained when **any** incoming constraint is satisfied.
 
 #### Adjacency Queries Required by Layout Phases
 
@@ -327,20 +324,22 @@ function propagate_state(graph) → (anchored: NodeSet, constrained_eff: PropSet
 
             // Only an anchored+verified node propagates outgoing constraints
             if anchored[n] AND verified(n):
-                // Propagate to directly constrained downstream properties
                 for each Constraint c where c.source_prop == p:
                     dest = c.dest_prop
-                    if NOT constrained_eff[dest]:
-                        constrained_eff[dest] = true
-                        prop_worklist.push(dest)
+                    dest_node = dest.node
 
-                // Propagate through derivations: output constrained when ALL inputs are
-                for each Derivation d where p in d.inputs:
-                    if all(constrained_eff[inp] for inp in d.inputs):
-                        out = d.output_prop
-                        if NOT constrained_eff[out]:
-                            constrained_eff[out] = true
-                            prop_worklist.push(out)
+                    // Derivation output: constrained when ALL inputs are satisfied
+                    if dest_node.is_derivation():
+                        if all incoming constraints on dest have constrained sources
+                           on anchored+verified nodes:
+                            if NOT constrained_eff[dest]:
+                                constrained_eff[dest] = true
+                                prop_worklist.push(dest)
+                    else:
+                        // Regular property: constrained by any single valid constraint
+                        if NOT constrained_eff[dest]:
+                            constrained_eff[dest] = true
+                            prop_worklist.push(dest)
 
             // A property becoming constrained may have newly verified its node
             if anchored[n] AND verified(n):

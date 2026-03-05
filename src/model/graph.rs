@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::parse::ast::AstGraph;
+use crate::parse::ast::{AstGraph, AstSourceExpr};
 use crate::ObgraphError;
 
 use super::types::{Domain, DomainId, Edge, EdgeId, Graph, Node, NodeId, PropId, Property};
@@ -70,21 +70,21 @@ impl Builder {
 
     fn alloc_node(
         &mut self,
-        ident: &str,
+        ident: Option<&str>,
         display_name: Option<String>,
         is_anchored: bool,
         is_selected: bool,
         domain: Option<DomainId>,
     ) -> Result<NodeId, ObgraphError> {
-        if self.node_lookup.contains_key(ident) {
+        if let Some(name) = ident.filter(|n| self.node_lookup.contains_key(*n)) {
             return Err(ObgraphError::Validation(format!(
-                "duplicate node identifier: {ident}"
+                "duplicate node identifier: {name}"
             )));
         }
         let id = self.next_node_id();
         let node = Node {
             id,
-            ident: ident.to_string(),
+            ident: ident.map(|s| s.to_string()),
             display_name,
             properties: Vec::new(),
             domain,
@@ -92,7 +92,9 @@ impl Builder {
             is_selected,
         };
         self.nodes.push(node);
-        self.node_lookup.insert(ident.to_string(), id);
+        if let Some(name) = ident {
+            self.node_lookup.insert(name.to_string(), id);
+        }
         Ok(id)
     }
 
@@ -125,6 +127,25 @@ impl Builder {
         self.properties.push(prop);
         self.prop_lookup.insert(key, id);
         // Register on the node.
+        self.nodes[node_id.index()].properties.push(id);
+        Ok(id)
+    }
+
+    /// Allocate a property on a derivation node (no prop_lookup entry needed).
+    fn alloc_derivation_property(
+        &mut self,
+        node_id: NodeId,
+        name: &str,
+    ) -> Result<PropId, ObgraphError> {
+        let id = self.next_prop_id();
+        let prop = Property {
+            id,
+            node: node_id,
+            name: name.to_string(),
+            critical: false,
+            constrained: false,
+        };
+        self.properties.push(prop);
         self.nodes[node_id.index()].properties.push(id);
         Ok(id)
     }
@@ -204,7 +225,7 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
 
         for ast_node in &ast_domain.nodes {
             let node_id = b.alloc_node(
-                &ast_node.ident,
+                Some(&ast_node.ident),
                 ast_node.display_name.clone(),
                 ast_node.is_anchored,
                 ast_node.is_selected,
@@ -230,7 +251,7 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
     // ------------------------------------------------------------------
     for ast_node in &ast.nodes {
         let node_id = b.alloc_node(
-            &ast_node.ident,
+            Some(&ast_node.ident),
             ast_node.display_name.clone(),
             ast_node.is_anchored,
             ast_node.is_selected,
@@ -270,11 +291,14 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
     }
 
     // ------------------------------------------------------------------
-    // Phase 4: Process constraints.
+    // Phase 4: Process constraints (including derivation desugaring).
     // ------------------------------------------------------------------
+    // Dedup map: (function_name, sorted input PropIds) -> output PropId
+    let mut deriv_cache: HashMap<(String, Vec<PropId>), PropId> = HashMap::new();
+
     for ast_constraint in &ast.constraints {
         let dest_prop_id = b.resolve_prop(&ast_constraint.dest_node, &ast_constraint.dest_prop)?;
-        let source_prop_id = b.resolve_prop(&ast_constraint.source_node, &ast_constraint.source_prop)?;
+        let source_prop_id = resolve_source_expr(&mut b, &ast_constraint.source, &mut deriv_cache)?;
 
         let eid = b.push_edge(Edge::Constraint {
             dest_prop: dest_prop_id,
@@ -295,6 +319,80 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
 }
 
 // ---------------------------------------------------------------------------
+// Derivation desugaring
+// ---------------------------------------------------------------------------
+
+/// Resolve a source expression to a `PropId`. For direct prop refs this is a
+/// simple lookup. For derivations, it creates a synthetic node (or reuses a
+/// deduplicated one) and wires up constraint edges from each input.
+fn resolve_source_expr(
+    b: &mut Builder,
+    expr: &AstSourceExpr,
+    deriv_cache: &mut HashMap<(String, Vec<PropId>), PropId>,
+) -> Result<PropId, ObgraphError> {
+    match expr {
+        AstSourceExpr::PropRef { node, prop } => b.resolve_prop(node, prop),
+        AstSourceExpr::Derivation { function, args } => {
+            // Recursively resolve each argument to a PropId.
+            let mut input_props = Vec::with_capacity(args.len());
+            for arg in args {
+                input_props.push(resolve_source_expr(b, arg, deriv_cache)?);
+            }
+
+            // Dedup key: (function_name, sorted input PropIds).
+            let mut sorted_inputs = input_props.clone();
+            sorted_inputs.sort();
+            let key = (function.clone(), sorted_inputs);
+
+            if let Some(&cached_prop) = deriv_cache.get(&key) {
+                return Ok(cached_prop);
+            }
+
+            // Infer domain: if all input source nodes share a domain, use it.
+            let domain = {
+                let mut domains = input_props.iter().map(|pid| {
+                    let node_id = b.properties[pid.index()].node;
+                    b.nodes[node_id.index()].domain
+                });
+                let first = domains.next().unwrap_or(None);
+                if domains.all(|d| d == first) { first } else { None }
+            };
+
+            // Create synthetic derivation node: ident=None, display_name=None.
+            let node_id = b.alloc_node(
+                None,           // no ident — derivation node
+                None,           // no display_name
+                true,           // always anchored
+                false,          // never selected
+                domain,
+            )?;
+
+            // Single property whose name is the function name.
+            let prop_id = b.alloc_derivation_property(node_id, function)?;
+
+            // Wire input constraints: each input prop -> derivation property.
+            for &input_pid in &input_props {
+                let eid = b.push_edge(Edge::Constraint {
+                    dest_prop: prop_id,
+                    source_prop: input_pid,
+                    operation: None,
+                });
+                b.record_prop_edge(prop_id, eid);
+                b.record_prop_edge(input_pid, eid);
+            }
+
+            // If this derivation is in a domain, register it as a member.
+            if let Some(did) = domain {
+                b.domains[did.index()].members.push(node_id);
+            }
+
+            deriv_cache.insert(key, prop_id);
+            Ok(prop_id)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -302,7 +400,7 @@ pub fn build(ast: AstGraph) -> Result<Graph, ObgraphError> {
 mod tests {
     use super::*;
     use crate::parse::ast::{
-        AstAnchor, AstConstraint, AstDomain, AstGraph, AstNode, AstProperty,
+        AstAnchor, AstConstraint, AstDomain, AstGraph, AstNode, AstProperty, AstSourceExpr,
     };
 
     // Helper to build a minimal AstNode (non-root).
@@ -374,7 +472,7 @@ mod tests {
         assert_eq!(g.properties.len(), 3);
 
         let node = &g.nodes[0];
-        assert_eq!(node.ident, "ca");
+        assert_eq!(node.ident.as_deref(), Some("ca"));
         assert_eq!(node.id, NodeId(0));
         assert_eq!(node.properties.len(), 3);
         assert_eq!(node.properties[0], PropId(0));
@@ -448,32 +546,28 @@ mod tests {
                 AstConstraint {
                     dest_node: "cert".to_string(),
                     dest_prop: "issuer.common_name".to_string(),
-                    source_node: "ca".to_string(),
-                    source_prop: "subject.common_name".to_string(),
+                    source: AstSourceExpr::PropRef { node: "ca".to_string(), prop: "subject.common_name".to_string() },
                     operation: Some("equality".to_string()),
                 },
                 // ca::subject.org -> cert::issuer.org
                 AstConstraint {
                     dest_node: "cert".to_string(),
                     dest_prop: "issuer.org".to_string(),
-                    source_node: "ca".to_string(),
-                    source_prop: "subject.org".to_string(),
+                    source: AstSourceExpr::PropRef { node: "ca".to_string(), prop: "subject.org".to_string() },
                     operation: Some("equality".to_string()),
                 },
                 // ca::public_key -> cert::signature
                 AstConstraint {
                     dest_node: "cert".to_string(),
                     dest_prop: "signature".to_string(),
-                    source_node: "ca".to_string(),
-                    source_prop: "public_key".to_string(),
+                    source: AstSourceExpr::PropRef { node: "ca".to_string(), prop: "public_key".to_string() },
                     operation: Some("verified_by".to_string()),
                 },
                 // revocation::crl -> cert::subject.common_name
                 AstConstraint {
                     dest_node: "cert".to_string(),
                     dest_prop: "subject.common_name".to_string(),
-                    source_node: "revocation".to_string(),
-                    source_prop: "crl".to_string(),
+                    source: AstSourceExpr::PropRef { node: "revocation".to_string(), prop: "crl".to_string() },
                     operation: Some("not_in".to_string()),
                 },
             ],
@@ -663,12 +757,12 @@ mod tests {
 
         // Domain nodes come first, then top-level nodes.
         assert_eq!(g.nodes.len(), 3);
-        assert_eq!(g.nodes[0].ident, "alpha");
+        assert_eq!(g.nodes[0].ident.as_deref(), Some("alpha"));
         assert_eq!(g.nodes[0].id, NodeId(0));
         assert_eq!(g.nodes[0].domain, Some(DomainId(0)));
-        assert_eq!(g.nodes[1].ident, "beta");
+        assert_eq!(g.nodes[1].ident.as_deref(), Some("beta"));
         assert_eq!(g.nodes[1].domain, Some(DomainId(0)));
-        assert_eq!(g.nodes[2].ident, "gamma");
+        assert_eq!(g.nodes[2].ident.as_deref(), Some("gamma"));
         assert_eq!(g.nodes[2].domain, None);
 
         assert_eq!(g.domains.len(), 1);
@@ -739,8 +833,7 @@ mod tests {
             constraints: vec![AstConstraint {
                 dest_node: "b".to_string(),
                 dest_prop: "y".to_string(),
-                source_node: "a".to_string(),
-                source_prop: "NONEXISTENT".to_string(),
+                source: AstSourceExpr::PropRef { node: "a".to_string(), prop: "NONEXISTENT".to_string() },
                 operation: None,
             }],
         };
