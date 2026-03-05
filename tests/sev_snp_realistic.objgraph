@@ -234,19 +234,19 @@ vTCGLog <- vQuote : pcr_replay
 # ═══════════════════════════════════════════════════════════════
 
 # ARK self-signed checks
-ARK::issuer <= ARK::subject : issuer_match
+ARK::issuer <= ARK::subject
 ARK::authorityKeyIdentifier <= ARK::subjectKeyIdentifier
 ARK::validityNotBefore <= System::current_time : time_valid
 ARK::validityNotAfter <= System::current_time : time_valid
 
 # ASK issued by ARK
-ASK::issuer <= ARK::subject : issuer_match
+ASK::issuer <= ARK::subject
 ASK::authorityKeyIdentifier <= ARK::subjectKeyIdentifier
 ASK::validityNotBefore <= System::current_time : time_valid
 ASK::validityNotAfter <= System::current_time : time_valid
 
 # VCEK issued by ASK
-VCEK::issuer <= ASK::subject : issuer_match
+VCEK::issuer <= ASK::subject
 VCEK::authorityKeyIdentifier <= ASK::subjectKeyIdentifier
 VCEK::validityNotBefore <= System::current_time : time_valid
 VCEK::validityNotAfter <= System::current_time : time_valid
@@ -287,13 +287,13 @@ Report::guest_svn <= filter(KDS::tcb_versions, NVD::cve_entries) : in
 # ═══════════════════════════════════════════════════════════════
 
 # MfgCA self-signed checks
-MfgCA::issuer <= MfgCA::subject : issuer_match
+MfgCA::issuer <= MfgCA::subject
 MfgCA::authorityKeyIdentifier <= MfgCA::subjectKeyIdentifier
 MfgCA::validityNotBefore <= System::current_time : time_valid
 MfgCA::validityNotAfter <= System::current_time : time_valid
 
 # EK issued by manufacturer
-EK::issuer <= MfgCA::subject : issuer_match
+EK::issuer <= MfgCA::subject
 EK::authorityKeyIdentifier <= MfgCA::subjectKeyIdentifier
 EK::validityNotBefore <= System::current_time : time_valid
 EK::validityNotAfter <= System::current_time : time_valid
