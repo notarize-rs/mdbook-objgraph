@@ -2380,16 +2380,32 @@ fn compute_max_column_centering_error(domains: &[DomainLayout]) -> f64 {
 }
 
 fn compute_domain_size_cv(domains: &[DomainLayout]) -> f64 {
-    if domains.len() < 2 {
+    let areas: Vec<f64> = domains.iter().map(|d| d.width * d.height).collect();
+    coefficient_of_variation(&areas)
+}
+
+// ---------------------------------------------------------------------------
+// Statistical helpers
+// ---------------------------------------------------------------------------
+
+/// Coefficient of variation: std_dev / mean. Returns 0.0 for fewer than 2 items.
+fn coefficient_of_variation(values: &[f64]) -> f64 {
+    if values.len() < 2 {
         return 0.0;
     }
-    let areas: Vec<f64> = domains.iter().map(|d| d.width * d.height).collect();
-    let mean = areas.iter().sum::<f64>() / areas.len() as f64;
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
     if mean <= 0.0 {
         return 0.0;
     }
-    let variance = areas.iter().map(|a| (a - mean) * (a - mean)).sum::<f64>() / areas.len() as f64;
+    let variance = values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / values.len() as f64;
     variance.sqrt() / mean
+}
+
+/// Balance ratio: min(a,b) / max(a,b). Returns 1.0 if both are zero.
+fn balance_ratio(a: f64, b: f64) -> f64 {
+    let max = a.max(b);
+    let min = a.min(b);
+    if max <= 0.0 { 1.0 } else { min / max }
 }
 
 // ---------------------------------------------------------------------------
@@ -2412,30 +2428,15 @@ fn compute_port_side_balance(edges: &[(EdgeId, Vec<LineSeg>)]) -> f64 {
             }
         }
     }
-    let max = left_count.max(right_count);
-    let min = left_count.min(right_count);
-    if max == 0 {
-        1.0
-    } else {
-        min as f64 / max as f64
-    }
+    balance_ratio(left_count as f64, right_count as f64)
 }
 
 fn compute_edge_length_cv(edges: &[(EdgeId, Vec<LineSeg>)]) -> f64 {
-    if edges.len() < 2 {
-        return 0.0;
-    }
     let lengths: Vec<f64> = edges
         .iter()
         .map(|(_, segs)| segs.iter().map(|s| s.length()).sum::<f64>())
         .collect();
-    let mean = lengths.iter().sum::<f64>() / lengths.len() as f64;
-    if mean <= 0.0 {
-        return 0.0;
-    }
-    let variance =
-        lengths.iter().map(|l| (l - mean) * (l - mean)).sum::<f64>() / lengths.len() as f64;
-    variance.sqrt() / mean
+    coefficient_of_variation(&lengths)
 }
 
 fn compute_segment_complexity_distribution(edges: &[(EdgeId, Vec<LineSeg>)]) -> [usize; 3] {
@@ -2468,13 +2469,7 @@ fn compute_routing_direction_balance(edges: &[(EdgeId, Vec<LineSeg>)]) -> f64 {
             }
         }
     }
-    let max = rightward.max(leftward);
-    let min = rightward.min(leftward);
-    if max <= 0.0 {
-        1.0
-    } else {
-        min / max
-    }
+    balance_ratio(rightward, leftward)
 }
 
 // ---------------------------------------------------------------------------
