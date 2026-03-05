@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId};
+use crate::model::types::{DomainId, EdgeId, Graph, NodeId};
 use crate::ObgraphError;
 
 // ---------------------------------------------------------------------------
@@ -88,25 +88,13 @@ fn build_simplex_graph(graph: &Graph) -> SimplexGraph {
 
     for (idx, edge) in graph.edges.iter().enumerate() {
         let edge_id = EdgeId(idx as u32);
-        let (source, target) = match edge {
-            Edge::Anchor { parent, child, .. } => {
-                (Vertex::Node(*parent), Vertex::Node(*child))
-            }
-            Edge::Constraint {
-                source_prop,
-                dest_prop,
-                ..
-            } => {
-                let src_node = graph.properties[source_prop.index()].node;
-                let dst_node = graph.properties[dest_prop.index()].node;
-                // Skip intra-node constraints (same node) — they don't
-                // contribute to the layer hierarchy and would create self-loops.
-                if src_node == dst_node {
-                    continue;
-                }
-                (Vertex::Node(src_node), Vertex::Node(dst_node))
-            }
-        };
+        let (src_node, dst_node) = graph.edge_nodes(edge);
+        // Skip intra-node constraints (same node) — they don't
+        // contribute to the layer hierarchy and would create self-loops.
+        if src_node == dst_node {
+            continue;
+        }
+        let (source, target) = (Vertex::Node(src_node), Vertex::Node(dst_node));
 
         let weight = edge.weight();
         let min_span = 1;
@@ -976,14 +964,11 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
     // Step 7b: Place derivation FreeNodes one layer after their latest input.
     for &deriv_nid in &deriv_free_nodes {
         let mut max_input_layer: Option<u32> = None;
-        for edge in &graph.edges {
-            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-                let dst_node = graph.properties[dest_prop.index()].node;
-                if dst_node == deriv_nid {
-                    let src_node = graph.properties[source_prop.index()].node;
-                    if let Some(&l) = new_node_layers.get(&src_node) {
-                        max_input_layer = Some(max_input_layer.map_or(l, |cur: u32| cur.max(l)));
-                    }
+        for edge in graph.edges.iter().filter(|e| e.is_constraint()) {
+            let (src_node, dst_node) = graph.edge_nodes(edge);
+            if dst_node == deriv_nid {
+                if let Some(&l) = new_node_layers.get(&src_node) {
+                    max_input_layer = Some(max_input_layer.map_or(l, |cur: u32| cur.max(l)));
                 }
             }
         }

@@ -55,24 +55,10 @@ fn edge_endpoints(
     graph: &Graph,
     assignment: &LayerAssignment,
 ) -> Option<(NodeId, u32, NodeId, u32)> {
-    match edge {
-        Edge::Anchor { parent, child, .. } => {
-            let src_layer = *assignment.node_layers.get(parent)?;
-            let tgt_layer = *assignment.node_layers.get(child)?;
-            Some((*parent, src_layer, *child, tgt_layer))
-        }
-        Edge::Constraint {
-            source_prop,
-            dest_prop,
-            ..
-        } => {
-            let src_node = graph.properties[source_prop.index()].node;
-            let dst_node = graph.properties[dest_prop.index()].node;
-            let src_layer = *assignment.node_layers.get(&src_node)?;
-            let tgt_layer = *assignment.node_layers.get(&dst_node)?;
-            Some((src_node, src_layer, dst_node, tgt_layer))
-        }
-    }
+    let (src_node, dst_node) = graph.edge_nodes(edge);
+    let src_layer = *assignment.node_layers.get(&src_node)?;
+    let tgt_layer = *assignment.node_layers.get(&dst_node)?;
+    Some((src_node, src_layer, dst_node, tgt_layer))
 }
 
 /// Compute the minimum span for an edge.
