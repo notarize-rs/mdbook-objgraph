@@ -156,16 +156,14 @@ impl Channel {
     /// Occupants are spaced symmetrically around the channel center.
     fn offset_position(&self, occupant_index: usize) -> f64 {
         let n = occupant_index;
-        // Center the group: offset = (i - (n-1)/2) * CORRIDOR_PAD
-        // For a new occupant being added at index `occupant_index`:
-        let _offset = (n as f64 - 0.0) * CORRIDOR_PAD;
-        // Simple scheme: first occupant at center, subsequent ones offset alternately
+        // Simple scheme: first occupant at center, subsequent ones offset
+        // alternately using CHANNEL_GAP (same spacing as vertical corridors).
         if n == 0 {
             self.position
         } else if n % 2 == 1 {
-            self.position + ((n as f64 + 1.0) / 2.0).ceil() * CORRIDOR_PAD
+            self.position + ((n as f64 + 1.0) / 2.0).ceil() * CHANNEL_GAP
         } else {
-            self.position - (n as f64 / 2.0) * CORRIDOR_PAD
+            self.position - (n as f64 / 2.0) * CHANNEL_GAP
         }
     }
 
@@ -1065,8 +1063,9 @@ impl PortDistributor {
 /// Pre-computed port slot assignments for derivation pill top/bottom ports.
 ///
 /// Distributes x-positions across the flat portion of the pill's top or
-/// bottom edge.  Slots are sorted by the opposite endpoint's x-coordinate
-/// to minimize crossing of the short vertical stubs.
+/// bottom edge.  Slots are sorted by the opposite endpoint's effective
+/// position to minimize crossings: by property y when targets share a node,
+/// by node x otherwise.
 struct PillPortDistributor {
     /// Pre-computed slot index for each (EdgeId, NodeId, is_top).
     slots: std::collections::HashMap<(EdgeId, NodeId, bool), usize>,
@@ -1075,43 +1074,56 @@ struct PillPortDistributor {
 }
 
 impl PillPortDistributor {
-    fn new(graph: &Graph, node_layouts: &[NodeLayout]) -> Self {
+    /// Build pill port distributor using the edge processing order.
+    /// Slots are assigned in the same order edges will be routed, so pill
+    /// port x-positions match corridor channel allocation order.
+    ///
+    /// When targets are to the left of the pill, slots are reversed so that
+    /// the first-processed edge (innermost corridor channel, rightmost) maps
+    /// to the rightmost pill port — preventing crossings on the h_channel.
+    fn from_edge_order(
+        graph: &Graph,
+        _node_layouts: &[NodeLayout],
+        edge_order: &[usize],
+    ) -> Self {
         let mut counts: std::collections::HashMap<(NodeId, bool), usize> =
             std::collections::HashMap::new();
-        let mut groups: std::collections::HashMap<(NodeId, bool), Vec<(EdgeId, f64)>> =
+        let mut slot_counters: std::collections::HashMap<(NodeId, bool), usize> =
             std::collections::HashMap::new();
+        let mut slots = std::collections::HashMap::new();
 
-        for (idx, edge) in graph.edges.iter().enumerate() {
-            let edge_id = EdgeId(idx as u32);
+        // First pass: count total connections per pill port group.
+        for &idx in edge_order {
+            let edge = &graph.edges[idx];
             if let Edge::Constraint { .. } = edge {
                 let (src_nid, dst_nid) = graph.edge_nodes(edge);
-
-                // Pill is source → bottom port (is_top = false).
                 if graph.nodes[src_nid.index()].is_derivation() {
-                    let key = (src_nid, false);
-                    *counts.entry(key).or_insert(0) += 1;
-                    let opp_x = node_layouts[dst_nid.index()].x
-                        + node_layouts[dst_nid.index()].width / 2.0;
-                    groups.entry(key).or_default().push((edge_id, opp_x));
+                    *counts.entry((src_nid, false)).or_insert(0) += 1;
                 }
-
-                // Pill is target → top port (is_top = true).
                 if graph.nodes[dst_nid.index()].is_derivation() {
-                    let key = (dst_nid, true);
-                    *counts.entry(key).or_insert(0) += 1;
-                    let opp_x = node_layouts[src_nid.index()].x
-                        + node_layouts[src_nid.index()].width / 2.0;
-                    groups.entry(key).or_default().push((edge_id, opp_x));
+                    *counts.entry((dst_nid, true)).or_insert(0) += 1;
                 }
             }
         }
 
-        // Sort each group by opposite x and assign slot indices.
-        let mut slots = std::collections::HashMap::new();
-        for ((nid, is_top), mut edges) in groups {
-            edges.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            for (slot, (edge_id, _)) in edges.iter().enumerate() {
-                slots.insert((*edge_id, nid, is_top), slot);
+        // Second pass: assign slots in edge processing order.
+        for &idx in edge_order {
+            let edge_id = EdgeId(idx as u32);
+            let edge = &graph.edges[idx];
+            if let Edge::Constraint { .. } = edge {
+                let (src_nid, dst_nid) = graph.edge_nodes(edge);
+                if graph.nodes[src_nid.index()].is_derivation() {
+                    let key = (src_nid, false);
+                    let slot = slot_counters.entry(key).or_insert(0);
+                    slots.insert((edge_id, src_nid, false), *slot);
+                    *slot += 1;
+                }
+                if graph.nodes[dst_nid.index()].is_derivation() {
+                    let key = (dst_nid, true);
+                    let slot = slot_counters.entry(key).or_insert(0);
+                    slots.insert((edge_id, dst_nid, true), *slot);
+                    *slot += 1;
+                }
             }
         }
 
@@ -1209,11 +1221,12 @@ fn port_position(
 
                     if is_pill {
                         // Pill as source → bottom port, distributed x.
-                        // Use the same side as regular edges so routing
-                        // follows the identical H-V-H / H-V-H-V-H code path.
+                        // Return None for side so routing uses vertical-first
+                        // (V-H-V) like anchor edges — pill ports are on the
+                        // top/bottom, not on the left/right.
                         let x = pill_distributor.port_x(nl, edge_id, node_id, false);
                         let y = nl.pill_port_bottom_y();
-                        Some((x, y, side))
+                        Some((x, y, None))
                     } else {
                         let prop_idx = prop_order.prop_index(node_id, *source_prop)?;
                         let x = nl.port_x(side.unwrap_or(PortSide::Right));
@@ -1231,9 +1244,10 @@ fn port_position(
 
                     if is_pill {
                         // Pill as target → top port, distributed x.
+                        // Return None for side — pill ports are vertical.
                         let x = pill_distributor.port_x(nl, edge_id, node_id, true);
                         let y = nl.pill_port_top_y();
-                        Some((x, y, side))
+                        Some((x, y, None))
                     } else {
                         let prop_idx = prop_order.prop_index(node_id, *dest_prop)?;
                         let x = nl.port_x(side.unwrap_or(PortSide::Right));
@@ -1270,6 +1284,28 @@ fn find_h_channel_between(h_channels: &[Channel], src_y: f64, tgt_y: f64) -> Opt
             let mid = (min_y + max_y) / 2.0;
             let da = (a.position - mid).abs();
             let db = (b.position - mid).abs();
+            da.partial_cmp(&db).unwrap()
+        })
+        .map(|(i, _)| i)
+}
+
+/// Find the h_channel between `pill_y` and `other_y` that is closest to `pill_y`.
+/// Used for pill routing where we want the edge to enter the nearest corridor
+/// rather than traveling to the midpoint.
+fn find_nearest_h_channel(h_channels: &[Channel], pill_y: f64, other_y: f64) -> Option<usize> {
+    let (min_y, max_y) = if pill_y < other_y {
+        (pill_y, other_y)
+    } else {
+        (other_y, pill_y)
+    };
+
+    h_channels
+        .iter()
+        .enumerate()
+        .filter(|(_, ch)| ch.position > min_y && ch.position < max_y)
+        .min_by(|(_, a), (_, b)| {
+            let da = (a.position - pill_y).abs();
+            let db = (b.position - pill_y).abs();
             da.partial_cmp(&db).unwrap()
         })
         .map(|(i, _)| i)
@@ -1327,7 +1363,47 @@ fn route_single_edge(
         }
     }
 
-    // Case 2: All constraint edges — unified H-V-H-V-H routing.
+    // Case 2: Mixed pill/constraint — one endpoint is a pill (None side,
+    // vertical port) and the other is a regular constraint port (Some side).
+    //
+    // Strategy: the pill drops vertically into the h_channel immediately
+    // adjacent to it (first channel below for source pills, first above for
+    // target pills), then routes horizontally to the destination corridor,
+    // then vertically to the constraint port.
+    if src_side.is_none() || tgt_side.is_none() {
+        // Find the h_channel closest to the pill endpoint, not the midpoint.
+        let pill_y = if src_side.is_none() { src_y } else { tgt_y };
+        let other_y = if src_side.is_none() { tgt_y } else { src_y };
+        let h_y = if let Some(hi) = find_nearest_h_channel(h_channels, pill_y, other_y) {
+            h_channels[hi].reserve(edge_id)
+        } else {
+            // Fallback: place just below/above the pill.
+            if pill_y < other_y { pill_y + 10.0 }
+            else { pill_y - 10.0 }
+        };
+
+        // Pill side uses its x directly; constraint side uses a corridor channel.
+        let v1_x = if let Some(s) = src_side {
+            find_corridor_channel(src_x, s, corridors, edge_id, src_y, h_y, src_domain)
+        } else {
+            src_x
+        };
+        let v2_x = if let Some(s) = tgt_side {
+            find_corridor_channel(tgt_x, s, corridors, edge_id, h_y, tgt_y, tgt_domain)
+        } else {
+            tgt_x
+        };
+
+        return collapse_zero_length(vec![
+            Segment::Horizontal { y: src_y, x_start: src_x, x_end: v1_x },
+            Segment::Vertical { x: v1_x, y_start: src_y, y_end: h_y },
+            Segment::Horizontal { y: h_y, x_start: v1_x, x_end: v2_x },
+            Segment::Vertical { x: v2_x, y_start: h_y, y_end: tgt_y },
+            Segment::Horizontal { y: tgt_y, x_start: v2_x, x_end: tgt_x },
+        ]);
+    }
+
+    // Case 3: Both endpoints are constraint ports — unified H-V-H-V-H routing.
     //
     // Every constraint edge uses the same 5-segment pattern:
     //   H(src_port → v1) - V(v1: src_y → h_y) - H(h_y: v1 → v2) - V(v2: h_y → tgt_y) - H(v2 → tgt_port)
@@ -1335,10 +1411,8 @@ fn route_single_edge(
     // Degenerate segments (zero length) are removed by collapse_zero_length,
     // which naturally produces H-V-H (3 segments) when v1==v2, or even
     // a single V when src_x==v1==v2==tgt_x.
-    // Both sides must be Some for constraint edges — anchors return in Case 1.
-    // unwrap with a clear message rather than silently defaulting.
-    let src_s = src_side.expect("constraint edge missing src_side");
-    let tgt_s = tgt_side.expect("constraint edge missing tgt_side");
+    let src_s = src_side.unwrap();
+    let tgt_s = tgt_side.unwrap();
 
     // Probe corridors (non-mutating) to decide if both endpoints share one.
     let src_corr = find_best_corridor_idx(src_x, src_s, corridors, src_domain);
@@ -1537,8 +1611,6 @@ pub fn route_all_edges(
     let distributor = PortDistributor::new(
         graph, port_sides, node_layouts, prop_order,
     );
-    let pill_distributor = PillPortDistributor::new(graph, node_layouts);
-
     // Build a priority-sorted list of edge indices with topology-aware secondary sort.
     let mut edge_indices: Vec<usize> = (0..graph.edges.len()).collect();
     edge_indices.sort_by(|&a, &b| {
@@ -1551,6 +1623,11 @@ pub fn route_all_edges(
         })
     });
 
+    // Build pill port distributor using the edge processing order so that
+    // pill port positions match corridor channel allocation order.
+    let pill_distributor = PillPortDistributor::from_edge_order(
+        graph, node_layouts, &edge_indices,
+    );
 
     let mut routes = Vec::new();
 
@@ -1614,8 +1691,7 @@ pub fn route_all_edges(
             tgt_domain,
         );
 
-        let mut route = Route { edge_id, segments };
-        shorten_route_for_arrowhead(&mut route);
+        let route = Route { edge_id, segments };
         routes.push(route);
     }
 
@@ -1631,8 +1707,135 @@ pub fn route_all_edges(
     // and only adjusts adjacent channels within a pair.
     fix_fanout_channel_order(graph, &mut routes);
     fix_bracket_nesting_channels(graph, &mut routes);
+    fix_pill_fanout_order(graph, &mut routes);
+
+    // Shorten final segments for arrowheads AFTER all channel reassignment
+    // passes, so the arrowhead direction matches the final route geometry.
+    for route in &mut routes {
+        shorten_route_for_arrowhead(route);
+    }
 
     routes
+}
+
+/// Fix pill fan-out crossing by reordering pill port x positions to match
+/// the corridor channel x ordering.
+///
+/// For each derivation (pill) node, collects all outgoing routes.  These
+/// routes start with a vertical segment from the pill port, then a horizontal
+/// segment to a corridor channel.  If the pill port x-order doesn't match
+/// the corridor channel x-order, the horizontal segments cross.
+///
+/// The fix: sort routes by corridor channel x, then reassign pill port x
+/// positions in the same order, eliminating crossings.
+fn fix_pill_fanout_order(graph: &Graph, routes: &mut [Route]) {
+    use std::collections::HashMap;
+
+    // Group route indices by pill node for bottom (output) fan-out.
+    let mut pill_groups: HashMap<NodeId, Vec<usize>> = HashMap::new();
+    for (ri, route) in routes.iter().enumerate() {
+        let edge = &graph.edges[route.edge_id.index()];
+        if let Edge::Constraint { .. } = edge {
+            let (src_nid, _) = graph.edge_nodes(edge);
+            if graph.nodes[src_nid.index()].is_derivation() {
+                pill_groups.entry(src_nid).or_default().push(ri);
+            }
+        }
+    }
+
+    for (_pill_nid, group) in pill_groups {
+        if group.len() < 2 {
+            continue;
+        }
+
+        // Extract (route_index, pill_port_x, h_channel_y, corridor_x).
+        struct FanoutEntry {
+            ri: usize,
+            pill_x: f64,
+            h_y: f64,
+            corridor_x: f64,
+        }
+
+        let mut entries: Vec<FanoutEntry> = Vec::new();
+        for &ri in &group {
+            let segs = &routes[ri].segments;
+            let pill_x = match &segs[0] {
+                Segment::Vertical { x, .. } => *x,
+                Segment::Horizontal { x_start, .. } => *x_start,
+            };
+            // H segment y (connects pill vertical to corridor vertical)
+            let h_y = segs.iter().find_map(|s| match s {
+                Segment::Horizontal { y, .. } => Some(*y),
+                _ => None,
+            }).unwrap_or(0.0);
+            // Corridor vertical segment: second V segment
+            let mut v_count = 0;
+            let mut corridor_x = pill_x;
+            for seg in segs {
+                if let Segment::Vertical { x, .. } = seg {
+                    v_count += 1;
+                    if v_count == 2 {
+                        corridor_x = *x;
+                        break;
+                    }
+                }
+            }
+            entries.push(FanoutEntry { ri, pill_x, h_y, corridor_x });
+        }
+
+        // Sort by corridor_x to get the desired spatial order.
+        let mut sorted_indices: Vec<usize> = (0..entries.len()).collect();
+        sorted_indices.sort_by(|&a, &b| {
+            entries[a].corridor_x.partial_cmp(&entries[b].corridor_x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Collect current pill_x and h_y values, sorted.
+        let mut pill_xs: Vec<f64> = entries.iter().map(|e| e.pill_x).collect();
+        pill_xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mut h_ys: Vec<f64> = entries.iter().map(|e| e.h_y).collect();
+        h_ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Assign: i-th in corridor order gets i-th pill_x and i-th h_y.
+        for (i, &si) in sorted_indices.iter().enumerate() {
+            let entry = &entries[si];
+            let new_pill_x = pill_xs[i];
+            let new_h_y = h_ys[i];
+            let old_pill_x = entry.pill_x;
+            let old_h_y = entry.h_y;
+            let ri = entry.ri;
+
+            let segs = &mut routes[ri].segments;
+            // Update first V segment (pill drop): x and y_end
+            if let Some(Segment::Vertical { x, y_end, .. }) = segs.first_mut() {
+                if (*x - old_pill_x).abs() < 0.01 {
+                    *x = new_pill_x;
+                }
+                if (*y_end - old_h_y).abs() < 0.01 {
+                    *y_end = new_h_y;
+                }
+            }
+            // Update first H segment: x_start and y
+            if segs.len() > 1 {
+                if let Segment::Horizontal { x_start, y, .. } = &mut segs[1] {
+                    if (*x_start - old_pill_x).abs() < 0.01 {
+                        *x_start = new_pill_x;
+                    }
+                    if (*y - old_h_y).abs() < 0.01 {
+                        *y = new_h_y;
+                    }
+                }
+            }
+            // Update second V segment: y_start
+            if segs.len() > 2 {
+                if let Segment::Vertical { y_start, .. } = &mut segs[2] {
+                    if (*y_start - old_h_y).abs() < 0.01 {
+                        *y_start = new_h_y;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Fix fan-out channel ordering for H-V-H bracket routes through shared corridors.
