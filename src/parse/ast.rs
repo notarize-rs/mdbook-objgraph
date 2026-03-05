@@ -48,12 +48,19 @@ pub struct AstAnchor {
     pub operation: Option<String>,
 }
 
-/// A constraint: `node::prop <= node::prop [: operation]`.
+/// The source side of a constraint: either a direct property reference or a
+/// derivation call like `filter(A::x, B::y)`.
+#[derive(Debug, Clone)]
+pub enum AstSourceExpr {
+    PropRef { node: String, prop: String },
+    Derivation { function: String, args: Vec<AstSourceExpr> },
+}
+
+/// A constraint: `node::prop <= source_expr [: operation]`.
 #[derive(Debug, Clone)]
 pub struct AstConstraint {
     pub dest_node: String,
     pub dest_prop: String,
-    pub source_node: String,
-    pub source_prop: String,
+    pub source: AstSourceExpr,
     pub operation: Option<String>,
 }

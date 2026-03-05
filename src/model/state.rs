@@ -115,11 +115,30 @@ pub fn propagate(graph: &Graph) -> StateResult {
                         ..
                     } = &graph.edges[eid.index()]
                         && *source_prop == p
+                        && !constrained_eff.get(dest_prop).copied().unwrap_or(false)
                     {
-                        let dest_entry =
-                            constrained_eff.entry(*dest_prop).or_insert(false);
-                        if !*dest_entry {
-                            *dest_entry = true;
+                        // For derivation nodes: ALL incoming constraints
+                        // must be satisfied (conjunction semantics).
+                        let dest_node = &graph.nodes[graph.properties[dest_prop.index()].node.index()];
+                        let should_constrain = if dest_node.is_derivation() {
+                            graph.edges_on_prop(*dest_prop).iter().all(|&eid2| {
+                                if let Edge::Constraint { source_prop: sp, .. } = &graph.edges[eid2.index()] {
+                                    if sp == dest_prop {
+                                        true // outgoing edge, not incoming
+                                    } else {
+                                        let src_node_id = graph.properties[sp.index()].node;
+                                        constrained_eff.get(sp).copied().unwrap_or(false)
+                                            && node_anchored.get(&src_node_id).copied().unwrap_or(false)
+                                    }
+                                } else {
+                                    true
+                                }
+                            })
+                        } else {
+                            true // regular nodes: any single constraint suffices
+                        };
+                        if should_constrain {
+                            constrained_eff.insert(*dest_prop, true);
                             prop_worklist.push_back(*dest_prop);
                             progress = true;
                         }
@@ -255,7 +274,7 @@ mod tests {
     fn node(id: u32, ident: &str, properties: Vec<PropId>, is_anchored: bool) -> Node {
         Node {
             id: NodeId(id),
-            ident: ident.to_string(),
+            ident: Some(ident.to_string()),
             display_name: None,
             properties,
             domain: None,
