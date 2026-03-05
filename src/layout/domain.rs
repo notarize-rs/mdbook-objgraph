@@ -870,12 +870,33 @@ pub fn separate_column_elements_vertically(
     }
 
     // Per-column compaction: start each at y=0.
-    let gap = INTER_NODE_GAP;
-
     for col in &columns {
         let mut cursor: f64 = 0.0;
 
         for (i, &(is_domain, idx, _)) in col.iter().enumerate() {
+            // Compute gap: normally INTER_NODE_GAP, but expand when the
+            // previous element is a derivation (pill) node with fan-out
+            // constraint edges, to fit the horizontal routing corridor.
+            let gap = if i > 0 {
+                let &(prev_is_domain, prev_idx, _) = &col[i - 1];
+                if !prev_is_domain && graph.nodes[prev_idx].is_derivation() {
+                    let nid = crate::model::types::NodeId(prev_idx as u32);
+                    let fanout = graph.edges.iter().filter(|e| {
+                        let (src, _) = graph.edge_nodes(e);
+                        src == nid && matches!(e, crate::model::types::Edge::Constraint { .. })
+                    }).count();
+                    if fanout > 1 {
+                        let needed = 2.0 * CORRIDOR_PAD + (fanout as f64 - 1.0) * CHANNEL_GAP;
+                        INTER_NODE_GAP.max(needed)
+                    } else {
+                        INTER_NODE_GAP
+                    }
+                } else {
+                    INTER_NODE_GAP
+                }
+            } else {
+                INTER_NODE_GAP
+            };
             let target_top = if i == 0 { 0.0 } else { cursor + gap };
 
             if is_domain {
