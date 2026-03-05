@@ -27,6 +27,10 @@ pub const CONTENT_PAD: f64 = 12.0;
 /// Problem indicator dot radius.
 pub const DOT_RADIUS: f64 = 2.0;
 pub const PORT_RADIUS: f64 = 4.0;
+/// Derivation pill height (same as ROW_HEIGHT).
+pub const PILL_HEIGHT: f64 = 20.0;
+/// Derivation pill horizontal padding.
+pub const PILL_CONTENT_PAD: f64 = 12.0;
 /// Vertical gap between nodes in the same column.
 pub const INTER_NODE_GAP: f64 = 28.0;
 /// Minimum horizontal gap between nodes in the same layer.
@@ -122,6 +126,39 @@ impl NodeLayout {
     /// Port y-coordinate for a property at the given index (single connection).
     pub fn port_y(&self, prop_index: usize) -> f64 {
         self.y + HEADER_HEIGHT + prop_index as f64 * ROW_HEIGHT + ROW_HEIGHT / 2.0
+    }
+
+    /// Vertical center of a derivation pill, used for edge sort ordering
+    /// (not for actual port attachment — use `pill_port_top_y`/`pill_port_bottom_y`).
+    pub fn pill_center_y(&self) -> f64 {
+        self.y + self.height / 2.0
+    }
+
+    /// Port y-coordinate at the top edge of a derivation pill (for inputs).
+    pub fn pill_port_top_y(&self) -> f64 {
+        self.y
+    }
+
+    /// Port y-coordinate at the bottom edge of a derivation pill (for outputs).
+    pub fn pill_port_bottom_y(&self) -> f64 {
+        self.y + self.height
+    }
+
+    /// Distributed port x-coordinate along the flat top/bottom of a pill.
+    ///
+    /// The flat portion excludes the rounded end caps:
+    /// `[x + rx, x + width - rx]` where `rx = PILL_HEIGHT / 2`.
+    /// Uses the same segment-based distribution as `distributed_port_y`.
+    pub fn pill_port_distributed_x(&self, index: usize, total: usize) -> f64 {
+        let rx = PILL_HEIGHT / 2.0;
+        let flat_start = self.x + rx;
+        let flat_width = self.width - PILL_HEIGHT;
+        if total <= 1 {
+            return self.x + self.width / 2.0;
+        }
+        let segment = flat_width / (total + 1) as f64;
+        let x = flat_start + segment * (index as f64 + 1.0);
+        (x / 2.0).round() * 2.0
     }
 
     /// Port y-coordinate with distributed placement when a property side has
@@ -275,7 +312,7 @@ pub type PortSideAssignment = std::collections::HashMap<(EdgeId, EndpointRole), 
 // Node dimension helpers
 // ---------------------------------------------------------------------------
 
-/// Compute the minimum width required by a single node (private helper).
+/// Compute the minimum width required by a single regular node (private helper).
 fn single_node_content_width(graph: &Graph, node_id: NodeId) -> f64 {
     let node = &graph.nodes[node_id.index()];
     let label_width = node.label().len() as f64 * CHAR_WIDTH;
@@ -289,20 +326,32 @@ fn single_node_content_width(graph: &Graph, node_id: NodeId) -> f64 {
 
 /// Returns the display width for a node.
 ///
-/// All nodes in the graph share a uniform width (the max content width across
-/// all nodes). This produces a clean, aligned appearance.
-pub fn node_width(graph: &Graph, _node_id: NodeId) -> f64 {
-    graph
-        .nodes
-        .iter()
-        .map(|n| single_node_content_width(graph, n.id))
-        .fold(CONTENT_PAD * 4.0, f64::max)
+/// Regular nodes share a uniform width (the max content width across all
+/// regular nodes). Derivation pills get their own width based on the
+/// property name (function name).
+pub fn node_width(graph: &Graph, node_id: NodeId) -> f64 {
+    let node = &graph.nodes[node_id.index()];
+    if node.is_derivation() {
+        let prop_name = &graph.properties[node.properties[0].index()].name;
+        prop_name.len() as f64 * CHAR_WIDTH + PILL_CONTENT_PAD * 2.0
+    } else {
+        graph
+            .nodes
+            .iter()
+            .filter(|n| !n.is_derivation())
+            .map(|n| single_node_content_width(graph, n.id))
+            .fold(CONTENT_PAD * 4.0, f64::max)
+    }
 }
 
 /// Compute the height of a node from the graph model.
 pub fn node_height(graph: &Graph, node_id: NodeId) -> f64 {
     let node = &graph.nodes[node_id.index()];
-    HEADER_HEIGHT + node.properties.len() as f64 * ROW_HEIGHT
+    if node.is_derivation() {
+        PILL_HEIGHT
+    } else {
+        HEADER_HEIGHT + node.properties.len() as f64 * ROW_HEIGHT
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -641,12 +690,14 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
     // dedicated gap corridors for cross-domain edge routing.
     domain::columnar_layout(&mut node_layouts, &mut domain_layouts, graph);
 
-    // Phase 5c: Compact vertical separation — place domains and free nodes
-    // with tight inter-element gaps.
+    // Phase 5c: Compact vertical separation — stack domain blocks and free
+    // nodes tightly while preserving the global meta-element ordering from
+    // the compound network simplex.
     domain::separate_column_elements_vertically(
         &mut node_layouts,
         &mut domain_layouts,
         graph,
+        &assignment,
     );
 
     // Phase 5e: Normalize — shift all elements so that the minimum x and y are >= 0.
@@ -862,9 +913,29 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
         )
         .collect();
 
-    // Compute overall dimensions, accounting for label overflow.
-    let (width, height, content_offset_x) =
-        compute_dimensions(&node_layouts, &domain_layouts, &all_labels);
+    // Compute edge route extents (routes may extend beyond node/domain bounds).
+    let mut route_min_x = f64::INFINITY;
+    let mut route_max_x = f64::NEG_INFINITY;
+    let mut route_max_y = f64::NEG_INFINITY;
+    for route in &routes {
+        for seg in &route.segments {
+            let (sx, sy) = seg.start();
+            let (ex, ey) = seg.end();
+            route_min_x = route_min_x.min(sx).min(ex);
+            route_max_x = route_max_x.max(sx).max(ex);
+            route_max_y = route_max_y.max(sy).max(ey);
+        }
+    }
+
+    // Compute overall dimensions, accounting for label and edge route overflow.
+    let (width, height, content_offset_x) = compute_dimensions(
+        &node_layouts,
+        &domain_layouts,
+        &all_labels,
+        route_min_x,
+        route_max_x,
+        route_max_y,
+    );
 
     Ok(LayoutResult {
         nodes: node_layouts,
@@ -941,8 +1012,11 @@ fn compute_dimensions(
     node_layouts: &[NodeLayout],
     domain_layouts: &[DomainLayout],
     labels: &[&EdgeLabel],
+    route_min_x: f64,
+    route_max_x: f64,
+    route_max_y: f64,
 ) -> (f64, f64, f64) {
-    // Content bounding box (nodes, domains).
+    // Content bounding box (nodes, domains, edge routes).
     let mut content_min_x = 0.0_f64;
     let mut content_max_x = 0.0_f64;
     let mut max_y = 0.0_f64;
@@ -956,6 +1030,12 @@ fn compute_dimensions(
         content_min_x = content_min_x.min(dl.x);
         content_max_x = content_max_x.max(dl.x + dl.width);
         max_y = max_y.max(dl.y + dl.height);
+    }
+    // Include edge route extents.
+    if route_min_x.is_finite() {
+        content_min_x = content_min_x.min(route_min_x);
+        content_max_x = content_max_x.max(route_max_x);
+        max_y = max_y.max(route_max_y);
     }
 
     // Compute the horizontal extent of all edge labels, padded to
@@ -1045,7 +1125,7 @@ mod tests {
             width: 100.0,
             height: 50.0,
         }];
-        let (w, h, offset) = compute_dimensions(&nodes, &[], &[]);
+        let (w, h, offset) = compute_dimensions(&nodes, &[], &[], f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         // width = 100 + 2*20 = 140, height = 50 + 40 = 90, no offset
         assert!((w - 140.0).abs() < 1e-9);
         assert!((h - 90.0).abs() < 1e-9);
@@ -1071,7 +1151,7 @@ mod tests {
             font_size: 8.0,
         };
         let labels = vec![&lbl];
-        let (w, h, offset) = compute_dimensions(&nodes, &[], &labels);
+        let (w, h, offset) = compute_dimensions(&nodes, &[], &labels, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         // Label bounding_x = (-16, 10), padded = (-24, 18)
         // content_offset_x = 24 (to compensate for -24 padded left overflow)
         assert!((offset - 24.0).abs() < 1e-9);
@@ -1099,7 +1179,7 @@ mod tests {
             font_size: 6.0,
         };
         let labels = vec![&lbl];
-        let (w, _h, offset) = compute_dimensions(&nodes, &[], &labels);
+        let (w, _h, offset) = compute_dimensions(&nodes, &[], &labels, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         // Label bounding_x = (90, 129), padded right = 137
         // No left overflow (padded left = 82 > 0), so offset = 0
         assert!((offset).abs() < 1e-9);
@@ -1135,7 +1215,7 @@ mod tests {
             font_size: 6.0,
         };
         let labels = vec![&lbl_left, &lbl_right];
-        let (w, _h, offset) = compute_dimensions(&nodes, &[], &labels);
+        let (w, _h, offset) = compute_dimensions(&nodes, &[], &labels, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
         // Left label padded: (-42, 13), right label padded: (82, 137)
         // content_offset_x = 42
         assert!((offset - 42.0).abs() < 1e-9);

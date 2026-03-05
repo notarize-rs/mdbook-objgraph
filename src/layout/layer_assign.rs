@@ -17,6 +17,17 @@ use crate::ObgraphError;
 pub struct LayerAssignment {
     pub node_layers: HashMap<NodeId, u32>,
     pub num_layers: u32,
+    /// Topological ordering of meta-elements from compound network simplex.
+    /// Domains and free nodes appear in the order determined by the constraint
+    /// graph — this is the canonical vertical ordering within each column.
+    pub meta_order: Vec<MetaElementId>,
+}
+
+/// Identifies a meta-element in the compound layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MetaElementId {
+    Domain(DomainId),
+    FreeNode(NodeId),
 }
 
 // ---------------------------------------------------------------------------
@@ -650,6 +661,7 @@ pub fn network_simplex(graph: &Graph) -> Result<LayerAssignment, ObgraphError> {
         return Ok(LayerAssignment {
             node_layers: HashMap::new(),
             num_layers: 0,
+            meta_order: Vec::new(),
         });
     }
 
@@ -691,6 +703,7 @@ pub fn network_simplex(graph: &Graph) -> Result<LayerAssignment, ObgraphError> {
     Ok(LayerAssignment {
         node_layers,
         num_layers,
+        meta_order: Vec::new(),
     })
 }
 
@@ -752,7 +765,7 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
         meta_set.insert(me);
     }
     for node in &graph.nodes {
-        if node.domain.is_none() {
+        if node.domain.is_none() && !node.is_derivation() {
             let me = MetaElement::FreeNode(node.id);
             meta_elements.push(me);
             meta_set.insert(me);
@@ -773,13 +786,54 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
     };
 
     // Build ordering edges between meta-elements from the original graph edges.
+    // Derivation FreeNodes are excluded as meta-elements — they are placed
+    // later in inter-domain gaps. But we propagate their transitive ordering:
+    // if Domain A → deriv → Domain B, we emit Domain A → Domain B.
     let mut meta_order: HashSet<(MetaElement, MetaElement)> = HashSet::new();
+    let mut deriv_free_nodes: HashSet<NodeId> = HashSet::new();
+    for node in &graph.nodes {
+        if node.is_derivation() && node.domain.is_none() {
+            deriv_free_nodes.insert(node.id);
+        }
+    }
     let sg = build_simplex_graph(graph);
+
+    // Collect derivation input/output domains for transitive ordering.
+    let mut deriv_inputs: HashMap<NodeId, HashSet<MetaElement>> = HashMap::new();
+    let mut deriv_outputs: HashMap<NodeId, HashSet<MetaElement>> = HashMap::new();
+
     for edge in &sg.edges {
         if let (Some(src_me), Some(tgt_me)) = (vertex_meta(&edge.source), vertex_meta(&edge.target))
             && src_me != tgt_me
         {
-            meta_order.insert((src_me, tgt_me));
+            let src_is_deriv = matches!(src_me, MetaElement::FreeNode(nid) if deriv_free_nodes.contains(&nid));
+            let tgt_is_deriv = matches!(tgt_me, MetaElement::FreeNode(nid) if deriv_free_nodes.contains(&nid));
+
+            if tgt_is_deriv {
+                if let MetaElement::FreeNode(nid) = tgt_me {
+                    deriv_inputs.entry(nid).or_default().insert(src_me);
+                }
+            } else if src_is_deriv {
+                if let MetaElement::FreeNode(nid) = src_me {
+                    deriv_outputs.entry(nid).or_default().insert(tgt_me);
+                }
+            } else {
+                meta_order.insert((src_me, tgt_me));
+            }
+        }
+    }
+
+    // Transitive ordering: input domains must precede output domains.
+    for &deriv_nid in &deriv_free_nodes {
+        let empty = HashSet::new();
+        let inputs = deriv_inputs.get(&deriv_nid).unwrap_or(&empty);
+        let outputs = deriv_outputs.get(&deriv_nid).unwrap_or(&empty);
+        for &inp_me in inputs {
+            for &out_me in outputs {
+                if inp_me != out_me {
+                    meta_order.insert((inp_me, out_me));
+                }
+            }
         }
     }
 
@@ -800,7 +854,9 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
         .collect();
 
     // Step 6: Topological sort of meta-elements respecting ordering constraints.
-    // Use Kahn's algorithm; break ties by meta_min_layer (preserving simplex ordering).
+    // Use Kahn's algorithm; break ties by minimum successor layer so that
+    // elements connecting to earlier cross-column targets are placed first
+    // (e.g. KDS→AMD SEV-SNP before TPM→Guest vTPM).
     let sorted_meta = {
         let mut in_degree: HashMap<MetaElement, usize> = HashMap::new();
         let mut adj: HashMap<MetaElement, Vec<MetaElement>> = HashMap::new();
@@ -815,22 +871,46 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
             }
         }
 
-        let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>> =
-            std::collections::BinaryHeap::new();
+        // Compute tiebreak: minimum meta_min_layer among direct successors.
+        // Elements with earlier successors are placed first; sinks (no
+        // successors) are placed last.
+        let min_direct_successor_layer: HashMap<MetaElement, u32> = meta_elements
+            .iter()
+            .map(|me| {
+                let succ_min = adj.get(me)
+                    .iter()
+                    .flat_map(|nbrs| nbrs.iter())
+                    .filter_map(|nbr| meta_min_layer.get(nbr).copied())
+                    .min()
+                    .unwrap_or(u32::MAX);
+                (*me, succ_min)
+            })
+            .collect();
+
         let me_index: HashMap<MetaElement, usize> = meta_elements
             .iter()
             .enumerate()
             .map(|(i, me)| (*me, i))
             .collect();
 
+        let tiebreak = |me: &MetaElement| -> (u32, u32) {
+            let succ = min_direct_successor_layer[me];
+            let own = meta_min_layer[me];
+            (succ, own)
+        };
+
+        let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(u32, u32, usize)>> =
+            std::collections::BinaryHeap::new();
+
         for (&me, &deg) in &in_degree {
             if deg == 0 {
-                queue.push(std::cmp::Reverse((meta_min_layer[&me], me_index[&me])));
+                let (s, o) = tiebreak(&me);
+                queue.push(std::cmp::Reverse((s, o, me_index[&me])));
             }
         }
 
         let mut sorted = Vec::new();
-        while let Some(std::cmp::Reverse((_, idx))) = queue.pop() {
+        while let Some(std::cmp::Reverse((_, _, idx))) = queue.pop() {
             let me = meta_elements[idx];
             sorted.push(me);
             if let Some(neighbors) = adj.get(&me) {
@@ -838,7 +918,8 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
                     let deg = in_degree.get_mut(&nbr).unwrap();
                     *deg -= 1;
                     if *deg == 0 {
-                        queue.push(std::cmp::Reverse((meta_min_layer[&nbr], me_index[&nbr])));
+                        let (s, o) = tiebreak(&nbr);
+                        queue.push(std::cmp::Reverse((s, o, me_index[&nbr])));
                     }
                 }
             }
@@ -892,6 +973,26 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
         }
     }
 
+    // Step 7b: Place derivation FreeNodes one layer after their latest input.
+    for &deriv_nid in &deriv_free_nodes {
+        let mut max_input_layer: Option<u32> = None;
+        for edge in &graph.edges {
+            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                let dst_node = graph.properties[dest_prop.index()].node;
+                if dst_node == deriv_nid {
+                    let src_node = graph.properties[source_prop.index()].node;
+                    if let Some(&l) = new_node_layers.get(&src_node) {
+                        max_input_layer = Some(max_input_layer.map_or(l, |cur: u32| cur.max(l)));
+                    }
+                }
+            }
+        }
+        let layer = max_input_layer
+            .map(|l| l + 1)
+            .unwrap_or_else(|| *base.node_layers.get(&deriv_nid).unwrap_or(&0));
+        new_node_layers.insert(deriv_nid, layer);
+    }
+
     // Step 8: Normalize and compute num_layers.
     let all_layers: Vec<u32> = new_node_layers
         .values()
@@ -908,9 +1009,53 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
         .unwrap_or(0)
         + 1;
 
+    // Build meta_order: convert sorted_meta to MetaElementId, then interleave
+    // derivation nodes in their layer-order positions.
+    let mut meta_order: Vec<MetaElementId> = sorted_meta
+        .iter()
+        .map(|me| match me {
+            MetaElement::Domain(did) => MetaElementId::Domain(*did),
+            MetaElement::FreeNode(nid) => MetaElementId::FreeNode(*nid),
+        })
+        .collect();
+
+    // Insert derivation nodes after the meta-element whose layer range
+    // immediately precedes them.
+    let mut derivs_with_layers: Vec<(NodeId, u32)> = deriv_free_nodes
+        .iter()
+        .map(|&nid| (nid, *new_node_layers.get(&nid).unwrap_or(&0)))
+        .collect();
+    derivs_with_layers.sort_by_key(|&(_, l)| l);
+
+    for (nid, deriv_layer) in derivs_with_layers {
+        // Find the position after the last meta-element whose max layer < deriv_layer.
+        let insert_pos = meta_order
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, me)| {
+                let max_l = match me {
+                    MetaElementId::Domain(did) => graph.domains.iter()
+                        .find(|d| d.id == *did)
+                        .and_then(|dom| dom.members.iter()
+                            .filter_map(|m| new_node_layers.get(m).copied())
+                            .max())
+                        .unwrap_or(0),
+                    MetaElementId::FreeNode(fnid) => {
+                        new_node_layers.get(fnid).copied().unwrap_or(0)
+                    }
+                };
+                max_l < deriv_layer
+            })
+            .map(|(i, _)| i + 1)
+            .unwrap_or(0);
+        meta_order.insert(insert_pos, MetaElementId::FreeNode(nid));
+    }
+
     Ok(LayerAssignment {
         node_layers: new_node_layers,
         num_layers,
+        meta_order,
     })
 }
 
@@ -1016,7 +1161,7 @@ mod tests {
     fn make_node(id: u32, ident: &str, props: &[u32], is_anchored: bool) -> Node {
         Node {
             id: NodeId(id),
-            ident: ident.to_string(),
+            ident: Some(ident.to_string()),
             display_name: None,
             properties: props.iter().map(|&p| PropId(p)).collect(),
             domain: None,
@@ -1137,14 +1282,14 @@ mod tests {
         let tls = result.node_layers[&NodeId(2)];
         let revocation = result.node_layers[&NodeId(3)];
 
-        // ca -> cert: cert >= ca + 1
-        assert!(cert >= ca + 1, "cert must be >= ca + 1");
-        // cert -> tls: tls >= cert + 1
-        assert!(tls >= cert + 1, "tls must be >= cert + 1");
-        // ca -> revocation: revocation >= ca + 1
-        assert!(revocation >= ca + 1, "revocation must be >= ca + 1");
-        // revocation -> cert (Constraint): cert >= revocation + 1
-        assert!(cert >= revocation + 1, "cert must be >= revocation + 1");
+        // ca -> cert: cert > ca
+        assert!(cert > ca, "cert must be > ca");
+        // cert -> tls: tls > cert
+        assert!(tls > cert, "tls must be > cert");
+        // ca -> revocation: revocation > ca
+        assert!(revocation > ca, "revocation must be > ca");
+        // revocation -> cert (Constraint): cert > revocation
+        assert!(cert > revocation, "cert must be > revocation");
     }
 
     // ----- Test 4: Empty graph -----
@@ -1215,12 +1360,12 @@ mod tests {
         let c = result.node_layers[&NodeId(2)];
         let d = result.node_layers[&NodeId(3)];
 
-        // Constraints: a at 0, b >= 1, c >= 1, d >= b+1 and d >= c+1.
+        // Constraints: a at 0, b >= 1, c >= 1, d > b and d > c.
         assert_eq!(a, 0);
         assert!(b >= 1);
         assert!(c >= 1);
-        assert!(d >= b + 1);
-        assert!(d >= c + 1);
+        assert!(d > b);
+        assert!(d > c);
     }
 
     // ----- Test 7: Disconnected nodes -----
@@ -1238,4 +1383,5 @@ mod tests {
         assert_eq!(result.node_layers[&NodeId(0)], 0);
         assert_eq!(result.node_layers[&NodeId(1)], 0);
     }
+
 }

@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::model::types::{DomainId, Edge, EdgeId, Graph, NodeId};
+use crate::model::types::{DomainId, Edge, EdgeId, Graph};
 
 use super::{
     DomainLayout, EndpointRole, NodeLayout, PortSide, PortSideAssignment,
@@ -206,6 +206,12 @@ fn build_cross_domain_adjacency(
         domain_layouts.iter().position(|d| d.id == did)
     };
 
+    // Collect domains reachable through derivation nodes (domain=None).
+    // If domain A → derivation → domain B, record A↔B adjacency.
+    use crate::model::types::NodeId;
+    let mut deriv_input_domains: HashMap<NodeId, HashSet<DomainId>> = HashMap::new();
+    let mut deriv_output_domains: HashMap<NodeId, HashSet<DomainId>> = HashMap::new();
+
     for edge in &graph.edges {
         let (src_domain, tgt_domain) = match edge {
             Edge::Anchor { parent, child, .. } => (
@@ -216,10 +222,24 @@ fn build_cross_domain_adjacency(
                 source_prop,
                 dest_prop,
                 ..
-            } => (
-                graph.nodes[graph.properties[source_prop.index()].node.index()].domain,
-                graph.nodes[graph.properties[dest_prop.index()].node.index()].domain,
-            ),
+            } => {
+                let src_node = &graph.nodes[graph.properties[source_prop.index()].node.index()];
+                let dst_node = &graph.nodes[graph.properties[dest_prop.index()].node.index()];
+
+                // Track derivation node connections for transitive adjacency.
+                if dst_node.is_derivation()
+                    && let Some(sd) = src_node.domain
+                {
+                    deriv_input_domains.entry(dst_node.id).or_default().insert(sd);
+                }
+                if src_node.is_derivation()
+                    && let Some(td) = dst_node.domain
+                {
+                    deriv_output_domains.entry(src_node.id).or_default().insert(td);
+                }
+
+                (src_node.domain, dst_node.domain)
+            }
         };
 
         if let (Some(sd), Some(td)) = (src_domain, tgt_domain)
@@ -229,6 +249,22 @@ fn build_cross_domain_adjacency(
             if let (Some(si), Some(ti)) = (si, ti) {
                 adj.entry(si).or_default().insert(ti);
                 adj.entry(ti).or_default().insert(si);
+            }
+        }
+    }
+
+    // Add transitive adjacency through derivation nodes.
+    for (deriv_nid, inputs) in &deriv_input_domains {
+        if let Some(outputs) = deriv_output_domains.get(deriv_nid) {
+            for &in_did in inputs {
+                for &out_did in outputs {
+                    if in_did != out_did
+                        && let (Some(si), Some(ti)) = (domain_idx(in_did), domain_idx(out_did))
+                    {
+                        adj.entry(si).or_default().insert(ti);
+                        adj.entry(ti).or_default().insert(si);
+                    }
+                }
             }
         }
     }
@@ -437,12 +473,14 @@ fn assign_columns(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Assign each satellite to the column that minimizes max height.
+    // Assign each satellite to whichever column minimizes imbalance.
     for sat in sorted_satellites {
-        // Find the best column: the one that produces the smallest max height.
-        let mut best_col = 0usize;
+        let mut best_col = group_adj
+            .get(&sat)
+            .and_then(|nbrs| nbrs.iter().next())
+            .and_then(|&nbr| group_col[nbr])
+            .unwrap_or(0);
         let mut best_max_height = f64::INFINITY;
-
         for candidate_col in 0..num_cols {
             let mut trial = col_heights.clone();
             trial[candidate_col] += group_heights[sat];
@@ -452,7 +490,6 @@ fn assign_columns(
                 best_col = candidate_col;
             }
         }
-
         group_col[sat] = Some(best_col);
         col_heights[best_col] += group_heights[sat];
     }
@@ -721,6 +758,80 @@ fn reposition_to_columns(
         }
     }
 
+    // Reposition free nodes (domain-less, e.g. derivations) into columns.
+    // Each free node is assigned to the column containing the majority of its
+    // input (upstream) nodes. This ensures derivation nodes are co-located
+    // with their sources for compact, downward-flowing layout.
+    //
+    // Build domain→column mapping for quick lookup.
+    let mut domain_col: HashMap<DomainId, usize> = HashMap::new();
+    for (col_idx, col_domains) in columns.iter().enumerate() {
+        for &dl_idx in col_domains {
+            domain_col.insert(domain_layouts[dl_idx].id, col_idx);
+        }
+    }
+
+    for node in &graph.nodes {
+        if node.domain.is_some() {
+            continue;
+        }
+
+        // Find input nodes (nodes with edges pointing into this node).
+        let mut col_votes: Vec<usize> = Vec::new();
+        for edge in &graph.edges {
+            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                let dst_nid = graph.properties[dest_prop.index()].node;
+                if dst_nid == node.id {
+                    let src_nid = graph.properties[source_prop.index()].node;
+                    let src_domain = graph.nodes[src_nid.index()].domain;
+                    if let Some(did) = src_domain
+                        && let Some(&col) = domain_col.get(&did)
+                    {
+                        col_votes.push(col);
+                    }
+                }
+            }
+        }
+
+        // If no input votes, try output nodes.
+        if col_votes.is_empty() {
+            for edge in &graph.edges {
+                if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                    let src_nid = graph.properties[source_prop.index()].node;
+                    if src_nid == node.id {
+                        let dst_nid = graph.properties[dest_prop.index()].node;
+                        let dst_domain = graph.nodes[dst_nid.index()].domain;
+                        if let Some(did) = dst_domain
+                            && let Some(&col) = domain_col.get(&did)
+                        {
+                            col_votes.push(col);
+                        }
+                    }
+                }
+            }
+        }
+
+        if col_votes.is_empty() {
+            continue;
+        }
+
+        // Majority vote for column.
+        let target_col = {
+            let mut counts = vec![0usize; columns.len()];
+            for &c in &col_votes {
+                if c < counts.len() {
+                    counts[c] += 1;
+                }
+            }
+            counts.iter().enumerate().max_by_key(|&(_, &c)| c).map(|(i, _)| i).unwrap_or(0)
+        };
+
+        // Center the free node within the target column.
+        let nl = &mut node_layouts[node.id.index()];
+        let col_center = col_x[target_col] + col_widths[target_col] / 2.0;
+        nl.x = col_center - nl.width / 2.0;
+    }
+
     // Recompute domain bounding boxes from new node positions.
     let new_bounds = compute_domain_bounds(graph, node_layouts);
     for dl in domain_layouts.iter_mut() {
@@ -733,38 +844,36 @@ fn reposition_to_columns(
     }
 }
 
-/// A vertical element in a column: either a domain block or a free node.
-#[derive(Debug, Clone, Copy)]
-enum ColumnElement {
-    Domain(usize), // index into domain_layouts
-    FreeNode(NodeId),
-}
-
 /// Compact vertical separation for all column elements.
 ///
-/// After compound layer assignment + Brandes-Köpf, nodes are correctly ordered
-/// but the vertical spacing is inflated by empty gap layers. This pass walks
-/// each column top-to-bottom and places elements (domains, free nodes)
-/// with tight `INTER_NODE_GAP` spacing.
-///
-/// Replaces the old `separate_domains_vertically`.
+/// Compacts each column independently, starting at y=0, with tight
+/// `INTER_NODE_GAP` spacing between adjacent domains and free nodes.
 pub fn separate_column_elements_vertically(
     node_layouts: &mut [NodeLayout],
     domain_layouts: &mut [DomainLayout],
     graph: &Graph,
+    _assignment: &super::layer_assign::LayerAssignment,
 ) {
     if domain_layouts.is_empty() {
         return;
     }
 
-    // Step 1: Identify which column each domain belongs to by x-center.
-    // Use a simple clustering: elements within the same column share similar x.
-    // Collect column x-centers from domain_layouts.
+    // Recompute domain bounds from current node positions.
+    let fresh = compute_domain_bounds(graph, node_layouts);
+    for dl in domain_layouts.iter_mut() {
+        if let Some(nb) = fresh.iter().find(|b| b.id == dl.id) {
+            dl.x = nb.x;
+            dl.y = nb.y;
+            dl.width = nb.width;
+            dl.height = nb.height;
+        }
+    }
+
+    // Identify columns by x-center clustering.
     let mut col_centers: Vec<f64> = Vec::new();
     for dl in domain_layouts.iter() {
         let cx = dl.x + dl.width / 2.0;
-        let found = col_centers.iter().any(|&c| (c - cx).abs() < 100.0);
-        if !found {
+        if !col_centers.iter().any(|&c| (c - cx).abs() < 100.0) {
             col_centers.push(cx);
         }
     }
@@ -774,83 +883,66 @@ pub fn separate_column_elements_vertically(
         col_centers
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                (cx - **a).abs().partial_cmp(&(cx - **b).abs()).unwrap()
-            })
+            .min_by(|(_, a), (_, b)| (cx - **a).abs().partial_cmp(&(cx - **b).abs()).unwrap())
             .map(|(i, _)| i)
             .unwrap_or(0)
     };
 
-    // Step 2: Build per-column element lists.
+    // Build per-column element lists sorted by BK y-center.
     let num_cols = col_centers.len().max(1);
-    let mut columns: Vec<Vec<(ColumnElement, f64)>> = vec![Vec::new(); num_cols];
+    let mut columns: Vec<Vec<(bool, usize, f64)>> = vec![Vec::new(); num_cols];
 
-    // Add domains.
     for (dl_idx, dl) in domain_layouts.iter().enumerate() {
         let cx = dl.x + dl.width / 2.0;
         let col = assign_column(cx);
         let y_center = dl.y + dl.height / 2.0;
-        columns[col].push((ColumnElement::Domain(dl_idx), y_center));
+        columns[col].push((true, dl_idx, y_center));
     }
 
-    // Add free nodes (domain-less).
     for node in &graph.nodes {
         if node.domain.is_none() {
             let nl = &node_layouts[node.id.index()];
             let cx = nl.x + nl.width / 2.0;
             let col = assign_column(cx);
             let y_center = nl.y + nl.height / 2.0;
-            columns[col].push((ColumnElement::FreeNode(node.id), y_center));
+            columns[col].push((false, node.id.index(), y_center));
         }
     }
 
-    // Step 3: Sort each column by current y-center.
     for col in &mut columns {
-        col.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        col.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
     }
 
-    // Step 4: Walk top-to-bottom, placing elements with INTER_NODE_GAP between
-    // them.  Every column starts at y = 0 so that no column has wasted vertical
-    // space above its first element.
+    // Per-column compaction: start each at y=0.
     let gap = INTER_NODE_GAP;
 
     for col in &columns {
-        if col.is_empty() {
-            continue;
-        }
-
         let mut cursor: f64 = 0.0;
 
-        for (i, &(elem, _)) in col.iter().enumerate() {
-            // First element starts at y=0; subsequent elements start after a gap.
+        for (i, &(is_domain, idx, _)) in col.iter().enumerate() {
             let target_top = if i == 0 { 0.0 } else { cursor + gap };
 
-            match elem {
-                ColumnElement::Domain(dl_idx) => {
-                    let current_top = domain_layouts[dl_idx].y;
-                    let shift = target_top - current_top;
-                    if shift.abs() > 0.01 {
-                        // Shift domain box and all member nodes.
-                        let did = domain_layouts[dl_idx].id;
-                        if let Some(domain) = graph.domains.iter().find(|d| d.id == did) {
-                            for &nid in &domain.members {
-                                node_layouts[nid.index()].y += shift;
-                            }
+            if is_domain {
+                let current_top = domain_layouts[idx].y;
+                let shift = target_top - current_top;
+                if shift.abs() > 0.01 {
+                    let did = domain_layouts[idx].id;
+                    if let Some(domain) = graph.domains.iter().find(|d| d.id == did) {
+                        for &nid in &domain.members {
+                            node_layouts[nid.index()].y += shift;
                         }
-                        domain_layouts[dl_idx].y += shift;
                     }
-                    cursor = domain_layouts[dl_idx].y + domain_layouts[dl_idx].height;
+                    domain_layouts[idx].y += shift;
                 }
-                ColumnElement::FreeNode(nid) => {
-                    let nl = &mut node_layouts[nid.index()];
-                    nl.y = target_top;
-                    cursor = nl.y + nl.height;
-                }
+                cursor = domain_layouts[idx].y + domain_layouts[idx].height;
+            } else {
+                node_layouts[idx].y = target_top;
+                cursor = node_layouts[idx].y + node_layouts[idx].height;
             }
         }
     }
 
-    // Step 5: Recompute domain bounds from shifted node positions.
+    // Recompute domain bounds after shifts.
     let new_bounds = compute_domain_bounds(graph, node_layouts);
     for dl in domain_layouts.iter_mut() {
         if let Some(nb) = new_bounds.iter().find(|b| b.id == dl.id) {
@@ -1239,7 +1331,7 @@ mod tests {
         for i in 0..node_count {
             nodes.push(Node {
                 id: NodeId(i as u32),
-                ident: format!("node{}", i),
+                ident: Some(format!("node{}", i)),
                 display_name: None,
                 properties: Vec::new(),
                 domain: if domain_members.contains(&(i as u32)) {

@@ -218,7 +218,7 @@ mod tests {
     fn make_node(id: u32, ident: &str, props: &[u32]) -> Node {
         Node {
             id: NodeId(id),
-            ident: ident.to_string(),
+            ident: Some(ident.to_string()),
             display_name: None,
             properties: props.iter().map(|&p| PropId(p)).collect(),
             domain: None,
@@ -248,7 +248,7 @@ mod tests {
         }];
         let graph = make_graph(nodes, vec![], edges);
 
-        let assignment = LayerAssignment {
+        let assignment = LayerAssignment { meta_order: Vec::new(),
             node_layers: HashMap::from([(NodeId(0), 0), (NodeId(1), 1)]),
             num_layers: 2,
         };
@@ -281,7 +281,7 @@ mod tests {
         }];
         let graph = make_graph(nodes, vec![], edges);
 
-        let assignment = LayerAssignment {
+        let assignment = LayerAssignment { meta_order: Vec::new(),
             node_layers: HashMap::from([(NodeId(0), 0), (NodeId(1), 4)]),
             num_layers: 5,
         };
@@ -344,7 +344,7 @@ mod tests {
         ];
         let graph = make_graph(nodes, props, edges);
 
-        let assignment = LayerAssignment {
+        let assignment = LayerAssignment { meta_order: Vec::new(),
             node_layers: HashMap::from([
                 (NodeId(0), 0),
                 (NodeId(1), 1),
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn test_empty_graph() {
         let graph = make_graph(vec![], vec![], vec![]);
-        let assignment = LayerAssignment {
+        let assignment = LayerAssignment { meta_order: Vec::new(),
             node_layers: HashMap::new(),
             num_layers: 0,
         };

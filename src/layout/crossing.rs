@@ -2269,7 +2269,7 @@ mod tests {
     fn make_node(id: u32, ident: &str, props: Vec<u32>) -> Node {
         Node {
             id: NodeId(id),
-            ident: ident.to_string(),
+            ident: Some(ident.to_string()),
             display_name: None,
             properties: props.into_iter().map(PropId).collect(),
             domain: None,

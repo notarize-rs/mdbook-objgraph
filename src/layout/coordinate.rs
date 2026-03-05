@@ -706,7 +706,7 @@ mod tests {
             }
             nodes.push(Node {
                 id: nid,
-                ident: name.to_string(),
+                ident: Some(name.to_string()),
                 display_name: None,
                 properties: prop_ids,
                 domain: None,
@@ -761,6 +761,7 @@ mod tests {
         LayerAssignment {
             node_layers: nl,
             num_layers,
+            meta_order: Vec::new(),
         }
     }
 
