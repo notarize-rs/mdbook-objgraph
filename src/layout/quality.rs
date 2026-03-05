@@ -1262,9 +1262,13 @@ fn find_inter_domain_edges_in_intra_corridors(
             } => {
                 let src_node = graph.properties[source_prop.index()].node;
                 let dst_node = graph.properties[dest_prop.index()].node;
-                let sd = graph.nodes[src_node.index()].domain;
-                let td = graph.nodes[dst_node.index()].domain;
-                if sd == td {
+                let src = &graph.nodes[src_node.index()];
+                let dst = &graph.nodes[dst_node.index()];
+                // Skip edges involving derivation nodes (domainless by design).
+                if src.is_derivation() || dst.is_derivation() {
+                    continue;
+                }
+                if src.domain == dst.domain {
                     continue; // Not cross-domain.
                 }
             }
@@ -1346,12 +1350,6 @@ fn find_channel_collisions(
         nodes_a.iter().any(|n| nodes_b.contains(n))
     };
 
-    // Both edges use center-port routing (Anchors sharing a node).
-    let both_center_port = |a: EdgeId, b: EdgeId| -> bool {
-        let is_center = |e: &Edge| matches!(e, Edge::Anchor { .. });
-        is_center(&graph.edges[a.index()]) && is_center(&graph.edges[b.index()])
-    };
-
     let mut collisions = Vec::new();
     for i in 0..verticals.len() {
         for j in (i + 1)..verticals.len() {
@@ -1362,14 +1360,47 @@ fn find_channel_collisions(
             }
             // Same x (within tolerance) and overlapping y-ranges.
             if (x_a - x_b).abs() < 0.5 && y_max_a > y_min_b + 0.5 && y_max_b > y_min_a + 0.5 {
-                // Exempt center-port edges that share a node.
-                if both_center_port(eid_a, eid_b) && shares_endpoint(eid_a, eid_b) {
+                // Exempt edges that share an endpoint node — their vertical
+                // segments naturally converge near the shared port and the
+                // visual overlap is expected, not a routing error.
+                if shares_endpoint(eid_a, eid_b) {
                     continue;
                 }
                 collisions.push((eid_a, eid_b));
             }
         }
     }
+
+    // Also check horizontal segments (same y, overlapping x-ranges).
+    // These arise from top/bottom pill ports using horizontal corridors.
+    let mut horizontals: Vec<(EdgeId, f64, f64, f64)> = Vec::new(); // (edge_id, y, x_min, x_max)
+    for &(edge_id, ref segs) in edges {
+        for seg in segs {
+            if (seg.y1 - seg.y2).abs() < 0.5 {
+                let x_min = seg.x1.min(seg.x2);
+                let x_max = seg.x1.max(seg.x2);
+                if (x_max - x_min) > 1.0 {
+                    horizontals.push((edge_id, seg.y1, x_min, x_max));
+                }
+            }
+        }
+    }
+    for i in 0..horizontals.len() {
+        for j in (i + 1)..horizontals.len() {
+            let (eid_a, y_a, x_min_a, x_max_a) = horizontals[i];
+            let (eid_b, y_b, x_min_b, x_max_b) = horizontals[j];
+            if eid_a == eid_b {
+                continue;
+            }
+            if (y_a - y_b).abs() < 0.5 && x_max_a > x_min_b + 0.5 && x_max_b > x_min_a + 0.5 {
+                if shares_endpoint(eid_a, eid_b) {
+                    continue;
+                }
+                collisions.push((eid_a, eid_b));
+            }
+        }
+    }
+
     collisions
 }
 

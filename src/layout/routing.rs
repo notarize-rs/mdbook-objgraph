@@ -1064,7 +1064,71 @@ impl PortDistributor {
         let slot = self.slots.get(&(edge_id, prop_id, side)).copied().unwrap_or(0);
         nl.distributed_port_y(prop_idx, slot, total)
     }
+}
 
+/// Pre-computed port slot assignments for derivation pill top/bottom ports.
+///
+/// Distributes x-positions across the flat portion of the pill's top or
+/// bottom edge.  Slots are sorted by the opposite endpoint's x-coordinate
+/// to minimize crossing of the short vertical stubs.
+struct PillPortDistributor {
+    /// Pre-computed slot index for each (EdgeId, NodeId, is_top).
+    slots: std::collections::HashMap<(EdgeId, NodeId, bool), usize>,
+    /// Total connections per (NodeId, is_top).
+    counts: std::collections::HashMap<(NodeId, bool), usize>,
+}
+
+impl PillPortDistributor {
+    fn new(graph: &Graph, node_layouts: &[NodeLayout]) -> Self {
+        let mut counts: std::collections::HashMap<(NodeId, bool), usize> =
+            std::collections::HashMap::new();
+        let mut groups: std::collections::HashMap<(NodeId, bool), Vec<(EdgeId, f64)>> =
+            std::collections::HashMap::new();
+
+        for (idx, edge) in graph.edges.iter().enumerate() {
+            let edge_id = EdgeId(idx as u32);
+            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
+                let src_nid = graph.properties[source_prop.index()].node;
+                let dst_nid = graph.properties[dest_prop.index()].node;
+
+                // Pill is source → bottom port (is_top = false).
+                if graph.nodes[src_nid.index()].is_derivation() {
+                    let key = (src_nid, false);
+                    *counts.entry(key).or_insert(0) += 1;
+                    let opp_x = node_layouts[dst_nid.index()].x
+                        + node_layouts[dst_nid.index()].width / 2.0;
+                    groups.entry(key).or_default().push((edge_id, opp_x));
+                }
+
+                // Pill is target → top port (is_top = true).
+                if graph.nodes[dst_nid.index()].is_derivation() {
+                    let key = (dst_nid, true);
+                    *counts.entry(key).or_insert(0) += 1;
+                    let opp_x = node_layouts[src_nid.index()].x
+                        + node_layouts[src_nid.index()].width / 2.0;
+                    groups.entry(key).or_default().push((edge_id, opp_x));
+                }
+            }
+        }
+
+        // Sort each group by opposite x and assign slot indices.
+        let mut slots = std::collections::HashMap::new();
+        for ((nid, is_top), mut edges) in groups {
+            edges.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            for (slot, (edge_id, _)) in edges.iter().enumerate() {
+                slots.insert((*edge_id, nid, is_top), slot);
+            }
+        }
+
+        PillPortDistributor { slots, counts }
+    }
+
+    /// Get the distributed x for a pill top/bottom port.
+    fn port_x(&self, nl: &NodeLayout, edge_id: EdgeId, node_id: NodeId, is_top: bool) -> f64 {
+        let total = self.counts.get(&(node_id, is_top)).copied().unwrap_or(1);
+        let slot = self.slots.get(&(edge_id, node_id, is_top)).copied().unwrap_or(0);
+        nl.pill_port_distributed_x(slot, total)
+    }
 }
 
 /// Get the physical Y coordinate of the opposite endpoint for port slot ordering.
@@ -1090,8 +1154,12 @@ fn opposite_y(
             let nid = graph.properties[pid.index()].node;
             find_node_layout(node_layouts, nid)
                 .and_then(|nl| {
-                    let idx = prop_order.prop_index(nid, *pid)?;
-                    Some(nl.port_y(idx))
+                    if graph.nodes[nid.index()].is_derivation() {
+                        Some(nl.pill_center_y())
+                    } else {
+                        let idx = prop_order.prop_index(nid, *pid)?;
+                        Some(nl.port_y(idx))
+                    }
                 })
                 .unwrap_or(0.0)
         }
@@ -1110,6 +1178,7 @@ fn port_position(
     node_layouts: &[NodeLayout],
     port_sides: &PortSideAssignment,
     distributor: &PortDistributor,
+    pill_distributor: &PillPortDistributor,
     prop_order: &super::crossing::PropertyOrder,
 ) -> Option<(f64, f64, Option<PortSide>)> {
     let edge = &graph.edges[edge_id.index()];
@@ -1141,30 +1210,50 @@ fn port_position(
                 EndpointRole::Upstream => {
                     let node_id = prop_node(graph, *source_prop);
                     let nl = find_node_layout(node_layouts, node_id)?;
-                    let prop_idx = prop_order.prop_index(node_id, *source_prop)?;
-                    let x = match side {
-                        Some(PortSide::Left) => nl.port_left_x(),
-                        Some(PortSide::Right) | None => nl.port_right_x(),
-                    };
-                    let y = match side {
-                        Some(s) => distributor.port_y(nl, prop_idx, edge_id, *source_prop, s),
-                        None => nl.port_y(prop_idx),
-                    };
-                    Some((x, y, side))
+                    let is_pill = graph.nodes[node_id.index()].is_derivation();
+
+                    if is_pill {
+                        // Pill as source → bottom port, distributed x.
+                        // Use the same side as regular edges so routing
+                        // follows the identical H-V-H / H-V-H-V-H code path.
+                        let x = pill_distributor.port_x(nl, edge_id, node_id, false);
+                        let y = nl.pill_port_bottom_y();
+                        Some((x, y, side))
+                    } else {
+                        let prop_idx = prop_order.prop_index(node_id, *source_prop)?;
+                        let x = match side {
+                            Some(PortSide::Left) => nl.port_left_x(),
+                            Some(PortSide::Right) | None => nl.port_right_x(),
+                        };
+                        let y = match side {
+                            Some(s) => distributor.port_y(nl, prop_idx, edge_id, *source_prop, s),
+                            None => nl.port_y(prop_idx),
+                        };
+                        Some((x, y, side))
+                    }
                 }
                 EndpointRole::Downstream => {
                     let node_id = prop_node(graph, *dest_prop);
                     let nl = find_node_layout(node_layouts, node_id)?;
-                    let prop_idx = prop_order.prop_index(node_id, *dest_prop)?;
-                    let x = match side {
-                        Some(PortSide::Left) => nl.port_left_x(),
-                        Some(PortSide::Right) | None => nl.port_right_x(),
-                    };
-                    let y = match side {
-                        Some(s) => distributor.port_y(nl, prop_idx, edge_id, *dest_prop, s),
-                        None => nl.port_y(prop_idx),
-                    };
-                    Some((x, y, side))
+                    let is_pill = graph.nodes[node_id.index()].is_derivation();
+
+                    if is_pill {
+                        // Pill as target → top port, distributed x.
+                        let x = pill_distributor.port_x(nl, edge_id, node_id, true);
+                        let y = nl.pill_port_top_y();
+                        Some((x, y, side))
+                    } else {
+                        let prop_idx = prop_order.prop_index(node_id, *dest_prop)?;
+                        let x = match side {
+                            Some(PortSide::Left) => nl.port_left_x(),
+                            Some(PortSide::Right) | None => nl.port_right_x(),
+                        };
+                        let y = match side {
+                            Some(s) => distributor.port_y(nl, prop_idx, edge_id, *dest_prop, s),
+                            None => nl.port_y(prop_idx),
+                        };
+                        Some((x, y, side))
+                    }
                 }
             }
         }
@@ -1249,108 +1338,50 @@ fn route_single_edge(
         }
     }
 
-    // Case 2a: Intra-column bracket — both same side, same x → H-V-H through corridor.
-    if let Some(side) = src_side
-        && src_side == tgt_side
-        && (src_x - tgt_x).abs() < 0.5
-    {
-        let v_x = find_corridor_channel(src_x, side, corridors, edge_id, src_y, tgt_y, src_domain);
-        return collapse_zero_length(vec![
-            Segment::Horizontal {
-                y: src_y,
-                x_start: src_x,
-                x_end: v_x,
-            },
-            Segment::Vertical {
-                x: v_x,
-                y_start: src_y,
-                y_end: tgt_y,
-            },
-            Segment::Horizontal {
-                y: tgt_y,
-                x_start: v_x,
-                x_end: tgt_x,
-            },
-        ]);
-    }
-
-    // Case 2b: Cross-corridor routing.
+    // Case 2: All constraint edges — unified H-V-H-V-H routing.
     //
-    // When both endpoints route to the same corridor (e.g., both sides of a
-    // cross-domain edge face the gap corridor), use a single vertical channel
-    // for an H-V-H (3-segment) route. Otherwise, use H-V-H-V-H (5-segment).
-    if let (Some(src_s), Some(tgt_s)) = (src_side, tgt_side) {
-        let src_corr = find_best_corridor_idx(src_x, src_s, corridors, src_domain);
-        let tgt_corr = find_best_corridor_idx(tgt_x, tgt_s, corridors, tgt_domain);
-        if let (Some(si), Some(ti)) = (src_corr, tgt_corr) && si == ti {
-            // Same corridor — single channel, H-V-H route.
-            let v_x = corridors[si].allocate_channel(edge_id, src_y, tgt_y);
-            return collapse_zero_length(vec![
-                Segment::Horizontal {
-                    y: src_y,
-                    x_start: src_x,
-                    x_end: v_x,
-                },
-                Segment::Vertical {
-                    x: v_x,
-                    y_start: src_y,
-                    y_end: tgt_y,
-                },
-                Segment::Horizontal {
-                    y: tgt_y,
-                    x_start: v_x,
-                    x_end: tgt_x,
-                },
-            ]);
-        }
-    }
+    // Every constraint edge uses the same 5-segment pattern:
+    //   H(src_port → v1) - V(v1: src_y → h_y) - H(h_y: v1 → v2) - V(v2: h_y → tgt_y) - H(v2 → tgt_port)
+    //
+    // Degenerate segments (zero length) are removed by collapse_zero_length,
+    // which naturally produces H-V-H (3 segments) when v1==v2, or even
+    // a single V when src_x==v1==v2==tgt_x.
+    // Both sides must be Some for constraint edges — anchors return in Case 1.
+    // unwrap with a clear message rather than silently defaulting.
+    let src_s = src_side.expect("constraint edge missing src_side");
+    let tgt_s = tgt_side.expect("constraint edge missing tgt_side");
 
-    // Different corridors — H-V-H-V-H route.
-    let h_y = if let Some(hi) = find_h_channel_between(h_channels, src_y, tgt_y) {
-        h_channels[hi].reserve(edge_id)
+    // Probe corridors (non-mutating) to decide if both endpoints share one.
+    let src_corr = find_best_corridor_idx(src_x, src_s, corridors, src_domain);
+    let tgt_corr = find_best_corridor_idx(tgt_x, tgt_s, corridors, tgt_domain);
+    let same_corridor = matches!((src_corr, tgt_corr), (Some(si), Some(ti)) if si == ti);
+
+    if same_corridor {
+        // Single-corridor H-V-H: allocate one channel spanning src→tgt.
+        let ci = src_corr.unwrap();
+        let v_x = corridors[ci].allocate_channel(edge_id, src_y, tgt_y);
+        collapse_zero_length(vec![
+            Segment::Horizontal { y: src_y, x_start: src_x, x_end: v_x },
+            Segment::Vertical { x: v_x, y_start: src_y, y_end: tgt_y },
+            Segment::Horizontal { y: tgt_y, x_start: v_x, x_end: tgt_x },
+        ])
     } else {
-        (src_y + tgt_y) / 2.0
-    };
-
-    let v1_x = match src_side {
-        Some(side) => find_corridor_channel(src_x, side, corridors, edge_id, src_y, h_y, src_domain),
-        None => src_x,
-    };
-
-    let v2_x = match tgt_side {
-        Some(side) => find_corridor_channel(tgt_x, side, corridors, edge_id, h_y, tgt_y, tgt_domain),
-        None => tgt_x,
-    };
-
-    let segments = vec![
-        Segment::Horizontal {
-            y: src_y,
-            x_start: src_x,
-            x_end: v1_x,
-        },
-        Segment::Vertical {
-            x: v1_x,
-            y_start: src_y,
-            y_end: h_y,
-        },
-        Segment::Horizontal {
-            y: h_y,
-            x_start: v1_x,
-            x_end: v2_x,
-        },
-        Segment::Vertical {
-            x: v2_x,
-            y_start: h_y,
-            y_end: tgt_y,
-        },
-        Segment::Horizontal {
-            y: tgt_y,
-            x_start: v2_x,
-            x_end: tgt_x,
-        },
-    ];
-
-    collapse_zero_length(segments)
+        // Two-corridor H-V-H-V-H: need a horizontal transfer channel.
+        let h_y = if let Some(hi) = find_h_channel_between(h_channels, src_y, tgt_y) {
+            h_channels[hi].reserve(edge_id)
+        } else {
+            (src_y + tgt_y) / 2.0
+        };
+        let v1_x = find_corridor_channel(src_x, src_s, corridors, edge_id, src_y, h_y, src_domain);
+        let v2_x = find_corridor_channel(tgt_x, tgt_s, corridors, edge_id, h_y, tgt_y, tgt_domain);
+        collapse_zero_length(vec![
+            Segment::Horizontal { y: src_y, x_start: src_x, x_end: v1_x },
+            Segment::Vertical { x: v1_x, y_start: src_y, y_end: h_y },
+            Segment::Horizontal { y: h_y, x_start: v1_x, x_end: v2_x },
+            Segment::Vertical { x: v2_x, y_start: h_y, y_end: tgt_y },
+            Segment::Horizontal { y: tgt_y, x_start: v2_x, x_end: tgt_x },
+        ])
+    }
 }
 
 /// Remove segments with zero length.
@@ -1479,8 +1510,12 @@ fn edge_vertical_midpoint(
             LayoutEndpoint::Prop(pid) => {
                 let nid = graph.properties[pid.index()].node;
                 let nl = find_node_layout(node_layouts, nid)?;
-                let idx = prop_order.prop_index(nid, *pid)?;
-                Some(nl.port_y(idx))
+                if graph.nodes[nid.index()].is_derivation() {
+                    Some(nl.pill_center_y())
+                } else {
+                    let idx = prop_order.prop_index(nid, *pid)?;
+                    Some(nl.port_y(idx))
+                }
             }
         }
     };
@@ -1513,6 +1548,7 @@ pub fn route_all_edges(
     let distributor = PortDistributor::new(
         graph, port_sides, node_layouts, prop_order,
     );
+    let pill_distributor = PillPortDistributor::new(graph, node_layouts);
 
     // Build a priority-sorted list of edge indices with topology-aware secondary sort.
     let mut edge_indices: Vec<usize> = (0..graph.edges.len()).collect();
@@ -1539,6 +1575,7 @@ pub fn route_all_edges(
             node_layouts,
             port_sides,
             &distributor,
+            &pill_distributor,
             prop_order,
         );
         let tgt = port_position(
@@ -1548,6 +1585,7 @@ pub fn route_all_edges(
             node_layouts,
             port_sides,
             &distributor,
+            &pill_distributor,
             prop_order,
         );
 
@@ -1730,7 +1768,9 @@ fn fix_fanout_channel_order(graph: &Graph, routes: &mut [Route]) {
         let is_right_corridor = first.corridor_x > first.src_x;
 
         // Collect current corridor_x values and sort by distance from source
-        // (innermost first).
+        // (innermost first). If fewer unique x-values than edges (multiple
+        // edges share a channel), expand with additional channels so every
+        // edge gets a unique channel.
         let ref_x = first.src_x;
         let mut xs: Vec<f64> = cluster_indices.iter().map(|&ci| entries[ci].corridor_x).collect();
         xs.sort_by(|a, b| {
@@ -1738,6 +1778,12 @@ fn fix_fanout_channel_order(graph: &Graph, routes: &mut [Route]) {
             let db = (*b - ref_x).abs();
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
         });
+        // Ensure unique channels: if duplicates exist, expand outward.
+        xs.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        while xs.len() < cluster_indices.len() {
+            let last = *xs.last().unwrap();
+            xs.push(if is_right_corridor { last + CHANNEL_GAP } else { last - CHANNEL_GAP });
+        }
 
         // Sort cluster entries by src_y ascending (lowest enters first → outermost).
         let mut sorted_indices: Vec<usize> = cluster_indices.clone();
@@ -2269,7 +2315,7 @@ mod tests {
         let nodes = vec![
             Node {
                 id: NodeId(0),
-                ident: "A".into(),
+                ident: Some("A".into()),
                 display_name: None,
                 properties: vec![PropId(0)],
                 domain: None,
@@ -2278,7 +2324,7 @@ mod tests {
             },
             Node {
                 id: NodeId(1),
-                ident: "B".into(),
+                ident: Some("B".into()),
                 display_name: None,
                 properties: vec![PropId(1)],
                 domain: None,
@@ -2597,7 +2643,7 @@ mod tests {
         // Create a constraint from a property on A back to another property on A.
         let nodes = vec![Node {
             id: NodeId(0),
-            ident: "A".into(),
+            ident: Some("A".into()),
             display_name: None,
             properties: vec![PropId(0), PropId(1)],
             domain: None,
@@ -3014,7 +3060,7 @@ mod tests {
         let nodes = vec![
             Node {
                 id: NodeId(0),
-                ident: "A".into(),
+                ident: Some("A".into()),
                 display_name: None,
                 properties: vec![PropId(0)],
                 domain: Some(DomainId(0)),
@@ -3023,7 +3069,7 @@ mod tests {
             },
             Node {
                 id: NodeId(1),
-                ident: "B".into(),
+                ident: Some("B".into()),
                 display_name: None,
                 properties: vec![PropId(1)],
                 domain: Some(DomainId(1)),
