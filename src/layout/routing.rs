@@ -1790,11 +1790,23 @@ fn fix_pill_fanout_order(graph: &Graph, routes: &mut [Route]) {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Collect current pill_x and h_y values, sorted.
+        // Collect current pill_x values, sorted.
         let mut pill_xs: Vec<f64> = entries.iter().map(|e| e.pill_x).collect();
         pill_xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mut h_ys: Vec<f64> = entries.iter().map(|e| e.h_y).collect();
-        h_ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Compute h_y values starting from pill_bottom + CORRIDOR_PAD, spaced
+        // by CHANNEL_GAP.  This places channels just below the pill, leaving
+        // room for domain title areas further down.
+        let pill_bottom = entries.iter().map(|e| {
+            let segs = &routes[e.ri].segments;
+            match &segs[0] {
+                Segment::Vertical { y_start, .. } => *y_start,
+                _ => 0.0,
+            }
+        }).fold(f64::NEG_INFINITY, f64::max);
+        let h_ys: Vec<f64> = (0..entries.len())
+            .map(|i| pill_bottom + CORRIDOR_PAD + i as f64 * CHANNEL_GAP)
+            .collect();
 
         // Assign: i-th in corridor order gets i-th pill_x and i-th h_y.
         for (i, &si) in sorted_indices.iter().enumerate() {
@@ -3207,17 +3219,17 @@ mod tests {
         // 1 inter-column gap + 1 outer left + 1 outer right = 7 corridors.
         assert_eq!(corridors.len(), 7, "Expected 7 corridors, got {}", corridors.len());
 
-        // D0 left corridor: x_start=0, center channel at CORRIDOR_PAD=8.
-        assert!((corridors[0].channels[0].x - 8.0).abs() < 0.1);
-        // D0 right corridor: x_end=100, center channel at 100-8=92.
-        assert!((corridors[1].channels[0].x - 92.0).abs() < 0.1);
+        // D0 left corridor: x_start=0, center channel at CORRIDOR_PAD.
+        assert!((corridors[0].channels[0].x - CORRIDOR_PAD).abs() < 0.1);
+        // D0 right corridor: x_end=100, center channel at 100-CORRIDOR_PAD.
+        assert!((corridors[1].channels[0].x - (100.0 - CORRIDOR_PAD)).abs() < 0.1);
         // Inter-column gap corridor: between x=100 and x=120, first channel at
-        // x_start + CORRIDOR_PAD = 108.
+        // x_start + CORRIDOR_PAD.
         let gap_idx = corridors.iter().position(|c| c.x_start > 99.0 && c.x_end < 121.0 && c.domain_ids.is_empty()).unwrap();
-        assert!((corridors[gap_idx].channels[0].x - 108.0).abs() < 0.1);
-        // Outer right corridor: x_start=220, first channel at 220+8=228.
+        assert!((corridors[gap_idx].channels[0].x - (corridors[gap_idx].x_start + CORRIDOR_PAD)).abs() < 0.1);
+        // Outer right corridor: first channel at x_start + CORRIDOR_PAD.
         let outer_right_idx = corridors.iter().position(|c| c.x_start > 219.0 && c.domain_ids.is_empty() && c.x_start != corridors[gap_idx].x_start).unwrap();
-        assert!((corridors[outer_right_idx].channels[0].x - 228.0).abs() < 0.1);
+        assert!((corridors[outer_right_idx].channels[0].x - (corridors[outer_right_idx].x_start + CORRIDOR_PAD)).abs() < 0.1);
 
         // Verify domain_ids assignments.
         assert_eq!(corridors[0].domain_ids, vec![DomainId(0)]); // D0 left
