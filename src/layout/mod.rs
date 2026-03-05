@@ -123,6 +123,14 @@ impl NodeLayout {
         self.x + self.width
     }
 
+    /// Port x-coordinate for the given side.
+    pub fn port_x(&self, side: PortSide) -> f64 {
+        match side {
+            PortSide::Left => self.x,
+            PortSide::Right => self.x + self.width,
+        }
+    }
+
     /// Port y-coordinate for a property at the given index (single connection).
     pub fn port_y(&self, prop_index: usize) -> f64 {
         self.y + HEADER_HEIGHT + prop_index as f64 * ROW_HEIGHT + ROW_HEIGHT / 2.0

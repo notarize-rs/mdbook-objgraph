@@ -1216,10 +1216,7 @@ fn port_position(
                         Some((x, y, side))
                     } else {
                         let prop_idx = prop_order.prop_index(node_id, *source_prop)?;
-                        let x = match side {
-                            Some(PortSide::Left) => nl.port_left_x(),
-                            Some(PortSide::Right) | None => nl.port_right_x(),
-                        };
+                        let x = nl.port_x(side.unwrap_or(PortSide::Right));
                         let y = match side {
                             Some(s) => distributor.port_y(nl, prop_idx, edge_id, *source_prop, s),
                             None => nl.port_y(prop_idx),
@@ -1239,10 +1236,7 @@ fn port_position(
                         Some((x, y, side))
                     } else {
                         let prop_idx = prop_order.prop_index(node_id, *dest_prop)?;
-                        let x = match side {
-                            Some(PortSide::Left) => nl.port_left_x(),
-                            Some(PortSide::Right) | None => nl.port_right_x(),
-                        };
+                        let x = nl.port_x(side.unwrap_or(PortSide::Right));
                         let y = match side {
                             Some(s) => distributor.port_y(nl, prop_idx, edge_id, *dest_prop, s),
                             None => nl.port_y(prop_idx),

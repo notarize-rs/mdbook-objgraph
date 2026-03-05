@@ -968,16 +968,9 @@ pub fn expand_corridors_for_edges(
             // Check same port x (same column).
             let src_nl = &node_layouts[src_node_id.index()];
             let dst_nl = &node_layouts[dst_node_id.index()];
-            let src_x = match src_side {
-                Some(PortSide::Left) => src_nl.x,
-                Some(PortSide::Right) => src_nl.x + src_nl.width,
-                None => continue,
-            };
-            let dst_x = match dst_side {
-                Some(PortSide::Left) => dst_nl.x,
-                Some(PortSide::Right) => dst_nl.x + dst_nl.width,
-                None => continue,
-            };
+            let (Some(ss), Some(ds)) = (src_side, dst_side) else { continue };
+            let src_x = src_nl.port_x(ss);
+            let dst_x = dst_nl.port_x(ds);
             if (src_x - dst_x).abs() > 0.5 {
                 continue;
             }
