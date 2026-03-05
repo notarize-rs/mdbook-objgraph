@@ -808,24 +808,21 @@ fn compact_same_node_brackets(prop_order: &mut PropertyOrder, graph: &Graph) {
                 None => continue,
             };
 
-            // Already adjacent — nothing to do.
-            if si.abs_diff(di) == 1 { continue; }
+            // Enforce source-before-dest ordering: the constraint flows
+            // source → dest, so source should appear above (lower index).
+            // Also ensure adjacency (bracket span = 1).
+            if si.abs_diff(di) == 1 && si < di {
+                // Already adjacent with correct order.
+                continue;
+            }
 
-            // Move the one that comes later to be right after the earlier one.
-            let (_first_idx, second_prop) = if si < di {
-                (si, dst)
-            } else {
-                (di, src)
-            };
-
-            // Remove the second property and re-insert it after the first.
-            let remove_idx = order.iter().position(|p| *p == second_prop).unwrap();
+            // Place source at the earlier position, dest right after it.
+            // Remove dest first (it will be re-inserted after source).
+            let remove_idx = order.iter().position(|p| *p == dst).unwrap();
             order.remove(remove_idx);
-            // After removal, first_idx may have shifted.
-            let insert_after = order.iter().position(|p| {
-                *p == if si < di { src } else { dst }
-            }).unwrap();
-            order.insert(insert_after + 1, second_prop);
+            // Find source's current position (may have shifted after removal).
+            let src_idx = order.iter().position(|p| *p == src).unwrap();
+            order.insert(src_idx + 1, dst);
         }
 
         prop_order.set_order(node_id, order);
