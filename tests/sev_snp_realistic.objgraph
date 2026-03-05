@@ -263,24 +263,24 @@ Report::chip_id <= VCEK::sev.hwId
 # VCEK can express older values (until committed), so each layer must be >=.
 
 # committed_tcb >= VCEK-certified TCB
-Report::tcb.committed.bootloader <= VCEK::sev.tcb.bootloader : ge
-Report::tcb.committed.tee <= VCEK::sev.tcb.tee : ge
-Report::tcb.committed.snp <= VCEK::sev.tcb.snp : ge
-Report::tcb.committed.microcode <= VCEK::sev.tcb.microcode : ge
+Report::tcb.committed.bootloader <= VCEK::sev.tcb.bootloader : ">="
+Report::tcb.committed.tee <= VCEK::sev.tcb.tee : ">="
+Report::tcb.committed.snp <= VCEK::sev.tcb.snp : ">="
+Report::tcb.committed.microcode <= VCEK::sev.tcb.microcode : ">="
 
 # current_tcb >= committed_tcb
-Report::tcb.current.bootloader <= Report::tcb.committed.bootloader : ge
-Report::tcb.current.tee <= Report::tcb.committed.tee : ge
-Report::tcb.current.snp <= Report::tcb.committed.snp : ge
-Report::tcb.current.microcode <= Report::tcb.committed.microcode : ge
+Report::tcb.current.bootloader <= Report::tcb.committed.bootloader : ">="
+Report::tcb.current.tee <= Report::tcb.committed.tee : ">="
+Report::tcb.current.snp <= Report::tcb.committed.snp : ">="
+Report::tcb.current.microcode <= Report::tcb.committed.microcode : ">="
 
 # committed_tcb components must be >= known-good versions (post-CVE)
-Report::tcb.committed.bootloader <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-Report::tcb.committed.tee <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-Report::tcb.committed.snp <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
-Report::tcb.committed.microcode <= filter(KDS::tcb_versions, NVD::cve_entries) : ge
+Report::tcb.committed.bootloader <= filter(KDS::tcb_versions, NVD::cve_entries) : ">="
+Report::tcb.committed.tee <= filter(KDS::tcb_versions, NVD::cve_entries) : ">="
+Report::tcb.committed.snp <= filter(KDS::tcb_versions, NVD::cve_entries) : ">="
+Report::tcb.committed.microcode <= filter(KDS::tcb_versions, NVD::cve_entries) : ">="
 
-Report::guest_svn <= filter(KDS::tcb_versions, NVD::cve_entries) : in
+Report::guest_svn <= filter(KDS::tcb_versions, NVD::cve_entries) : "∈"
 
 # ═══════════════════════════════════════════════════════════════
 # TPM chain constraints
