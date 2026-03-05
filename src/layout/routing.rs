@@ -326,11 +326,7 @@ fn build_corridors(
         let (left_corridor_width, right_corridor_width) = if members.is_empty() {
             (CORRIDOR_PAD * 2.0, CORRIDOR_PAD * 2.0)
         } else {
-            let min_node_x = members.iter().map(|nl| nl.x).fold(f64::INFINITY, f64::min);
-            let max_node_right = members
-                .iter()
-                .map(|nl| nl.x + nl.width)
-                .fold(f64::NEG_INFINITY, f64::max);
+            let (min_node_x, _, max_node_right, _) = super::node_bounds(&members).unwrap();
             let left_w = (min_node_x - dl.x).max(CORRIDOR_PAD * 2.0);
             let right_w = ((dl.x + dl.width) - max_node_right).max(CORRIDOR_PAD * 2.0);
             (left_w, right_w)

@@ -1020,21 +1020,15 @@ fn find_domain_contiguity_violations(
         // Compute the y-range of member nodes.
         let member_set: std::collections::HashSet<NodeId> =
             domain.members.iter().copied().collect();
-        let min_y = domain
+        let member_nls: Vec<&NodeLayout> = domain
             .members
             .iter()
             .filter_map(|&nid| nodes.iter().find(|n| n.id == nid))
-            .map(|nl| nl.y)
-            .fold(f64::INFINITY, f64::min);
-        let max_y = domain
-            .members
-            .iter()
-            .filter_map(|&nid| nodes.iter().find(|n| n.id == nid))
-            .map(|nl| nl.y + nl.height)
-            .fold(f64::NEG_INFINITY, f64::max);
-        if !min_y.is_finite() || !max_y.is_finite() {
-            continue;
-        }
+            .collect();
+        let (_, min_y, _, max_y) = match super::node_bounds(&member_nls) {
+            Some(b) => b,
+            None => continue,
+        };
         // Find the x-range of this domain for column check.
         let dl = match domains.iter().find(|d| d.id == domain.id) {
             Some(d) => d,

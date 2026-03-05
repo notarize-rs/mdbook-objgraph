@@ -191,6 +191,21 @@ impl NodeLayout {
     }
 }
 
+/// Compute the axis-aligned bounding box of a set of node layouts.
+///
+/// Returns `(min_x, min_y, max_x, max_y)` where max includes node width/height.
+/// Returns `None` if the slice is empty.
+pub fn node_bounds(layouts: &[&NodeLayout]) -> Option<(f64, f64, f64, f64)> {
+    if layouts.is_empty() {
+        return None;
+    }
+    let min_x = layouts.iter().map(|nl| nl.x).fold(f64::INFINITY, f64::min);
+    let min_y = layouts.iter().map(|nl| nl.y).fold(f64::INFINITY, f64::min);
+    let max_x = layouts.iter().map(|nl| nl.x + nl.width).fold(f64::NEG_INFINITY, f64::max);
+    let max_y = layouts.iter().map(|nl| nl.y + nl.height).fold(f64::NEG_INFINITY, f64::max);
+    Some((min_x, min_y, max_x, max_y))
+}
+
 #[derive(Debug, Clone)]
 pub struct DomainLayout {
     pub id: DomainId,
