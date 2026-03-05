@@ -3,7 +3,8 @@
 use std::fmt::Write;
 
 use crate::layout::{
-    LayoutResult, CONTENT_PAD, DOMAIN_TITLE_HEIGHT, DOT_RADIUS, HEADER_HEIGHT, ROW_HEIGHT,
+    LayoutResult, CONTENT_PAD, DOMAIN_TITLE_HEIGHT, DOT_RADIUS, HEADER_HEIGHT, PILL_HEIGHT,
+    ROW_HEIGHT,
 };
 use crate::model::state::StateResult;
 use crate::model::types::{Edge, EdgeId, Graph, NodeId};
@@ -309,142 +310,93 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
         let node_trust_attr = if node_verified { "trusted" } else { "untrusted" };
         let selected_attr = node.is_selected;
 
-        writeln!(
-            out,
-            r#"      <g class="obgraph-node" data-node="{id}" data-selected="{sel}">"#,
-            id = nl.id.0,
-            sel = selected_attr
-        )
-        .unwrap();
-
-        // Background rect — full node height
-        writeln!(
-            out,
-            r#"        <rect class="obgraph-node-bg" x="{x}" y="{y}" width="{w}" height="{h}" rx="8"/>"#,
-            x = nl.x,
-            y = nl.y,
-            w = nl.width,
-            h = nl.height
-        )
-        .unwrap();
-
-        // Header background: two overlapping rects for rounded-top / square-bottom.
-        // First rect covers full header height with rx="8" (rounded top corners).
-        writeln!(
-            out,
-            r#"        <rect class="obgraph-node-header" x="{x}" y="{y}" width="{w}" height="{h}" rx="8"/>"#,
-            x = nl.x,
-            y = nl.y,
-            w = nl.width,
-            h = HEADER_HEIGHT
-        )
-        .unwrap();
-        // Second rect covers bottom half to square off bottom corners where header meets properties.
-        writeln!(
-            out,
-            r#"        <rect class="obgraph-node-header-fill" x="{x}" y="{y}" width="{w}" height="16"/>"#,
-            x = nl.x,
-            y = nl.y + 16.0,
-            w = nl.width,
-        )
-        .unwrap();
-
-        // Title text — left-aligned at CONTENT_PAD, vertically centered in header
-        let title_x = nl.x + CONTENT_PAD;
-        let title_y = nl.y + HEADER_HEIGHT / 2.0;
-        writeln!(
-            out,
-            r#"        <text class="obgraph-node-title" x="{x}" y="{y}" dominant-baseline="central" data-trust="{trust}">{label}</text>"#,
-            x = title_x,
-            y = title_y,
-            trust = node_trust_attr,
-            label = escape_xml(node.label())
-        )
-        .unwrap();
-
-        // Problem dot on header for unanchored nodes
-        if !node_anchored {
-            let dot_x = nl.x + nl.width - CONTENT_PAD - DOT_RADIUS;
-            let dot_y = nl.y + HEADER_HEIGHT / 2.0;
+        if node.is_derivation() {
+            // Derivation pill: rounded rect with centered label from property name.
+            let pill_label = &graph.properties[node.properties[0].index()].name;
+            let rx = PILL_HEIGHT / 2.0;
             writeln!(
                 out,
-                r#"        <circle class="obgraph-node-dot" cx="{x}" cy="{y}" r="{r}"/>"#,
-                x = dot_x,
-                y = dot_y,
-                r = DOT_RADIUS
-            )
-            .unwrap();
-        }
-
-        // Separator line between title and properties
-        let sep_y = nl.y + HEADER_HEIGHT;
-        writeln!(
-            out,
-            r#"        <line class="obgraph-node-sep" x1="{x1}" y1="{y}" x2="{x2}" y2="{y}"/>"#,
-            x1 = nl.x,
-            x2 = nl.x + nl.width,
-            y = sep_y
-        )
-        .unwrap();
-
-        // Property rows — use crossing-minimized order when available.
-        for (prop_idx, &pid) in layout.property_order.props_of(node.id).iter().enumerate() {
-            let prop = &graph.properties[pid.index()];
-            let prop_constrained = state.is_prop_constrained(pid);
-
-            // Trust attribute: "constrained" for @constrained annotation, else trusted/untrusted
-            let trust_attr = if prop.constrained {
-                "always"
-            } else if prop_constrained {
-                "trusted"
-            } else {
-                "untrusted"
-            };
-
-            let critical_attr = if prop.critical { "true" } else { "false" };
-
-            let row_y = nl.y + HEADER_HEIGHT + prop_idx as f64 * ROW_HEIGHT;
-            let port_y = row_y + ROW_HEIGHT / 2.0;
-
+                r#"      <g class="obgraph-node obgraph-pill" data-node="{id}" data-trust="{trust}">"#,
+                id = nl.id.0,
+                trust = node_trust_attr
+            ).unwrap();
             writeln!(
                 out,
-                r#"        <g class="obgraph-prop" data-prop="{pid}" data-trust="{trust}" data-critical="{crit}">"#,
-                pid = pid.0,
-                trust = trust_attr,
-                crit = critical_attr
-            )
-            .unwrap();
-
-            // Row background
-            writeln!(
-                out,
-                r#"          <rect class="obgraph-prop-bg" x="{x}" y="{y}" width="{w}" height="{rh}"/>"#,
+                r#"        <rect class="obgraph-pill-bg" x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}"/>"#,
                 x = nl.x,
-                y = row_y,
+                y = nl.y,
                 w = nl.width,
-                rh = ROW_HEIGHT
-            )
-            .unwrap();
-
-            // Property name text — left-aligned at CONTENT_PAD from node left edge
-            let text_x = nl.x + CONTENT_PAD;
-            let text_y = port_y;
+                h = nl.height,
+                rx = rx
+            ).unwrap();
             writeln!(
                 out,
-                r#"          <text class="obgraph-prop-name" x="{x}" y="{y}" dominant-baseline="central">{name}</text>"#,
-                x = text_x,
-                y = text_y,
-                name = escape_xml(&prop.name)
+                r#"        <text class="obgraph-pill-text" x="{x}" y="{y}" dominant-baseline="central" text-anchor="middle">{label}</text>"#,
+                x = nl.x + nl.width / 2.0,
+                y = nl.y + nl.height / 2.0,
+                label = escape_xml(pill_label)
+            ).unwrap();
+            writeln!(out, r#"      </g>"#).unwrap();
+        } else {
+            // Regular node: header + property rows.
+            writeln!(
+                out,
+                r#"      <g class="obgraph-node" data-node="{id}" data-selected="{sel}">"#,
+                id = nl.id.0,
+                sel = selected_attr
             )
             .unwrap();
 
-            // Problem dot for critical + unconstrained properties
-            if prop.critical && !prop_constrained {
+            // Background rect — full node height
+            writeln!(
+                out,
+                r#"        <rect class="obgraph-node-bg" x="{x}" y="{y}" width="{w}" height="{h}" rx="8"/>"#,
+                x = nl.x,
+                y = nl.y,
+                w = nl.width,
+                h = nl.height
+            )
+            .unwrap();
+
+            // Header background: two overlapping rects for rounded-top / square-bottom.
+            writeln!(
+                out,
+                r#"        <rect class="obgraph-node-header" x="{x}" y="{y}" width="{w}" height="{h}" rx="8"/>"#,
+                x = nl.x,
+                y = nl.y,
+                w = nl.width,
+                h = HEADER_HEIGHT
+            )
+            .unwrap();
+            writeln!(
+                out,
+                r#"        <rect class="obgraph-node-header-fill" x="{x}" y="{y}" width="{w}" height="16"/>"#,
+                x = nl.x,
+                y = nl.y + 16.0,
+                w = nl.width,
+            )
+            .unwrap();
+
+            // Title text
+            let title_x = nl.x + CONTENT_PAD;
+            let title_y = nl.y + HEADER_HEIGHT / 2.0;
+            writeln!(
+                out,
+                r#"        <text class="obgraph-node-title" x="{x}" y="{y}" dominant-baseline="central" data-trust="{trust}">{label}</text>"#,
+                x = title_x,
+                y = title_y,
+                trust = node_trust_attr,
+                label = escape_xml(node.label())
+            )
+            .unwrap();
+
+            // Problem dot on header for unanchored nodes
+            if !node_anchored {
                 let dot_x = nl.x + nl.width - CONTENT_PAD - DOT_RADIUS;
-                let dot_y = port_y;
+                let dot_y = nl.y + HEADER_HEIGHT / 2.0;
                 writeln!(
                     out,
-                    r#"          <circle class="obgraph-prop-dot" cx="{x}" cy="{y}" r="{r}"/>"#,
+                    r#"        <circle class="obgraph-node-dot" cx="{x}" cy="{y}" r="{r}"/>"#,
                     x = dot_x,
                     y = dot_y,
                     r = DOT_RADIUS
@@ -452,34 +404,106 @@ fn write_nodes(out: &mut String, graph: &Graph, layout: &LayoutResult, state: &S
                 .unwrap();
             }
 
-            writeln!(out, r#"        </g>"#).unwrap();
+            // Separator line between title and properties
+            let sep_y = nl.y + HEADER_HEIGHT;
+            writeln!(
+                out,
+                r#"        <line class="obgraph-node-sep" x1="{x1}" y1="{y}" x2="{x2}" y2="{y}"/>"#,
+                x1 = nl.x,
+                x2 = nl.x + nl.width,
+                y = sep_y
+            )
+            .unwrap();
 
-            // Property divider line (after each property except the last)
-            if prop_idx < node.properties.len() - 1 {
-                let div_y = row_y + ROW_HEIGHT;
+            // Property rows
+            for (prop_idx, &pid) in layout.property_order.props_of(node.id).iter().enumerate() {
+                let prop = &graph.properties[pid.index()];
+                let prop_constrained = state.is_prop_constrained(pid);
+
+                let trust_attr = if prop.constrained {
+                    "always"
+                } else if prop_constrained {
+                    "trusted"
+                } else {
+                    "untrusted"
+                };
+
+                let critical_attr = if prop.critical { "true" } else { "false" };
+
+                let row_y = nl.y + HEADER_HEIGHT + prop_idx as f64 * ROW_HEIGHT;
+                let port_y = row_y + ROW_HEIGHT / 2.0;
+
                 writeln!(
                     out,
-                    r#"        <line class="obgraph-prop-divider" x1="{x1}" y1="{y}" x2="{x2}" y2="{y}"/>"#,
-                    x1 = nl.x,
-                    x2 = nl.x + nl.width,
-                    y = div_y
+                    r#"        <g class="obgraph-prop" data-prop="{pid}" data-trust="{trust}" data-critical="{crit}">"#,
+                    pid = pid.0,
+                    trust = trust_attr,
+                    crit = critical_attr
                 )
                 .unwrap();
+
+                writeln!(
+                    out,
+                    r#"          <rect class="obgraph-prop-bg" x="{x}" y="{y}" width="{w}" height="{rh}"/>"#,
+                    x = nl.x,
+                    y = row_y,
+                    w = nl.width,
+                    rh = ROW_HEIGHT
+                )
+                .unwrap();
+
+                let text_x = nl.x + CONTENT_PAD;
+                let text_y = port_y;
+                writeln!(
+                    out,
+                    r#"          <text class="obgraph-prop-name" x="{x}" y="{y}" dominant-baseline="central">{name}</text>"#,
+                    x = text_x,
+                    y = text_y,
+                    name = escape_xml(&prop.name)
+                )
+                .unwrap();
+
+                if prop.critical && !prop_constrained {
+                    let dot_x = nl.x + nl.width - CONTENT_PAD - DOT_RADIUS;
+                    let dot_y = port_y;
+                    writeln!(
+                        out,
+                        r#"          <circle class="obgraph-prop-dot" cx="{x}" cy="{y}" r="{r}"/>"#,
+                        x = dot_x,
+                        y = dot_y,
+                        r = DOT_RADIUS
+                    )
+                    .unwrap();
+                }
+
+                writeln!(out, r#"        </g>"#).unwrap();
+
+                if prop_idx < node.properties.len() - 1 {
+                    let div_y = row_y + ROW_HEIGHT;
+                    writeln!(
+                        out,
+                        r#"        <line class="obgraph-prop-divider" x1="{x1}" y1="{y}" x2="{x2}" y2="{y}"/>"#,
+                        x1 = nl.x,
+                        x2 = nl.x + nl.width,
+                        y = div_y
+                    )
+                    .unwrap();
+                }
             }
+
+            // Border rect
+            writeln!(
+                out,
+                r#"        <rect class="obgraph-node-border" x="{x}" y="{y}" width="{w}" height="{h}" rx="7" fill="none"/>"#,
+                x = nl.x + 1.0,
+                y = nl.y + 1.0,
+                w = nl.width - 2.0,
+                h = nl.height - 2.0
+            )
+            .unwrap();
+
+            writeln!(out, r#"      </g>"#).unwrap();
         }
-
-        // Border rect: inset 1px so 2px selection stroke outer edge aligns with node boundary.
-        writeln!(
-            out,
-            r#"        <rect class="obgraph-node-border" x="{x}" y="{y}" width="{w}" height="{h}" rx="7" fill="none"/>"#,
-            x = nl.x + 1.0,
-            y = nl.y + 1.0,
-            w = nl.width - 2.0,
-            h = nl.height - 2.0
-        )
-        .unwrap();
-
-        writeln!(out, r#"      </g>"#).unwrap();
     }
 
     writeln!(out, r#"    </g>"#).unwrap();
@@ -677,7 +701,7 @@ mod tests {
     fn minimal_graph_and_layout() -> (Graph, LayoutResult, StateResult) {
         let node = Node {
             id: NodeId(0),
-            ident: "root".to_string(),
+            ident: Some("root".to_string()),
             display_name: Some("Root Node".to_string()),
             properties: vec![],
             domain: None,
@@ -765,7 +789,7 @@ mod tests {
         let nodes = vec![
             Node {
                 id: NodeId(0),
-                ident: "root".to_string(),
+                ident: Some("root".to_string()),
                 display_name: None,
                 properties: vec![],
                 domain: None,
@@ -774,7 +798,7 @@ mod tests {
             },
             Node {
                 id: NodeId(1),
-                ident: "child".to_string(),
+                ident: Some("child".to_string()),
                 display_name: None,
                 properties: vec![PropId(0)],
                 domain: None,
@@ -851,7 +875,7 @@ mod tests {
         let nodes = vec![
             Node {
                 id: NodeId(0),
-                ident: "a".to_string(),
+                ident: Some("a".to_string()),
                 display_name: None,
                 properties: vec![PropId(0)],
                 domain: Some(d0),
@@ -860,7 +884,7 @@ mod tests {
             },
             Node {
                 id: NodeId(1),
-                ident: "b".to_string(),
+                ident: Some("b".to_string()),
                 display_name: None,
                 properties: vec![PropId(1)],
                 domain: Some(d1),
@@ -1009,7 +1033,7 @@ mod tests {
     fn always_prop_trust_attr() {
         let nodes = vec![Node {
             id: NodeId(0),
-            ident: "root".to_string(),
+            ident: Some("root".to_string()),
             display_name: None,
             properties: vec![PropId(0)],
             domain: None,
@@ -1144,7 +1168,7 @@ mod tests {
         // Build a non-root node without anchor — it gets a header problem dot.
         let nodes = vec![Node {
             id: NodeId(0),
-            ident: "orphan".to_string(),
+            ident: Some("orphan".to_string()),
             display_name: None,
             properties: vec![],
             domain: None,
@@ -1234,7 +1258,7 @@ mod tests {
         let nodes = vec![
             Node {
                 id: NodeId(0),
-                ident: "root".to_string(),
+                ident: Some("root".to_string()),
                 display_name: None,
                 properties: vec![],
                 domain: None,
@@ -1243,7 +1267,7 @@ mod tests {
             },
             Node {
                 id: NodeId(1),
-                ident: "child".to_string(),
+                ident: Some("child".to_string()),
                 display_name: None,
                 properties: vec![],
                 domain: None,
@@ -1308,7 +1332,7 @@ mod tests {
         let nodes = vec![
             Node {
                 id: NodeId(0),
-                ident: "src".to_string(),
+                ident: Some("src".to_string()),
                 display_name: None,
                 properties: vec![PropId(0)],
                 domain: None,
@@ -1317,7 +1341,7 @@ mod tests {
             },
             Node {
                 id: NodeId(1),
-                ident: "dst".to_string(),
+                ident: Some("dst".to_string()),
                 display_name: None,
                 properties: vec![PropId(1)],
                 domain: None,
@@ -1416,7 +1440,7 @@ mod tests {
     fn xml_escape_in_labels() {
         let nodes = vec![Node {
             id: NodeId(0),
-            ident: "root".to_string(),
+            ident: Some("root".to_string()),
             display_name: Some("A & B <test>".to_string()),
             properties: vec![],
             domain: None,

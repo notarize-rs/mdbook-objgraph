@@ -205,6 +205,20 @@ pub fn css() -> &'static str {
   fill: var(--obg-problem);
 }
 
+/* Derivation pill */
+.obgraph-pill-bg {
+  fill: var(--obg-node-bg);
+  stroke: var(--obg-border);
+  stroke-width: 1px;
+  filter: url(#shadow);
+}
+
+.obgraph-pill-label {
+  font-family: Menlo, Consolas, monospace;
+  font-size: 10px;
+  fill: var(--obg-text);
+}
+
 /* Arrowhead fills are set directly on marker <path> elements via fill attr.
    CSS vars inside <marker> have spotty cross-browser support. */
 
