@@ -78,7 +78,7 @@ fn pki_no_domain_errors() {
 
 #[test]
 fn sev_snp_no_node_overlaps() {
-    let input = include_str!("sev_snp_input.obgraph");
+    let input = include_str!("sev_snp_input.objgraph");
     let report = run_quality(input);
     eprintln!("{}", report.summary());
     assert!(
@@ -90,7 +90,7 @@ fn sev_snp_no_node_overlaps() {
 
 #[test]
 fn sev_snp_quality_summary() {
-    let input = include_str!("sev_snp_input.obgraph");
+    let input = include_str!("sev_snp_input.objgraph");
     let report = run_quality(input);
     eprintln!("{}", report.summary());
     assert!(
@@ -103,7 +103,7 @@ fn sev_snp_quality_summary() {
 
 #[test]
 fn sev_snp_no_free_nodes_inside_domains() {
-    let input = include_str!("sev_snp_input.obgraph");
+    let input = include_str!("sev_snp_input.objgraph");
     let report = run_quality(input);
     assert!(
         report.free_nodes_inside_domains.is_empty(),
@@ -114,7 +114,7 @@ fn sev_snp_no_free_nodes_inside_domains() {
 
 #[test]
 fn sev_snp_domain_contiguity() {
-    let input = include_str!("sev_snp_input.obgraph");
+    let input = include_str!("sev_snp_input.objgraph");
     let report = run_quality(input);
     assert!(
         report.domain_contiguity_violations.is_empty(),
@@ -125,7 +125,7 @@ fn sev_snp_domain_contiguity() {
 
 #[test]
 fn sev_snp_no_inter_domain_edges_in_intra_corridors() {
-    let input = include_str!("sev_snp_input.obgraph");
+    let input = include_str!("sev_snp_input.objgraph");
     let report = run_quality(input);
     assert!(
         report.inter_domain_edges_in_intra_corridors.is_empty(),
@@ -136,7 +136,7 @@ fn sev_snp_no_inter_domain_edges_in_intra_corridors() {
 
 #[test]
 fn sev_snp_no_channel_collisions() {
-    let input = include_str!("sev_snp_input.obgraph");
+    let input = include_str!("sev_snp_input.objgraph");
     let report = run_quality(input);
     // Known: 6 channel collisions from bundle routing merge.
     // Track regression — should not increase.
@@ -150,7 +150,7 @@ fn sev_snp_no_channel_collisions() {
 
 #[test]
 fn sev_snp_column_height_balance() {
-    let input = include_str!("sev_snp_input.obgraph");
+    let input = include_str!("sev_snp_input.objgraph");
     let report = run_quality(input);
     eprintln!(
         "Column heights: {:?}, imbalance: {:.0}px",
@@ -171,7 +171,7 @@ fn sev_snp_column_height_balance() {
 
 #[test]
 fn sev_snp_realistic_no_node_overlaps() {
-    let input = include_str!("sev_snp_realistic.obgraph");
+    let input = include_str!("sev_snp_realistic.objgraph");
     let report = run_quality(input);
     eprintln!("{}", report.summary());
     assert!(
@@ -183,7 +183,7 @@ fn sev_snp_realistic_no_node_overlaps() {
 
 #[test]
 fn sev_snp_realistic_quality_summary() {
-    let input = include_str!("sev_snp_realistic.obgraph");
+    let input = include_str!("sev_snp_realistic.objgraph");
     let ast = parse::parse(input).expect("parse failed");
     let graph = model::build(ast).expect("build failed");
     let layout = mdbook_obgraph::layout::layout(&graph).expect("layout failed");
@@ -227,7 +227,7 @@ fn describe_edge(graph: &model::types::Graph, eid: model::types::EdgeId) -> Stri
 
 #[test]
 fn sev_snp_realistic_domain_contiguity() {
-    let input = include_str!("sev_snp_realistic.obgraph");
+    let input = include_str!("sev_snp_realistic.objgraph");
     let report = run_quality(input);
     assert!(
         report.domain_contiguity_violations.is_empty(),
@@ -240,7 +240,7 @@ fn sev_snp_realistic_domain_contiguity() {
 
 #[test]
 fn sev_snp_no_intra_edges_in_wrong_corridor() {
-    let input = include_str!("sev_snp_input.obgraph");
+    let input = include_str!("sev_snp_input.objgraph");
     let report = run_quality(input);
     assert!(
         report.intra_edges_in_wrong_corridor.is_empty(),
@@ -251,7 +251,7 @@ fn sev_snp_no_intra_edges_in_wrong_corridor() {
 
 #[test]
 fn sev_snp_realistic_no_intra_edges_in_wrong_corridor() {
-    let input = include_str!("sev_snp_realistic.obgraph");
+    let input = include_str!("sev_snp_realistic.objgraph");
     let report = run_quality(input);
     assert!(
         report.intra_edges_in_wrong_corridor.is_empty(),
@@ -264,7 +264,7 @@ fn sev_snp_realistic_no_intra_edges_in_wrong_corridor() {
 
 #[test]
 fn sev_snp_visual_balance() {
-    let input = include_str!("sev_snp_input.obgraph");
+    let input = include_str!("sev_snp_input.objgraph");
     let report = run_quality(input);
     eprintln!("Visual balance: {:.3}", report.visual_balance);
     assert!(
@@ -276,7 +276,7 @@ fn sev_snp_visual_balance() {
 
 #[test]
 fn sev_snp_realistic_visual_balance() {
-    let input = include_str!("sev_snp_realistic.obgraph");
+    let input = include_str!("sev_snp_realistic.objgraph");
     let report = run_quality(input);
     eprintln!("Visual balance: {:.3}", report.visual_balance);
     assert!(
@@ -285,3 +285,4 @@ fn sev_snp_realistic_visual_balance() {
         report.visual_balance,
     );
 }
+

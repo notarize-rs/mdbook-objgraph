@@ -271,7 +271,7 @@ fn sev_snp_tpm_full_pipeline() {
     assert!(svg.contains("vTPM Event Log"), "Output should contain vTCGLog label");
 }
 
-const SEV_SNP_REALISTIC: &str = include_str!("sev_snp_realistic.obgraph");
+const SEV_SNP_REALISTIC: &str = include_str!("sev_snp_realistic.objgraph");
 
 #[test]
 fn sev_snp_realistic_full_pipeline() {
