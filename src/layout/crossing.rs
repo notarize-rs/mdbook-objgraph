@@ -356,8 +356,7 @@ fn edge_endpoints(
             dest_prop,
             ..
         } => {
-            let src_node = graph.properties[source_prop.index()].node;
-            let dst_node = graph.properties[dest_prop.index()].node;
+            let (src_node, dst_node) = graph.edge_nodes(edge);
             let src = LayerElement::Node(src_node);
             let dst = LayerElement::Node(dst_node);
             if let (Some(&src_layer), Some(&dst_layer)) =
@@ -777,8 +776,7 @@ fn compact_same_node_brackets(prop_order: &mut PropertyOrder, graph: &Graph) {
     let mut per_node: HashMap<NodeId, Vec<(PropId, PropId)>> = HashMap::new();
     for edge in &graph.edges {
         if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-            let sn = graph.properties[source_prop.index()].node;
-            let dn = graph.properties[dest_prop.index()].node;
+            let (sn, dn) = graph.edge_nodes(edge);
             if sn == dn {
                 per_node.entry(sn).or_default().push((*source_prop, *dest_prop));
             }
@@ -897,8 +895,7 @@ fn apply_cross_node_gravity(
         let mut pair_map: HashMap<PropId, PropId> = HashMap::new();
         for edge in &graph.edges {
             if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-                let sn = graph.properties[source_prop.index()].node;
-                let dn = graph.properties[dest_prop.index()].node;
+                let (sn, dn) = graph.edge_nodes(edge);
                 if sn == node_id && dn == node_id {
                     paired.insert(*source_prop);
                     paired.insert(*dest_prop);
@@ -1054,8 +1051,7 @@ fn apply_chiasm_fixup(
         let mut same_node_props: HashSet<PropId> = HashSet::new();
         for edge in &graph.edges {
             if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-                let sn = graph.properties[source_prop.index()].node;
-                let dn = graph.properties[dest_prop.index()].node;
+                let (sn, dn) = graph.edge_nodes(edge);
                 if sn == node_id && dn == node_id {
                     same_node_props.insert(*source_prop);
                     same_node_props.insert(*dest_prop);
@@ -1068,8 +1064,7 @@ fn apply_chiasm_fixup(
             HashMap::new();
         for edge in &graph.edges {
             if let Some((src_prop, dst_prop)) = edge_prop_pair(graph, edge) {
-                let src_node = graph.properties[src_prop.index()].node;
-                let dst_node = graph.properties[dst_prop.index()].node;
+                let (src_node, dst_node) = graph.edge_nodes(edge);
                 if src_node == node_id && dst_node != node_id {
                     inter_node_edges_by_target
                         .entry(dst_node)
@@ -1088,8 +1083,7 @@ fn apply_chiasm_fixup(
         let mut pair_map: HashMap<PropId, PropId> = HashMap::new();
         for edge in &graph.edges {
             if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-                let sn = graph.properties[source_prop.index()].node;
-                let dn = graph.properties[dest_prop.index()].node;
+                let (sn, dn) = graph.edge_nodes(edge);
                 if sn == node_id && dn == node_id {
                     pair_map.insert(*source_prop, *dest_prop);
                     pair_map.insert(*dest_prop, *source_prop);
@@ -1311,8 +1305,7 @@ pub fn minimize_crossings(
                             dest_prop,
                             ..
                         } => {
-                            let src_node = graph.properties[source_prop.index()].node;
-                            let dst_node = graph.properties[dest_prop.index()].node;
+                            let (src_node, dst_node) = graph.edge_nodes(edge);
                             if src_node == node_id && dst_node == node_id {
                                 Some((*source_prop, *dest_prop, edge.weight()))
                             } else {
@@ -1331,8 +1324,7 @@ pub fn minimize_crossings(
                     .iter()
                     .filter_map(|edge| match edge {
                         Edge::Constraint { source_prop, dest_prop, .. } => {
-                            let src_node = graph.properties[source_prop.index()].node;
-                            let dst_node = graph.properties[dest_prop.index()].node;
+                            let (src_node, dst_node) = graph.edge_nodes(edge);
                             if src_node != dst_node {
                                 if src_node == node_id { Some(*source_prop) }
                                 else if dst_node == node_id { Some(*dest_prop) }
@@ -2142,9 +2134,8 @@ fn compute_layer_space_port_sides(
 
         match edge {
             Edge::Anchor { .. } => {} // center ports, no side
-            Edge::Constraint { source_prop, dest_prop, .. } => {
-                let src_node = graph.properties[source_prop.index()].node;
-                let dst_node = graph.properties[dest_prop.index()].node;
+            Edge::Constraint { .. } => {
+                let (src_node, dst_node) = graph.edge_nodes(edge);
 
                 if src_node == dst_node {
                     // Same-node constraint: always Right

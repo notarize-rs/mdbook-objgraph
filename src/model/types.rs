@@ -96,6 +96,25 @@ impl Graph {
             .unwrap_or(&[])
     }
 
+    /// Resolve the source and target nodes of any edge.
+    ///
+    /// For `Anchor` edges: source = parent, target = child.
+    /// For `Constraint` edges: source = node owning source_prop, target = node owning dest_prop.
+    pub fn edge_nodes(&self, edge: &Edge) -> (NodeId, NodeId) {
+        match edge {
+            Edge::Anchor { parent, child, .. } => (*parent, *child),
+            Edge::Constraint { source_prop, dest_prop, .. } => (
+                self.properties[source_prop.index()].node,
+                self.properties[dest_prop.index()].node,
+            ),
+        }
+    }
+
+    /// Convenience: resolve edge nodes by `EdgeId`.
+    pub fn edge_node_ids(&self, edge_id: EdgeId) -> (NodeId, NodeId) {
+        self.edge_nodes(&self.edges[edge_id.index()])
+    }
+
     /// Get all child anchor edges for a node.
     pub fn children_of(&self, node_id: NodeId) -> &[EdgeId] {
         self.node_children

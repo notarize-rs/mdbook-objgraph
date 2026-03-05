@@ -810,13 +810,8 @@ pub fn layout(graph: &Graph) -> Result<LayoutResult, crate::ObgraphError> {
             Edge::Anchor { .. } => {
                 anchors.push(edge_path);
             }
-            Edge::Constraint {
-                source_prop,
-                dest_prop,
-                ..
-            } => {
-                let src_node = graph.properties[source_prop.index()].node;
-                let dst_node = graph.properties[dest_prop.index()].node;
+            Edge::Constraint { .. } => {
+                let (src_node, dst_node) = graph.edge_nodes(edge);
                 let is_cross_domain = is_cross_domain_constraint(graph, src_node, dst_node);
 
                 if is_cross_domain {

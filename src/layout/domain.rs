@@ -213,34 +213,24 @@ fn build_cross_domain_adjacency(
     let mut deriv_output_domains: HashMap<NodeId, HashSet<DomainId>> = HashMap::new();
 
     for edge in &graph.edges {
-        let (src_domain, tgt_domain) = match edge {
-            Edge::Anchor { parent, child, .. } => (
-                graph.nodes[parent.index()].domain,
-                graph.nodes[child.index()].domain,
-            ),
-            Edge::Constraint {
-                source_prop,
-                dest_prop,
-                ..
-            } => {
-                let src_node = &graph.nodes[graph.properties[source_prop.index()].node.index()];
-                let dst_node = &graph.nodes[graph.properties[dest_prop.index()].node.index()];
+        let (src_node_id, tgt_node_id) = graph.edge_nodes(edge);
+        let src_node = &graph.nodes[src_node_id.index()];
+        let dst_node = &graph.nodes[tgt_node_id.index()];
+        let (src_domain, tgt_domain) = (src_node.domain, dst_node.domain);
 
-                // Track derivation node connections for transitive adjacency.
-                if dst_node.is_derivation()
-                    && let Some(sd) = src_node.domain
-                {
-                    deriv_input_domains.entry(dst_node.id).or_default().insert(sd);
-                }
-                if src_node.is_derivation()
-                    && let Some(td) = dst_node.domain
-                {
-                    deriv_output_domains.entry(src_node.id).or_default().insert(td);
-                }
-
-                (src_node.domain, dst_node.domain)
+        if edge.is_constraint() {
+            // Track derivation node connections for transitive adjacency.
+            if dst_node.is_derivation()
+                && let Some(sd) = src_node.domain
+            {
+                deriv_input_domains.entry(dst_node.id).or_default().insert(sd);
             }
-        };
+            if src_node.is_derivation()
+                && let Some(td) = dst_node.domain
+            {
+                deriv_output_domains.entry(src_node.id).or_default().insert(td);
+            }
+        }
 
         if let (Some(sd), Some(td)) = (src_domain, tgt_domain)
             && sd != td
@@ -287,7 +277,8 @@ fn build_anchor_domain_pairs(
     };
 
     for edge in &graph.edges {
-        if let Edge::Anchor { parent, child, .. } = edge {
+        if edge.is_anchor() {
+            let (parent, child) = graph.edge_nodes(edge);
             let parent_domain = graph.nodes[parent.index()].domain;
             let child_domain = graph.nodes[child.index()].domain;
             if let (Some(pd), Some(cd)) = (parent_domain, child_domain)
@@ -577,23 +568,9 @@ fn count_cross_domain_channels(
     let mut gap_extents: Vec<Vec<(f64, f64)>> = vec![Vec::new(); num_gaps];
 
     for edge in &graph.edges {
-        let (src_node_id, tgt_node_id, src_domain, tgt_domain) = match edge {
-            Edge::Anchor { parent, child, .. } => (
-                *parent,
-                *child,
-                graph.nodes[parent.index()].domain,
-                graph.nodes[child.index()].domain,
-            ),
-            Edge::Constraint {
-                source_prop,
-                dest_prop,
-                ..
-            } => {
-                let sn = graph.properties[source_prop.index()].node;
-                let tn = graph.properties[dest_prop.index()].node;
-                (sn, tn, graph.nodes[sn.index()].domain, graph.nodes[tn.index()].domain)
-            }
-        };
+        let (src_node_id, tgt_node_id) = graph.edge_nodes(edge);
+        let src_domain = graph.nodes[src_node_id.index()].domain;
+        let tgt_domain = graph.nodes[tgt_node_id.index()].domain;
 
         // Only cross-domain edges.
         let is_cross_domain = match (src_domain, tgt_domain) {
@@ -778,34 +755,28 @@ fn reposition_to_columns(
 
         // Find input nodes (nodes with edges pointing into this node).
         let mut col_votes: Vec<usize> = Vec::new();
-        for edge in &graph.edges {
-            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-                let dst_nid = graph.properties[dest_prop.index()].node;
-                if dst_nid == node.id {
-                    let src_nid = graph.properties[source_prop.index()].node;
-                    let src_domain = graph.nodes[src_nid.index()].domain;
-                    if let Some(did) = src_domain
-                        && let Some(&col) = domain_col.get(&did)
-                    {
-                        col_votes.push(col);
-                    }
+        for edge in graph.edges.iter().filter(|e| e.is_constraint()) {
+            let (src_nid, dst_nid) = graph.edge_nodes(edge);
+            if dst_nid == node.id {
+                let src_domain = graph.nodes[src_nid.index()].domain;
+                if let Some(did) = src_domain
+                    && let Some(&col) = domain_col.get(&did)
+                {
+                    col_votes.push(col);
                 }
             }
         }
 
         // If no input votes, try output nodes.
         if col_votes.is_empty() {
-            for edge in &graph.edges {
-                if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-                    let src_nid = graph.properties[source_prop.index()].node;
-                    if src_nid == node.id {
-                        let dst_nid = graph.properties[dest_prop.index()].node;
-                        let dst_domain = graph.nodes[dst_nid.index()].domain;
-                        if let Some(did) = dst_domain
-                            && let Some(&col) = domain_col.get(&did)
-                        {
-                            col_votes.push(col);
-                        }
+            for edge in graph.edges.iter().filter(|e| e.is_constraint()) {
+                let (src_nid, dst_nid) = graph.edge_nodes(edge);
+                if src_nid == node.id {
+                    let dst_domain = graph.nodes[dst_nid.index()].domain;
+                    if let Some(did) = dst_domain
+                        && let Some(&col) = domain_col.get(&did)
+                    {
+                        col_votes.push(col);
                     }
                 }
             }
@@ -1219,7 +1190,8 @@ pub fn separate_domains_vertically(
     let mut anchor_order: HashSet<(usize, usize)> = HashSet::new();
 
     for edge in &graph.edges {
-        if let Edge::Anchor { parent, child, .. } = edge {
+        if edge.is_anchor() {
+            let (parent, child) = graph.edge_nodes(edge);
             let parent_domain = graph.nodes[parent.index()].domain;
             let child_domain = graph.nodes[child.index()].domain;
             if let (Some(pd), Some(cd)) = (parent_domain, child_domain)

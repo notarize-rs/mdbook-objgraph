@@ -879,26 +879,14 @@ fn parse_stub_segments(stub: &StubPath) -> Vec<LineSeg> {
 
 /// Extract source and target NodeIds for any edge type.
 fn edge_endpoint_nodes(graph: &Graph, edge_id: EdgeId) -> (Option<NodeId>, Option<NodeId>) {
-    match &graph.edges[edge_id.index()] {
-        Edge::Anchor { parent, child, .. } => (Some(*parent), Some(*child)),
-        Edge::Constraint {
-            source_prop,
-            dest_prop,
-            ..
-        } => {
-            let src_node = graph.properties[source_prop.index()].node;
-            let dst_node = graph.properties[dest_prop.index()].node;
-            (Some(src_node), Some(dst_node))
-        }
-    }
+    let (src, dst) = graph.edge_node_ids(edge_id);
+    (Some(src), Some(dst))
 }
 
 /// Extract domain membership of an edge's endpoints.
 fn edge_endpoint_domains(graph: &Graph, edge_id: EdgeId) -> (Option<DomainId>, Option<DomainId>) {
-    let (src_nid, tgt_nid) = edge_endpoint_nodes(graph, edge_id);
-    let sd = src_nid.and_then(|n| graph.nodes[n.index()].domain);
-    let td = tgt_nid.and_then(|n| graph.nodes[n.index()].domain);
-    (sd, td)
+    let (src, dst) = graph.edge_node_ids(edge_id);
+    (graph.nodes[src.index()].domain, graph.nodes[dst.index()].domain)
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,21 +1093,8 @@ fn find_node_edge_overlaps(
 
 /// Check if an edge has this node as one of its endpoints.
 fn edge_connects_to_node(graph: &Graph, edge_id: EdgeId, node_id: NodeId) -> bool {
-    let edge = &graph.edges[edge_id.index()];
-    match edge {
-        crate::model::types::Edge::Anchor { parent, child, .. } => {
-            *parent == node_id || *child == node_id
-        }
-        crate::model::types::Edge::Constraint {
-            source_prop,
-            dest_prop,
-            ..
-        } => {
-            let src_node = graph.properties[source_prop.index()].node;
-            let dst_node = graph.properties[dest_prop.index()].node;
-            src_node == node_id || dst_node == node_id
-        }
-    }
+    let (src, dst) = graph.edge_node_ids(edge_id);
+    src == node_id || dst == node_id
 }
 
 fn count_segment_crossings(edges: &[(EdgeId, Vec<LineSeg>)]) -> usize {
@@ -1255,15 +1230,10 @@ fn find_inter_domain_edges_in_intra_corridors(
         let edge = &graph.edges[edge_id.index()];
         // Only check cross-domain constraint edges.
         match edge {
-            Edge::Constraint {
-                source_prop,
-                dest_prop,
-                ..
-            } => {
-                let src_node = graph.properties[source_prop.index()].node;
-                let dst_node = graph.properties[dest_prop.index()].node;
-                let src = &graph.nodes[src_node.index()];
-                let dst = &graph.nodes[dst_node.index()];
+            Edge::Constraint { .. } => {
+                let (src_nid, dst_nid) = graph.edge_nodes(edge);
+                let src = &graph.nodes[src_nid.index()];
+                let dst = &graph.nodes[dst_nid.index()];
                 // Skip edges involving derivation nodes (domainless by design).
                 if src.is_derivation() || dst.is_derivation() {
                     continue;
@@ -1331,22 +1301,15 @@ fn find_channel_collisions(
     }
 
     // Helper: get the set of node IDs involved in an edge.
-    let edge_nodes = |eid: EdgeId| -> Vec<NodeId> {
-        match &graph.edges[eid.index()] {
-            Edge::Anchor { parent, child, .. } => vec![*parent, *child],
-            Edge::Constraint { source_prop, dest_prop, .. } => {
-                vec![
-                    graph.properties[source_prop.index()].node,
-                    graph.properties[dest_prop.index()].node,
-                ]
-            }
-        }
+    let edge_node_vec = |eid: EdgeId| -> Vec<NodeId> {
+        let (src, dst) = graph.edge_node_ids(eid);
+        vec![src, dst]
     };
 
     // Two edges share a common endpoint node.
     let shares_endpoint = |a: EdgeId, b: EdgeId| -> bool {
-        let nodes_a = edge_nodes(a);
-        let nodes_b = edge_nodes(b);
+        let nodes_a = edge_node_vec(a);
+        let nodes_b = edge_node_vec(b);
         nodes_a.iter().any(|n| nodes_b.contains(n))
     };
 
@@ -2568,8 +2531,7 @@ fn find_bracket_group_side_inconsistency(
     let mut per_node: HashMap<NodeId, Vec<(EdgeId, usize, usize)>> = HashMap::new();
     for (idx, edge) in graph.edges.iter().enumerate() {
         if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-            let src_node = graph.properties[source_prop.index()].node;
-            let dst_node = graph.properties[dest_prop.index()].node;
+            let (src_node, dst_node) = graph.edge_nodes(edge);
             if src_node == dst_node {
                 let si = prop_order.prop_index(src_node, *source_prop).unwrap_or(0);
                 let di = prop_order.prop_index(src_node, *dest_prop).unwrap_or(0);
@@ -2646,9 +2608,8 @@ fn find_node_pair_side_inconsistency(
     // Group cross-node constraints by (src_node, dst_node) pair.
     let mut per_pair: HashMap<(NodeId, NodeId), Vec<EdgeId>> = HashMap::new();
     for (idx, edge) in graph.edges.iter().enumerate() {
-        if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-            let src_node = graph.properties[source_prop.index()].node;
-            let dst_node = graph.properties[dest_prop.index()].node;
+        if let Edge::Constraint { .. } = edge {
+            let (src_node, dst_node) = graph.edge_nodes(edge);
             if src_node != dst_node {
                 // Normalize pair ordering so (A, B) == (B, A).
                 let key = if src_node.0 <= dst_node.0 {
@@ -2706,8 +2667,7 @@ fn find_bracket_nesting_violations(
     let mut per_pair: HashMap<(NodeId, NodeId), Vec<(PropId, PropId)>> = HashMap::new();
     for edge in &graph.edges {
         if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-            let src_node = graph.properties[source_prop.index()].node;
-            let dst_node = graph.properties[dest_prop.index()].node;
+            let (src_node, dst_node) = graph.edge_nodes(edge);
             if src_node == dst_node {
                 continue;
             }

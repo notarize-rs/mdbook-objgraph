@@ -1087,9 +1087,8 @@ impl PillPortDistributor {
 
         for (idx, edge) in graph.edges.iter().enumerate() {
             let edge_id = EdgeId(idx as u32);
-            if let Edge::Constraint { source_prop, dest_prop, .. } = edge {
-                let src_nid = graph.properties[source_prop.index()].node;
-                let dst_nid = graph.properties[dest_prop.index()].node;
+            if let Edge::Constraint { .. } = edge {
+                let (src_nid, dst_nid) = graph.edge_nodes(edge);
 
                 // Pill is source → bottom port (is_top = false).
                 if graph.nodes[src_nid.index()].is_derivation() {
@@ -1605,20 +1604,10 @@ pub fn route_all_edges(
         // inter-column gap corridor.
         let (src_domain, tgt_domain) = {
             let edge = &graph.edges[idx];
-            match edge {
-                Edge::Anchor { parent, child, .. } => {
-                    let sd = graph.nodes[parent.index()].domain;
-                    let td = graph.nodes[child.index()].domain;
-                    if sd == td { (sd, td) } else { (None, None) }
-                }
-                Edge::Constraint { source_prop, dest_prop, .. } => {
-                    let src_nid = prop_node(graph, *source_prop);
-                    let tgt_nid = prop_node(graph, *dest_prop);
-                    let sd = graph.nodes[src_nid.index()].domain;
-                    let td = graph.nodes[tgt_nid.index()].domain;
-                    if sd == td { (sd, td) } else { (None, None) }
-                }
-            }
+            let (src_nid, tgt_nid) = graph.edge_nodes(edge);
+            let sd = graph.nodes[src_nid.index()].domain;
+            let td = graph.nodes[tgt_nid.index()].domain;
+            if sd == td { (sd, td) } else { (None, None) }
         };
 
         let segments = route_single_edge(
@@ -1698,9 +1687,8 @@ fn fix_fanout_channel_order(graph: &Graph, routes: &mut [Route]) {
         // Only cross-domain constraint edges benefit from fan-out reordering.
         // Intra-domain brackets are handled by fix_bracket_nesting_channels.
         let is_cross_domain = match edge {
-            Edge::Constraint { source_prop, dest_prop, .. } => {
-                let sn = graph.properties[source_prop.index()].node;
-                let dn = graph.properties[dest_prop.index()].node;
+            Edge::Constraint { .. } => {
+                let (sn, dn) = graph.edge_nodes(edge);
                 graph.nodes[sn.index()].domain != graph.nodes[dn.index()].domain
             }
             _ => false,
