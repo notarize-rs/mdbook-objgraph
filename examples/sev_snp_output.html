@@ -15,39 +15,32 @@
   --obg-text-muted: #64748b;
   --obg-border: #e2e8f0;
   --obg-border-strong: #cbd5e1;
-
   /* Node */
   --obg-node-bg: white;
   --obg-header-bg: #f1f5f9;
   --obg-header-text: #334155;
-
   /* State indicators (problems-only) */
   --obg-anchor-valid: #22c55e;
   --obg-constraint-valid: #60a5fa;
   --obg-problem: #ef4444;
-
   /* Selection */
   --obg-select-ring: #475569;
-
   /* Domains */
   --obg-domain-bg: white;
   --obg-domain-border: #cbd5e1;
   --obg-domain-label: #64748b;
-
   background: #ffffff;
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 10px;
   color: var(--obg-text);
   overflow: visible;
 }
-
 /* Domain background and label */
 .obgraph-domain-bg {
   fill: var(--obg-domain-bg);
   stroke: var(--obg-domain-border);
   stroke-width: 2px;
 }
-
 .obgraph-domain-label {
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 10px;
@@ -58,14 +51,12 @@
   stroke-width: 3px;
   stroke-linejoin: round;
 }
-
 /* Anchor edges — green, 2px, solid when valid */
 .obgraph-anchor {
   fill: none;
   stroke: var(--obg-anchor-valid);
   stroke-width: 2px;
 }
-
 /* Invalid anchor edges — red dashed, 2px */
 .obgraph-anchor-invalid {
   fill: none;
@@ -73,14 +64,12 @@
   stroke-dasharray: 4 2;
   stroke-width: 2px;
 }
-
 /* Intra-domain constraint — blue, 1px */
 .obgraph-constraint {
   fill: none;
   stroke: var(--obg-constraint-valid);
   stroke-width: 1px;
 }
-
 /* Invalid constraint edges — red dashed, 1px */
 .obgraph-constraint-invalid {
   fill: none;
@@ -88,7 +77,6 @@
   stroke-dasharray: 4 2;
   stroke-width: 1px;
 }
-
 /* Cross-domain constraint full path — hidden by default */
 .obgraph-constraint-full {
   fill: none;
@@ -98,12 +86,10 @@
   pointer-events: none;
   transition: opacity 0.15s ease;
 }
-
 .obgraph-constraint-full.obgraph-active {
   opacity: 1;
   pointer-events: auto;
 }
-
 /* Cross-domain constraint stub — short dotted line near destination port */
 .obgraph-constraint-stub {
   fill: none;
@@ -111,52 +97,43 @@
   stroke-width: 1px;
   transition: opacity 0.15s ease;
 }
-
 /* Dotted stub pattern */
 .obgraph-constraint-stub.obgraph-stub-dotted {
   stroke-dasharray: 1 3;
   stroke-linecap: round;
 }
-
 /* Invalid stubs — red dashed (same dash pattern as other invalid edges) */
 .obgraph-constraint-stub.obgraph-constraint-stub-invalid {
   stroke: var(--obg-problem);
   stroke-dasharray: 4 2;
 }
-
 .obgraph-constraint-stub.obgraph-hidden {
   opacity: 0;
   pointer-events: none;
 }
-
 /* Node background rect — white with light border and shadow */
 .obgraph-node-bg {
   fill: var(--obg-node-bg);
   stroke: none;
   filter: url(#shadow);
 }
-
 /* Node header background (rounded-top rect) */
 .obgraph-node-header {
   fill: var(--obg-header-bg);
 }
-
 /* Node header fill (square-bottom rect overlapping lower half of header) */
 .obgraph-node-header-fill {
   fill: var(--obg-header-bg);
 }
-
 /* Node border: 1px default, 2px dark when selected */
 .obgraph-node-border {
   stroke: var(--obg-border);
   stroke-width: 1px;
 }
-
 .obgraph-node[data-selected="true"] .obgraph-node-border {
   stroke: var(--obg-select-ring);
   stroke-width: 2px;
 }
-
 /* Node title text */
 .obgraph-node-title {
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
@@ -164,52 +141,43 @@
   font-weight: 600;
   fill: var(--obg-header-text);
 }
-
 /* Separator line between title and properties */
 .obgraph-node-sep {
   stroke: var(--obg-border);
   stroke-width: 1px;
 }
-
 /* Property row background */
 .obgraph-prop-bg {
   fill: transparent;
 }
-
 /* Property name text — monospace */
 .obgraph-prop-name {
   fill: var(--obg-text-muted);
   font-size: 10px;
   font-family: Menlo, Consolas, monospace;
 }
-
 /* Trusted property name */
 .obgraph-prop[data-trust="trusted"] .obgraph-prop-name {
   fill: var(--obg-text);
 }
-
 /* Always-trusted / constrained property name */
 .obgraph-prop[data-trust="always"] .obgraph-prop-name,
 .obgraph-prop[data-trust="constrained"] .obgraph-prop-name {
   fill: var(--obg-text);
 }
-
 /* Critical property — bold */
 .obgraph-prop[data-critical="true"] .obgraph-prop-name {
   font-weight: 700;
 }
-
 /* Property row divider */
 .obgraph-prop-divider {
   stroke: var(--obg-border);
   stroke-width: 0.5px;
 }
-
 /* Problem indicator dots */
 .obgraph-node-dot, .obgraph-prop-dot {
   fill: var(--obg-problem);
 }
-
 /* Derivation pill */
 .obgraph-pill-bg {
   fill: var(--obg-node-bg);
@@ -217,35 +185,30 @@
   stroke-width: 1px;
   filter: url(#shadow);
 }
-
 .obgraph-pill[data-selected="true"] .obgraph-pill-bg {
   stroke: var(--obg-select-ring);
   stroke-width: 2.5px;
   filter: url(#shadow) drop-shadow(0 0 3px var(--obg-select-ring));
 }
-
 .obgraph-pill-label {
   font-family: Menlo, Consolas, monospace;
   font-size: 10px;
   fill: var(--obg-text);
 }
-
 /* Arrowhead fills are set directly on marker <path> elements via fill attr.
    CSS vars inside <marker> have spotty cross-browser support. */
-
 /* Edge operation labels */
 .obgraph-anchor-label {
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 8px;
   fill: #22c55e;
 }
-
 .obgraph-constraint-label {
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 6px;
   fill: #60a5fa;
 }
-</style>
+    </style>
     <defs>
       <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#00000018"/></filter>
       <marker id="arrow-anchor-valid" viewBox="0 0 6 6" refX="0" refY="3" markerUnits="userSpaceOnUse" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#22c55e"/></marker>
@@ -810,14 +773,13 @@
       </g>
     </g>
     </g>
-    <script>(function() {
+    <script>
+(function() {
   var svg = document.currentScript.closest('.obgraph');
   if (!svg) return;
-
   var selected = new Set();
   var hovered = new Set();
   var hoveredProp = null;
-
   function hasSelectedParticipant(el) {
     var attr = el.getAttribute('data-participants');
     if (!attr) return false;
@@ -827,7 +789,6 @@
     }
     return false;
   }
-
   function hasHoveredParticipant(el) {
     var attr = el.getAttribute('data-participants');
     if (!attr) return false;
@@ -837,7 +798,6 @@
     }
     return false;
   }
-
   function matchesHoveredProp(el) {
     if (!hoveredProp) return false;
     var attr = el.getAttribute('data-props');
@@ -848,7 +808,6 @@
     }
     return false;
   }
-
   // An edge should be shown (full path visible, stub hidden) if:
   //   (a) any participant node is selected, OR
   //   (b) any participant node is hovered AND (no prop hover, or prop matches)
@@ -858,7 +817,6 @@
     if (hoveredProp === null) return true;
     return matchesHoveredProp(el);
   }
-
   function updateEdges() {
     svg.querySelectorAll('.obgraph-constraint-full').forEach(function(p) {
       if (isEdgeVisible(p)) {
@@ -875,7 +833,6 @@
       }
     });
   }
-
   svg.querySelectorAll('.obgraph-node').forEach(function(node) {
     var id = node.getAttribute('data-node');
     if (node.getAttribute('data-selected') === 'true') {
@@ -912,7 +869,6 @@
       updateEdges();
     });
   });
-
   svg.addEventListener('click', function() {
     selected.clear();
     svg.querySelectorAll('.obgraph-node').forEach(function(node) {
@@ -920,9 +876,9 @@
     });
     updateEdges();
   });
-
   updateEdges();
-})();</script>
+})();
+    </script>
   </svg>
 </div>
 
