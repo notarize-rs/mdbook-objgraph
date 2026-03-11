@@ -45,8 +45,14 @@ pub fn generate_svg(graph: &Graph, layout: &LayoutResult, state: &StateResult) -
     .unwrap();
     writeln!(out, r#"       class="obgraph">"#).unwrap();
 
-    // Embedded CSS
-    writeln!(out, r#"    <style>{}</style>"#, style::css()).unwrap();
+    // Embedded CSS — blank lines removed so mdbook's markdown parser
+    // doesn't break out of inline HTML mode.
+    let css: String = style::css()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    writeln!(out, "    <style>\n{css}\n    </style>").unwrap();
 
     // Reusable definitions (markers, filters)
     write_defs(&mut out);
@@ -76,8 +82,13 @@ pub fn generate_svg(graph: &Graph, layout: &LayoutResult, state: &StateResult) -
     // Close global margin group
     writeln!(out, r#"    </g>"#).unwrap();
 
-    // Embedded JS
-    writeln!(out, r#"    <script>{}</script>"#, interactivity::js()).unwrap();
+    // Embedded JS — blank lines removed for same reason as CSS above.
+    let js: String = interactivity::js()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    writeln!(out, "    <script>\n{js}\n    </script>").unwrap();
 
     writeln!(out, r#"  </svg>"#).unwrap();
     writeln!(out, r#"</div>"#).unwrap();
