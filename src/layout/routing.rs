@@ -1848,6 +1848,7 @@ fn fix_pill_fanout_order(graph: &Graph, routes: &mut [Route]) {
             }
         }
     }
+
 }
 
 /// Fix fan-out channel ordering for H-V-H bracket routes through shared corridors.
@@ -1888,18 +1889,8 @@ fn fix_fanout_channel_order(graph: &Graph, routes: &mut [Route]) {
     let mut entries: Vec<FanoutEntry> = Vec::new();
 
     for (ri, route) in routes.iter().enumerate() {
-        let edge = &graph.edges[route.edge_id.index()];
-        // Only cross-domain constraint edges benefit from fan-out reordering.
-        // Intra-domain brackets are handled by fix_bracket_nesting_channels.
-        let is_cross_domain = match edge {
-            Edge::Constraint { .. } => {
-                let (sn, dn) = graph.edge_nodes(edge);
-                graph.nodes[sn.index()].domain != graph.nodes[dn.index()].domain
-            }
-            _ => false,
-        };
-        if !is_cross_domain { continue; }
-        if route.segments.len() != 3 { continue; }
+        if !graph.edges[route.edge_id.index()].is_constraint() { continue; }
+        if route.segments.len() < 3 { continue; }
 
         let (src_x, src_y, corridor_x) = match (&route.segments[0], &route.segments[1]) {
             (
@@ -1908,6 +1899,24 @@ fn fix_fanout_channel_order(graph: &Graph, routes: &mut [Route]) {
             ) => (*x_start, *y, *x),
             _ => continue,
         };
+
+        // Only same-column bracket routes: the route must exit the corridor
+        // on the same side it entered.  For H-V-H (3-seg) and H-V-H-V
+        // (4-seg pill) routes, the exit direction is the non-corridor
+        // endpoint of segments[2].
+        let exit_x = match &route.segments[2] {
+            Segment::Horizontal { x_start, x_end, .. } => {
+                if (*x_start - corridor_x).abs() < (*x_end - corridor_x).abs() {
+                    *x_end
+                } else {
+                    *x_start
+                }
+            }
+            _ => continue,
+        };
+        if (src_x < corridor_x) != (exit_x < corridor_x) {
+            continue; // Cross-column, not a bracket.
+        }
 
         let approaches_from_right = src_x > corridor_x;
         entries.push(FanoutEntry { route_idx: ri, corridor_x, src_y, src_x, approaches_from_right });
