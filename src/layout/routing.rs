@@ -1828,23 +1828,22 @@ fn fix_pill_fanout_order(graph: &Graph, routes: &mut [Route]) {
                 }
             }
             // Update first H segment: x_start and y
-            if segs.len() > 1 {
-                if let Segment::Horizontal { x_start, y, .. } = &mut segs[1] {
-                    if (*x_start - old_pill_x).abs() < 0.01 {
-                        *x_start = new_pill_x;
-                    }
-                    if (*y - old_h_y).abs() < 0.01 {
-                        *y = new_h_y;
-                    }
+            if segs.len() > 1
+                && let Segment::Horizontal { x_start, y, .. } = &mut segs[1]
+            {
+                if (*x_start - old_pill_x).abs() < 0.01 {
+                    *x_start = new_pill_x;
+                }
+                if (*y - old_h_y).abs() < 0.01 {
+                    *y = new_h_y;
                 }
             }
             // Update second V segment: y_start
-            if segs.len() > 2 {
-                if let Segment::Vertical { y_start, .. } = &mut segs[2] {
-                    if (*y_start - old_h_y).abs() < 0.01 {
-                        *y_start = new_h_y;
-                    }
-                }
+            if segs.len() > 2
+                && let Segment::Vertical { y_start, .. } = &mut segs[2]
+                && (*y_start - old_h_y).abs() < 0.01
+            {
+                *y_start = new_h_y;
             }
         }
     }
@@ -2075,9 +2074,9 @@ fn vertical_connected_components(
 
     // Group by root.
     let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
-    for i in 0..n {
+    for (i, &ci) in cluster_indices.iter().enumerate() {
         let root = find(&mut parent, i);
-        groups.entry(root).or_default().push(cluster_indices[i]);
+        groups.entry(root).or_default().push(ci);
     }
 
     groups.into_values().collect()

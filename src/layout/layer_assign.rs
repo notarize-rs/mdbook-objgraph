@@ -966,10 +966,10 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
         let mut max_input_layer: Option<u32> = None;
         for edge in graph.edges.iter().filter(|e| e.is_constraint()) {
             let (src_node, dst_node) = graph.edge_nodes(edge);
-            if dst_node == deriv_nid {
-                if let Some(&l) = new_node_layers.get(&src_node) {
-                    max_input_layer = Some(max_input_layer.map_or(l, |cur: u32| cur.max(l)));
-                }
+            if dst_node == deriv_nid
+                && let Some(&l) = new_node_layers.get(&src_node)
+            {
+                max_input_layer = Some(max_input_layer.map_or(l, |cur: u32| cur.max(l)));
             }
         }
         let layer = max_input_layer
