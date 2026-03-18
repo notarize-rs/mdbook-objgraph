@@ -1,0 +1,173 @@
+# Cosign Keyless Signing (Sigstore)
+# Container image signing using ephemeral certificates and transparency logs
+#
+# ══════════════════════════════════════════════════════════════════════════════
+# Metadata Schema (for build-pages.py index generation)
+# ══════════════════════════════════════════════════════════════════════════════
+# The #@ comment prefix defines metadata used to generate the index page.
+# Available keys:
+#
+#   #@ title:        Page title and card heading (required)
+#   #@ heading:      Full heading shown on the rendered HTML page
+#   #@ badge:        Badge text displayed on the card (e.g., "Recommended")
+#   #@ badge_type:   Badge color style: recommended | deprecated | enterprise |
+#                    slsa | hardware
+#   #@ card_style:   Card border/background style: recommended | deprecated |
+#                    hardware
+#   #@ meta:         Subtitle text shown below the card title
+#   #@ stats:        JSON object with node/domain counts, e.g., {"nodes": 9, "domains": 5}
+#   #@ description:  Main description paragraph for the card
+#   #@ key_features: Features summary (shown as "Key Features:" paragraph)
+#   #@ best_for:     Use case summary (shown as "Best for:" paragraph)
+#
+# Values are parsed as:
+#   - JSON objects/arrays if starting with { or [
+#   - Integers if all digits
+#   - Strings otherwise
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#@ title: Cosign Keyless
+#@ heading: Cosign Keyless Signing Trust Graph
+#@ badge: Recommended
+#@ badge_type: recommended
+#@ card_style: recommended
+#@ meta: Sigstore • Modern keyless signing
+#@ stats: {"nodes": 9, "domains": 5}
+#@ description: Modern approach eliminating key management burden through OIDC authentication, short-lived Fulcio certificates (10 min), and Rekor transparency logs. Ephemeral signing keys are destroyed after use.
+#@ best_for: New projects, teams without PKI infrastructure, organizations using OIDC providers (GitHub, Google, etc.)
+#
+# Trust Model:
+#   - Identity: OIDC provider authenticates user, issues JWT token
+#   - PKI: Fulcio CA issues short-lived certificate binding identity to ephemeral key
+#   - Cryptography: Ephemeral key pair signs image digest
+#   - Transparency: Rekor log provides tamper-proof timestamp and signature existence proof
+#   - Artifact: Container image verified via digest matching
+#
+# References:
+#   - https://docs.sigstore.dev/cosign/signing/overview/
+#   - https://github.com/sigstore/cosign
+#   - https://theupdateframework.github.io/specification/latest/
+
+domain "GitHub" {
+  # OIDC provider authenticates user (GitHub, Google, etc.)
+  node OIDCProvider "OIDC Provider" @anchored {
+    issuer_url       @constrained
+    jwks_uri         @constrained
+    trusted_domains  @constrained
+  }
+
+  # JWT token containing authenticated identity
+  node OIDCToken "OIDC Token" {
+    email            @constrained
+    issuer           @constrained
+    expiration       @constrained
+  }
+}
+
+domain "Fulcio" {
+  # Sigstore root certificate authority
+  node FulcioCA "Fulcio CA" @anchored {
+    root_certificate @constrained
+    key_algorithm    @constrained
+    validity_period  @constrained
+  }
+
+  # Short-lived certificate (10 minutes) binding identity to signing key
+  node FulcioCertificate "Fulcio Certificate" {
+    subject_email    @critical
+    public_key       @constrained
+    not_before       @constrained
+    not_after        @constrained
+    chain_valid      @critical
+  }
+}
+
+domain "Signing Keys" {
+  # Ephemeral key pair generated for signing (destroyed after use)
+  node EphemeralKey "Ephemeral Signing Key" {
+    public           @critical
+    algorithm        @constrained
+  }
+
+  # Signature over image digest
+  node ImageSignature "Image Signature" {
+    signature        @constrained
+    image_digest     @constrained
+    algorithm        @critical
+  }
+}
+
+domain "Rekor" {
+  # Rekor transparency log (append-only Merkle tree)
+  node RekorLog "Rekor Transparency Log" @anchored {
+    log_public_key   @constrained
+    log_endpoint     @constrained
+    tree_root        @constrained
+  }
+
+  # Entry in Rekor log proving signature existed at specific time
+  node RekorEntry "Rekor Entry" {
+    integrated_time  @critical
+    log_index        @constrained
+    merkle_proof     @critical
+    signature_hash   @critical
+  }
+}
+
+domain "OCI Registry" {
+  # Container image being verified
+  node ContainerImage "Container Image" @selected {
+    digest           @critical
+    registry         @constrained
+    tag              @constrained
+  }
+}
+
+# === Anchors (hierarchical links) ===
+
+# OIDC provider issues JWT token after authentication
+OIDCToken <- OIDCProvider : authentication
+
+# Fulcio CA issues certificate
+FulcioCertificate <- FulcioCA : issue_certificate
+
+# Certificate authorizes ephemeral key (certificate embeds public key)
+EphemeralKey <- FulcioCertificate : authorize_key
+
+# Ephemeral key creates signature
+ImageSignature <- EphemeralKey : sign_digest
+
+# Rekor log creates entry with timestamp
+RekorEntry <- RekorLog : log_entry
+
+# Container image is referenced by signature
+ContainerImage <- ImageSignature : signature_reference
+
+# === Bonds (within-domain constraints) ===
+
+# Certificate subject must match OIDC token email (identity binding)
+FulcioCertificate::subject_email <= OIDCToken::email : extract_subject
+
+# Certificate issuer must match OIDC provider
+FulcioCertificate::chain_valid <= OIDCProvider::issuer_url : verify_issuer
+
+# Key public portion must match certificate embedded key
+EphemeralKey::public <= FulcioCertificate::public_key : extract_public_key
+
+# Signature algorithm must match key algorithm
+ImageSignature::algorithm <= EphemeralKey::algorithm : algorithm_consistency
+
+# === Bridges (cross-domain constraints) ===
+
+# Signature digest must match container image digest (content binding)
+ContainerImage::digest <= ImageSignature::image_digest : verify_digest_match
+
+# Rekor entry must reference signature (transparency proof)
+RekorEntry::signature_hash <= ImageSignature::signature : hash_signature
+
+# Rekor timestamp must be within certificate validity (prevents backdating)
+RekorEntry::integrated_time <= FulcioCertificate::not_after : timestamp_before_expiry
+RekorEntry::integrated_time <= FulcioCertificate::not_before : timestamp_after_issuance
+
+# Rekor merkle proof must verify against known tree root (inclusion proof)
+RekorEntry::merkle_proof <= RekorLog::tree_root : verify_inclusion

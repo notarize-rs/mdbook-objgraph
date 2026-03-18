@@ -1,0 +1,118 @@
+# Notary v2 (OCI-native Signatures)
+# Container signing using JWS/COSE signatures stored as OCI artifacts
+#
+#@ title: Notary v2
+#@ heading: Notary v2 (OCI-native)
+#@ badge: Enterprise
+#@ badge_type: enterprise
+#@ meta: OCI-native • Emerging standard
+#@ stats: {"nodes": 5, "domains": 4}
+#@ description: OCI-native evolution of TUF-based signing. Signatures stored as OCI artifacts in the same registry as images, using JWS or COSE formats. No separate Notary server infrastructure required.
+#@ best_for: Organizations requiring TUF security model, OCI-native environments, teams needing signature format flexibility
+#
+# Trust Model:
+#   - Keys: Managed signing key (organizational trust, out-of-band distribution)
+#   - Signatures: JWS or COSE signature envelope containing image digest
+#   - Registry: OCI registry stores signature artifacts alongside images
+#   - Artifact: Container image verified via digest reference in signature
+#
+# Advantages: OCI-native (no separate infrastructure), flexible signature formats
+# Use Case: Enterprise environments requiring TUF-like security with OCI integration
+#
+# References:
+#   - https://github.com/notaryproject/specifications
+#   - https://www.cncf.io/online-programs/cloud-native-live-notary-v2-promoting-signed-artifacts/
+#   - https://notaryproject.dev/blog/2022/oras-oci-artifacts-notation-signatures/
+
+domain "Signing Keys" {
+  # Signing key (managed via key management system or HSM)
+  node SigningKey "Signing Key" @anchored {
+    public_key       @constrained
+    key_id           @constrained
+    algorithm        @constrained
+  }
+
+  # JWS (JSON Web Signature) or COSE envelope containing signature
+  node JWSSignature "JWS/COSE Signature" {
+    protected_header @critical
+    payload_digest   @critical
+    signature_bytes  @critical
+    algorithm        @critical
+  }
+}
+
+domain "OCI_Registry" {
+  # OCI-compliant registry storing images and signatures (anchored as infrastructure trust root)
+  node OCIRegistry "OCI Registry" @anchored {
+    endpoint         @constrained
+    namespace        @constrained
+    immutable        @constrained
+  }
+
+  # OCI artifact containing the signature (stored in registry)
+  node OCISignatureArtifact "OCI Signature Artifact" {
+    media_type       @critical
+    signature_blob   @critical
+    subject          @critical
+    annotations      @critical
+  }
+}
+
+domain "Image" {
+  # Container image being signed and verified
+  node ContainerImage "Container Image" @selected {
+    digest           @critical
+    manifest         @critical
+    tag              @critical
+  }
+}
+
+# === Anchors (hierarchical links) ===
+
+# Signing key creates signature
+JWSSignature <- SigningKey : sign_payload
+
+# Signature is wrapped in OCI artifact
+OCISignatureArtifact <- JWSSignature : create_artifact
+
+# Container image is referenced by signature artifact
+ContainerImage <- OCISignatureArtifact : reference_image
+
+# === Bonds (within Signing_Authority domain) ===
+
+# Protected header extracted from signing key
+JWSSignature::protected_header <= SigningKey::key_id : extract_protected_header
+
+# Payload digest extracted from signing key metadata
+JWSSignature::payload_digest <= SigningKey::key_id : extract_payload_digest
+
+# Signature bytes must verify with public key
+JWSSignature::signature_bytes <= SigningKey::public_key : verify_signature
+
+# Algorithm must match key algorithm
+JWSSignature::algorithm <= SigningKey::algorithm : algorithm_consistency
+
+# === Bonds (within OCI_Registry domain) ===
+
+# OCI artifact media type validated by registry
+OCISignatureArtifact::media_type <= OCIRegistry::endpoint : validate_media_type
+
+# OCI artifact annotations extracted from registry namespace
+OCISignatureArtifact::annotations <= OCIRegistry::namespace : extract_annotations
+
+# === Bridges (cross-domain constraints) ===
+
+# OCI artifact signature blob must contain JWS signature
+OCISignatureArtifact::signature_blob <= JWSSignature::signature_bytes : embed_signature
+
+# OCI artifact subject must be constrained by registry immutability
+OCISignatureArtifact::subject <= OCIRegistry::immutable : immutable_storage
+
+# Container image tag extracted from OCI artifact annotations
+ContainerImage::tag <= OCISignatureArtifact::annotations : extract_tag
+
+# Container digest must match signature payload (content binding)
+ContainerImage::digest <= JWSSignature::payload_digest : verify_digest_match
+
+# Container manifest must match OCI artifact subject
+ContainerImage::manifest <= OCISignatureArtifact::subject : verify_subject_reference

@@ -1,0 +1,266 @@
+# HTTPS/TLS Trust Chain for git clone https://github.com/user/repo
+# How a user's git client verifies it is talking to the authentic GitHub server
+#
+#@ title: HTTPS/TLS Trust Chain
+#@ heading: HTTPS/TLS Trust Chain for git clone
+#@ badge: Foundational
+#@ badge_type: enterprise
+#@ card_style: recommended
+#@ meta: WebPKI • TLS 1.3 • Certificate Transparency
+#@ stats: {"nodes": 9, "domains": 4}
+#@ description: How git clone https://github.com/... establishes trust — from the client's CA trust store through the X.509 certificate hierarchy to the TLS 1.3 CertificateVerify proof of server identity. Certificate Transparency provides auditability via SCTs.
+#@ key_features: X.509 certificate chain validation, TLS 1.3 CertificateVerify, Certificate Transparency SCTs, hostname verification (RFC 9525), time validity checking.
+#@ best_for: Understanding the foundational trust model behind every HTTPS connection
+#
+# Trust Model:
+#   - WebPKI: X.509 certificate hierarchy (DigiCert Global Root G2 -> Intermediate CA -> Leaf)
+#   - TLS Session: TLS 1.3 handshake proving server possesses the leaf certificate's private key
+#   - Certificate Transparency: CT logs providing auditability via Signed Certificate Timestamps
+#   - Git Client: Client-side trust anchors (CA trust store, system clock, target hostname)
+#
+# References:
+#   - RFC 8446: The Transport Layer Security (TLS) Protocol Version 1.3
+#   - RFC 5280: Internet X.509 PKI Certificate and CRL Profile
+#   - RFC 6962: Certificate Transparency
+#   - RFC 9525: Service Identity in TLS
+
+# ===============================================================
+# Domain: WebPKI
+# X.509 certificate hierarchy from DigiCert's root CA through an
+# intermediate CA to GitHub's leaf (server) certificate. This
+# establishes that the public key in the leaf certificate genuinely
+# belongs to GitHub, Inc.
+# ===============================================================
+
+domain "WebPKI" {
+  # Self-signed RSA-2048 root CA included in all major trust stores.
+  # Anchored via CA Trust Store (the client's pre-installed root set).
+  # Valid 2013-08-01 to 2038-01-15.
+  node DigiCertRootG2 "DigiCert Global Root G2" {
+    serial_number
+    issuer                              @critical
+    not_before                          @critical
+    not_after                           @critical
+    subject                             @constrained
+    subject_public_key                  @constrained
+    extensions.basic_constraints        @constrained
+    extensions.key_usage                @constrained
+    extensions.subject_key_id           @constrained
+    extensions.authority_key_id         @critical
+    sha256_fingerprint                  @constrained
+  }
+
+  # Intermediate CA signed by DigiCert Global Root G2.
+  # Issues leaf certificates for GitHub and other organizations.
+  # basicConstraints: CA:TRUE, pathlen:0 (can issue end-entity certs only).
+  node IntermediateCA "DigiCert G2 TLS RSA SHA256 2020 CA1" {
+    serial_number
+    issuer                              @critical
+    not_before                          @critical
+    not_after                           @critical
+    subject                             @constrained
+    subject_public_key                  @constrained
+    signature                           @critical
+    extensions.basic_constraints        @constrained
+    extensions.key_usage                @constrained
+    extensions.subject_key_id           @constrained
+    extensions.authority_key_id         @critical
+  }
+
+  # GitHub's server certificate binding github.com to a public key.
+  # Presented by the server during the TLS handshake.
+  # SAN includes github.com, *.github.com.
+  # Max validity 398 days per CA/Browser Forum Baseline Requirements.
+  node LeafCert "GitHub Leaf Certificate" {
+    serial_number
+    issuer                              @critical
+    not_before                          @critical
+    not_after                           @critical
+    subject
+    subject_public_key                  @constrained
+    signature                           @critical
+    extensions.subject_alt_name         @critical
+    extensions.key_usage                @constrained
+    extensions.extended_key_usage       @constrained
+    extensions.authority_key_id         @critical
+    extensions.sct_list                 @critical
+  }
+}
+
+# ===============================================================
+# Domain: TLS Session
+# TLS 1.3 handshake proving the server possesses the private key
+# corresponding to the leaf certificate's public key. The
+# CertificateVerify message is the critical proof of identity.
+# ===============================================================
+
+domain "TLS Session" {
+  # CertificateVerify: the server signs the handshake transcript
+  # with the private key matching the leaf certificate's public key.
+  # This proves live possession of the key, not just a stolen cert.
+  # The handshake transcript includes random values from both sides,
+  # making each handshake unique and preventing replay.
+  node CertVerify "CertificateVerify" @selected {
+    transcript_signature                @critical
+    transcript_hash                     @constrained
+    signature_algorithm                 @constrained
+  }
+}
+
+# ===============================================================
+# Domain: Certificate Transparency
+# CT logs are append-only Merkle-tree ledgers operated by
+# independent organizations (Google, DigiCert, Sectigo, etc.).
+# SCTs embedded in the leaf certificate prove it was publicly logged.
+# ===============================================================
+
+domain "Certificate Transparency" {
+  # CT log operator with a well-known public key.
+  # Trusted because of inclusion in browser CT programs
+  # (Chrome CT Policy, Apple CT Policy).
+  node CTLog "CT Log" @anchored {
+    log_id                              @constrained
+    log_public_key                      @constrained
+    operator                            @constrained
+  }
+
+  # Signed Certificate Timestamp: a signed promise from the CT log
+  # that the certificate has been (or will be) incorporated into the
+  # log's Merkle tree. Embedded in the leaf cert as an X.509v3 extension.
+  node SCT "Signed Certificate Timestamp" {
+    sct_version
+    log_id                              @critical
+    timestamp                           @critical
+    signature                           @critical
+  }
+}
+
+# ===============================================================
+# Domain: Git Client
+# Client-side trust anchors that the user and system provide.
+# The CA trust store determines which roots are trusted; the system
+# clock validates certificate time windows; the git process
+# specifies the target hostname that must match the certificate SAN.
+# ===============================================================
+
+domain "Git Client" {
+  # Pre-installed collection of trusted root CA certificates.
+  # On Linux: /etc/ssl/certs/ca-certificates.crt
+  # On macOS: System Keychain. On Windows: Windows Certificate Store.
+  # Git accesses via libcurl's TLS backend (OpenSSL, Schannel, etc.).
+  node CATrustStore "CA Trust Store" @anchored {
+    trusted_roots                       @constrained
+    source                              @constrained
+  }
+
+  # Client machine's local clock, assumed reasonably accurate (NTP).
+  # Used to check certificate validity periods (not_before / not_after)
+  # and SCT timestamps.
+  node Clock "System Clock" @anchored {
+    current_time                        @constrained
+  }
+
+  # The git process that initiates the connection.
+  # Extracts the target hostname from the URL (github.com) and passes
+  # it to libcurl for hostname verification against the leaf cert SAN.
+  node GitProcess "Git Process" @anchored {
+    target_hostname                     @constrained
+    ssl_verify                          @constrained
+  }
+}
+
+# ===============================================================
+# Anchors (hierarchical trust links)
+# Trust flows right-to-left: child <- parent
+# ===============================================================
+
+# CA Trust Store anchors the root CA (root is trusted because
+# it is present in the pre-installed trust store)
+DigiCertRootG2 <- CATrustStore : trust_store_lookup
+
+# WebPKI certificate chain: Root signs Intermediate signs Leaf
+IntermediateCA <- DigiCertRootG2 : rsa_sha256
+LeafCert <- IntermediateCA : rsa_sha256
+
+# CT log issues Signed Certificate Timestamp
+SCT <- CTLog : ecdsa_sha256
+
+# TLS CertificateVerify depends on the leaf certificate:
+# the server signs the handshake transcript with the leaf cert's private key
+CertVerify <- LeafCert : tls13_handshake
+
+# ===============================================================
+# Bonds: DigiCert Root G2 self-signed checks
+# The root's issuer must equal its subject (self-signed) and
+# its authority_key_id must match its subject_key_id.
+# ===============================================================
+
+DigiCertRootG2::issuer <= DigiCertRootG2::subject : issuer_eq_subject
+DigiCertRootG2::extensions.authority_key_id <= DigiCertRootG2::extensions.subject_key_id : self_signed
+DigiCertRootG2::not_before <= Clock::current_time : time_valid
+DigiCertRootG2::not_after <= Clock::current_time : time_valid
+
+# ===============================================================
+# Bonds: Intermediate CA certificate validation
+# Issuer must match root subject; authority_key_id must match
+# root subject_key_id; signature verifies against root public key.
+# ===============================================================
+
+IntermediateCA::issuer <= DigiCertRootG2::subject : issuer_match
+IntermediateCA::extensions.authority_key_id <= DigiCertRootG2::extensions.subject_key_id : key_id_match
+IntermediateCA::signature <= DigiCertRootG2::subject_public_key : verify_signature
+IntermediateCA::not_before <= Clock::current_time : time_valid
+IntermediateCA::not_after <= Clock::current_time : time_valid
+
+# ===============================================================
+# Bonds: GitHub Leaf Certificate validation
+# Issuer must match intermediate subject; authority_key_id must
+# match intermediate subject_key_id; signature verifies against
+# intermediate public key.
+# ===============================================================
+
+LeafCert::issuer <= IntermediateCA::subject : issuer_match
+LeafCert::extensions.authority_key_id <= IntermediateCA::extensions.subject_key_id : key_id_match
+LeafCert::signature <= IntermediateCA::subject_public_key : verify_signature
+LeafCert::not_before <= Clock::current_time : time_valid
+LeafCert::not_after <= Clock::current_time : time_valid
+
+# ===============================================================
+# Bonds: SCT validation
+# Each SCT's log_id must match a known CT log; signature must
+# verify against the CT log's public key; timestamp must not be
+# in the future.
+# ===============================================================
+
+SCT::log_id <= CTLog::log_id : log_identity
+SCT::signature <= CTLog::log_public_key : verify_sct_signature
+SCT::timestamp <= Clock::current_time : timestamp_not_future
+
+# ===============================================================
+# Bridges: WebPKI <-> TLS Session
+# The validated leaf certificate public key is used to verify
+# the CertificateVerify signature, proving the server possesses
+# the corresponding private key. This bridges PKI identity to
+# live session authentication.
+# ===============================================================
+
+CertVerify::transcript_signature <= LeafCert::subject_public_key : verify_cert_verify
+
+# ===============================================================
+# Bridges: WebPKI <-> Certificate Transparency
+# SCTs embedded in the leaf certificate prove it was publicly
+# logged before issuance. The leaf cert's sct_list is constrained
+# by verified SCT signatures.
+# ===============================================================
+
+LeafCert::extensions.sct_list <= SCT::signature : sct_embedded
+
+# ===============================================================
+# Bridges: Git Client <-> WebPKI (Hostname Verification)
+# The target hostname from the git URL (github.com) must match
+# an entry in the leaf certificate's Subject Alternative Name.
+# This ensures git connects to the server the user specified.
+# Per RFC 9525, SAN takes precedence; CN is no longer consulted.
+# ===============================================================
+
+LeafCert::extensions.subject_alt_name <= GitProcess::target_hostname : hostname_match

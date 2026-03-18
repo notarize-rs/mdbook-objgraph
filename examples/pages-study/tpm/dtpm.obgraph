@@ -1,0 +1,246 @@
+# Discrete TPM Trust Model (dTPM)
+# Trust visualization for discrete TPM hardware chip showing complete physical
+# isolation from CPU and main system. Trust chain from TPM manufacturer through
+# dedicated security chip to BitLocker and Windows Hello.
+#
+#@ title: dTPM
+#@ heading: Discrete TPM Trust Model
+#@ badge: Hardware Root
+#@ badge_type: hardware
+#@ card_style: hardware
+#@ meta: Discrete TPM • Hardware Security • FIPS 140
+#@ stats: {"nodes": 10, "domains": 5}
+#@ description: Physical TPM chip with complete hardware isolation from CPU. Demonstrates strongest hardware security with dedicated security processor and tamper-resistant enclosure.
+#@ key_features: Hardware isolation, FIPS 140 Level 3 capable, immune to CPU attacks, dedicated security processor
+#@ best_for: Enterprise systems, high-security requirements, compliance (FIPS/Common Criteria), long-lifecycle systems
+#
+# Trust Model:
+#   - Hardware Security: Dedicated TPM chip physically isolated from CPU
+#   - Platform Firmware: UEFI Secure Boot and measured boot
+#   - Cryptographic: Manufacturer CA certifies TPM identity
+#   - BitLocker: Disk encryption sealed to platform state
+#   - Windows Hello: Biometric/PIN credential protection
+#
+# Key Difference from fTPM:
+#   dTPM is a physically separate chip with complete electrical isolation from
+#   the CPU, memory, and OS. Immune to CPU-level attacks. FIPS 140 Level 3
+#   certification capable. Higher cost ($1-5+ per unit) but maximum assurance.
+#
+# References:
+#   - https://www.bvm.co.uk/faq/ftpm-vs-dtpm-understanding-trusted-platform-modules-in-industrial-computing/
+#   - https://premioinc.com/blogs/blog/differences-between-ftpm-vs-dtpm
+#   - https://trustedcomputinggroup.org/resource/tpm-library-specification/
+#   - https://learn.microsoft.com/en-us/windows/security/hardware-security/tpm/how-windows-uses-the-tpm
+
+# === DOMAIN: Hardware Security ===
+domain "Hardware Security" {
+  # TPM manufacturer root
+  node TPMManufacturer "TPM Manufacturer Root" @anchored {
+    root_certificate        @constrained
+    ek_provisioning_key     @constrained
+    manufacturing_process   @constrained
+  }
+
+  # Discrete TPM hardware chip
+  node dTPM "Discrete TPM Chip (dTPM)" {
+    endorsement_key         @critical
+    pcr_registers           @critical
+    storage_root_key        @critical
+    random_generator        @critical
+    tamper_resistance       @critical
+  }
+}
+
+# === DOMAIN: Cryptographic PKI ===
+domain "Cryptographic PKI" {
+  # Manufacturer CA for dTPM identity (derives from TPMManufacturer)
+  node ManufacturerCA "TPM Manufacturer CA" {
+    root_certificate    @critical
+    ek_signing_key      @critical
+  }
+
+  # EK certificate for dTPM
+  node EKCert "Endorsement Key Certificate" {
+    public_key          @critical
+    ca_signature        @critical
+  }
+}
+
+# === DOMAIN: Platform Firmware ===
+domain "Platform Firmware" {
+  # UEFI firmware with Secure Boot
+  node UEFI "UEFI Firmware (CRTM)" @anchored {
+    platform_key        @constrained
+    secure_boot_db      @constrained
+    crtm_code           @constrained
+  }
+
+  # Bootloader verified by Secure Boot
+  node Bootloader "Windows Bootloader" {
+    bootloader_signature @critical
+    boot_configuration   @critical
+  }
+}
+
+# === DOMAIN: BitLocker Service ===
+domain "BitLocker Service" {
+  # BitLocker Volume Master Key
+  node VMK "Volume Master Key (VMK)" {
+    sealed_blob         @critical
+    pcr_policy          @critical
+  }
+
+  # BitLocker encrypted volume (terminal node)
+  node EncryptedVolume "BitLocker Encrypted Volume" @selected {
+    volume_encryption   @critical
+    boot_integrity      @critical
+  }
+}
+
+# === DOMAIN: Windows Hello Service ===
+domain "Windows Hello Service" {
+  # NGC container for user credentials
+  node NGC "NGC Container Key" {
+    container_key       @critical
+    key_wrapping        @critical
+  }
+
+  # User credential (terminal node)
+  node UserCredential "Windows Hello Credential" @selected {
+    private_key         @critical
+    pin_authorization   @critical
+  }
+}
+
+# ============================================================================
+# === LINKS (Anchors - trust flow right-to-left) ===
+# ============================================================================
+
+# TPM manufacturer provisions discrete TPM chip during manufacturing
+dTPM <- TPMManufacturer : "Manufacture and provision TPM chip"
+
+# Manufacturer CA derives authority from TPM manufacturing root
+ManufacturerCA <- TPMManufacturer : "CA derives from manufacturing root"
+
+# Manufacturer CA certifies dTPM's EK
+EKCert <- ManufacturerCA : "Issue EK certificate"
+
+# Bootloader verified and measured by UEFI
+Bootloader <- UEFI : "Secure Boot verification"
+
+# VMK sealed by dTPM
+VMK <- dTPM : "Seal VMK to PCR policy"
+
+# Encrypted volume protected by VMK
+EncryptedVolume <- VMK : "Decrypt with VMK"
+
+# NGC keys wrapped by dTPM SRK
+NGC <- dTPM : "Wrap NGC keys with SRK"
+
+# User credential protected by NGC container
+UserCredential <- NGC : "Unwrap credential key"
+
+# ============================================================================
+# === BONDS (Within-chain constraints) ===
+# ============================================================================
+
+# dTPM's intrinsic hardware capabilities derived from manufacturing
+dTPM::storage_root_key <= TPMManufacturer::ek_provisioning_key : "SRK provisioned during manufacturing"
+dTPM::random_generator <= TPMManufacturer::manufacturing_process : "Hardware RNG certified"
+dTPM::tamper_resistance <= TPMManufacturer::manufacturing_process : "Tamper resistance built during manufacturing"
+
+# PCR registers are intrinsic hardware capability protected by tamper resistance
+dTPM::pcr_registers <= dTPM::tamper_resistance : "PCRs protected by tamper-resistant hardware"
+
+# dTPM's EK provisioned during manufacturing
+dTPM::endorsement_key <= TPMManufacturer::ek_provisioning_key : "Burn EK during manufacturing"
+
+# Manufacturer CA derives from TPM manufacturer root
+ManufacturerCA::root_certificate <= TPMManufacturer::root_certificate : "CA cert derives from manufacturer root"
+ManufacturerCA::ek_signing_key <= TPMManufacturer::ek_provisioning_key : "CA signing key authorized by provisioning key"
+
+# Certificate contains dTPM's EK public component
+EKCert::public_key <= dTPM::endorsement_key : "Certificate contains dTPM's EK public component"
+
+# EK certificate signed by manufacturer CA
+EKCert::ca_signature <= ManufacturerCA::ek_signing_key : "Sign EK certificate"
+
+# Bootloader signature verified against Secure Boot db
+Bootloader::bootloader_signature <= UEFI::secure_boot_db : "Verify bootloader signature"
+
+# Boot configuration measured by CRTM
+Bootloader::boot_configuration <= UEFI::crtm_code : "Boot configuration measured by CRTM"
+
+# VMK sealed blob bound to dTPM SRK
+VMK::sealed_blob <= dTPM::storage_root_key : "Seal VMK with SRK"
+
+# NGC container key derived from dTPM SRK
+NGC::container_key <= dTPM::storage_root_key : "Derive NGC container key under SRK"
+
+# NGC key wrapping uses dTPM SRK
+NGC::key_wrapping <= dTPM::storage_root_key : "Wrap NGC keys with SRK"
+
+# ============================================================================
+# === BRIDGES (Cross-domain constraints) ===
+# ============================================================================
+
+# Platform measurements flow into TPM PCR registers
+dTPM::pcr_registers <= Bootloader::boot_configuration : "Bootloader measured into TPM PCRs"
+
+# BitLocker VMK unsealing requires matching PCR values (measured boot)
+VMK::pcr_policy <= dTPM::pcr_registers : "Unseal only if PCRs match"
+
+# VMK policy also depends on bootloader configuration
+VMK::pcr_policy <= Bootloader::boot_configuration : "VMK sealed to bootloader state"
+
+# ============================================================================
+# === TERMINAL CONSTRAINTS ===
+# ============================================================================
+
+# Encrypted volume requires boot integrity verification
+EncryptedVolume::boot_integrity <= dTPM::pcr_registers : "Verify platform state via PCRs"
+
+# Encrypted volume decryption requires unsealed VMK
+EncryptedVolume::volume_encryption <= VMK::sealed_blob : "Decrypt volume with VMK"
+
+# User credential requires PIN/biometric authorization
+UserCredential::pin_authorization <= dTPM::storage_root_key : "Authorize with TPM-verified PIN"
+
+# User credential private key protected by NGC wrapping
+UserCredential::private_key <= NGC::container_key : "Unwrap credential key"
+
+# ============================================================================
+# HARDWARE ISOLATION BENEFITS (dTPM-specific)
+# ============================================================================
+#
+# Trust Model Notes:
+#   - Single hardware root: TPMManufacturer
+#   - Independent platform root: UEFI (for Secure Boot chain)
+#   - Manufacturer CA derives from TPMManufacturer (no independent PKI root)
+#   - Bridge constraints explicitly connect platform measurements to TPM
+#
+# dTPM Security Advantages:
+#   1. Physical isolation: Dedicated chip separate from CPU and main memory
+#   2. Immune to CPU attacks: Not vulnerable to Spectre, Meltdown, or faulTPM
+#   3. Tamper-resistant: Physical enclosure with tamper-evident/response features
+#   4. FIPS 140 Level 3: Can achieve high certification levels for compliance
+#   5. Independent operation: Unaffected by CPU firmware bugs or load
+#   6. Dedicated resources: Own processor, NV storage, RNG
+#
+# Trust Basis:
+#   dTPM trust is rooted in physical hardware manufacturing and tamper-resistant
+#   packaging. Keys are burned during manufacturing in secure facility and never
+#   leave the chip. Physical attacks require chip de-capping or sophisticated
+#   laboratory equipment.
+#
+# Use Cases:
+#   - Enterprise servers with compliance requirements (FIPS, Common Criteria)
+#   - Industrial systems in physically accessible environments
+#   - High-value targets requiring maximum assurance
+#   - Long-lifecycle systems where firmware stability is critical
+#
+# Trade-offs:
+#   - Higher cost: $1-5+ BOM cost per unit
+#   - PCB space: Requires dedicated chip and supporting components
+#   - Potential bus attacks: LPC/SPI bus can be probed (mitigated by platform security)
+#   - Cannot be added post-manufacturing (except via add-on modules)

@@ -1,0 +1,296 @@
+# In-toto Supply Chain Attestation
+# End-to-end provenance tracking from source code through build pipeline to container image
+#
+#@ title: In-toto Supply Chain
+#@ heading: In-toto Supply Chain Provenance
+#@ badge: SLSA Level 3+
+#@ badge_type: slsa
+#@ meta: Provenance attestation • High security
+#@ stats: {"nodes": 13, "domains": 4}
+#@ description: Comprehensive supply chain provenance tracking with separation of duties. Each step (checkout, build, test, package) is signed by authorized functionaries, with cryptographic proof that materials of step N match products of step N-1.
+#@ best_for: Critical systems, SLSA Level 3+ compliance, environments requiring full build provenance and separation of duties
+#
+# Trust Model:
+#   - Policy: Layout owner defines expected supply chain steps and functionaries
+#   - Functionaries: Authorized signers for each pipeline step (separation of duties)
+#   - Provenance: Each step creates signed link metadata recording inputs/outputs
+#   - Chain Integrity: Materials of step N must match products of step N-1
+#   - Artifact: Final container image verified via hash in package step products
+#
+# Use Case: High-security environments requiring SLSA Level 3+ compliance
+#
+# References:
+#   - https://github.com/in-toto/attestation
+#   - https://slsa.dev/blog/2023/05/in-toto-and-slsa
+#   - https://slsa.dev/spec/v0.1/provenance
+
+domain "Layout Policy" {
+  # Project owner defining supply chain policy
+  node LayoutOwner "Layout Owner" @anchored {
+    public_key       @constrained
+    key_id           @constrained
+  }
+
+  # Supply chain policy defining steps and authorized functionaries
+  node Layout "Layout Policy" {
+    steps            @critical
+    functionary_keys @critical
+    inspections      @critical
+    signature        @critical
+  }
+}
+
+domain "Checkout Step" {
+  # Authorized signer for checkout step
+  node CheckoutFunctionary "Checkout Functionary" {
+    public_key       @critical
+    authorized_step  @critical
+  }
+
+  # Link metadata for checkout step
+  node CheckoutLink "Checkout Link" {
+    step_name        @critical
+    materials        @critical
+    products         @critical
+    command          @critical
+    signature        @critical
+  }
+}
+
+domain "Build Step" {
+  # Authorized signer for build step
+  node BuildFunctionary "Build Functionary" {
+    public_key       @critical
+    authorized_step  @critical
+  }
+
+  # Link metadata for build step
+  node BuildLink "Build Link" {
+    step_name        @critical
+    materials        @critical
+    products         @critical
+    command          @critical
+    signature        @critical
+  }
+}
+
+domain "Test Step" {
+  # Authorized signer for test step
+  node TestFunctionary "Test Functionary" {
+    public_key       @critical
+    authorized_step  @critical
+  }
+
+  # Link metadata for test step
+  node TestLink "Test Link" {
+    step_name        @critical
+    materials        @critical
+    products         @critical
+    command          @critical
+    signature        @critical
+  }
+}
+
+domain "Package Step" {
+  # Authorized signer for package step
+  node PackageFunctionary "Package Functionary" {
+    public_key       @critical
+    authorized_step  @critical
+  }
+
+  # Link metadata for package step
+  node PackageLink "Package Link" {
+    step_name        @critical
+    materials        @critical
+    products         @critical
+    command          @critical
+    signature        @critical
+  }
+}
+
+domain "Artifacts" {
+  # Source code from version control
+  node SourceCode "Source Code" {
+    commit_hash      @critical
+    repository       @critical
+  }
+
+  # Compiled binary from build step
+  node Binary "Binary Artifact" {
+    file_hash        @critical
+    compiler_version @critical
+  }
+
+  # Tested package ready for containerization
+  node Package "Package" {
+    file_hash        @critical
+    tests_passed     @critical
+  }
+
+  # Final container image
+  node ContainerImage "Container Image" @selected {
+    digest           @critical
+    registry         @critical
+    tag              @critical
+  }
+}
+
+# === Anchors (hierarchical links) ===
+
+# Layout owner establishes policy
+Layout <- LayoutOwner : sign_layout
+
+# Layout authorizes functionaries for each step
+CheckoutFunctionary <- Layout : authorize_checkout
+BuildFunctionary <- Layout : authorize_build
+TestFunctionary <- Layout : authorize_test
+PackageFunctionary <- Layout : authorize_package
+
+# Functionaries sign link metadata for their steps
+CheckoutLink <- CheckoutFunctionary : sign_link
+BuildLink <- BuildFunctionary : sign_link
+TestLink <- TestFunctionary : sign_link
+PackageLink <- PackageFunctionary : sign_link
+
+# Links reference artifacts as products/materials
+SourceCode <- CheckoutLink : record_materials
+Binary <- BuildLink : record_products
+Package <- TestLink : record_products
+ContainerImage <- PackageLink : record_products
+
+# === Bonds (within Layout_Authority domain) ===
+
+# Layout steps defined by owner
+Layout::steps <= LayoutOwner::key_id : define_steps
+
+# Layout functionary keys defined by owner
+Layout::functionary_keys <= LayoutOwner::key_id : define_functionary_keys
+
+# Layout inspections defined by owner
+Layout::inspections <= LayoutOwner::key_id : define_inspections
+
+# Layout must be signed by owner
+Layout::signature <= LayoutOwner::public_key : verify_layout_signature
+
+# === Bonds (within Checkout_Functionary domain) ===
+
+# Checkout functionary must be authorized by layout
+CheckoutFunctionary::public_key <= Layout::functionary_keys : authorize_checkout_key
+CheckoutFunctionary::authorized_step <= Layout::steps : define_checkout_step
+
+# Checkout link materials recorded
+CheckoutLink::materials <= CheckoutFunctionary::public_key : record_checkout_materials
+
+# Checkout link products recorded
+CheckoutLink::products <= CheckoutFunctionary::public_key : record_checkout_products
+
+# Checkout link command recorded
+CheckoutLink::command <= CheckoutFunctionary::public_key : record_checkout_command
+
+# Checkout link step name must match layout
+CheckoutLink::step_name <= Layout::steps : match_checkout_step
+
+# Checkout link signature must verify
+CheckoutLink::signature <= CheckoutFunctionary::public_key : verify_checkout_signature
+
+# === Bonds (within Build_Functionary domain) ===
+
+# Build functionary must be authorized by layout
+BuildFunctionary::public_key <= Layout::functionary_keys : authorize_build_key
+BuildFunctionary::authorized_step <= Layout::steps : define_build_step
+
+# Build link materials recorded
+BuildLink::materials <= BuildFunctionary::public_key : record_build_materials
+
+# Build link products recorded
+BuildLink::products <= BuildFunctionary::public_key : record_build_products
+
+# Build link command recorded
+BuildLink::command <= BuildFunctionary::public_key : record_build_command
+
+# Build link step name must match layout
+BuildLink::step_name <= Layout::steps : match_build_step
+
+# Build link signature must verify
+BuildLink::signature <= BuildFunctionary::public_key : verify_build_signature
+
+# === Bonds (within Test_Functionary domain) ===
+
+# Test functionary must be authorized by layout
+TestFunctionary::public_key <= Layout::functionary_keys : authorize_test_key
+TestFunctionary::authorized_step <= Layout::steps : define_test_step
+
+# Test link materials recorded
+TestLink::materials <= TestFunctionary::public_key : record_test_materials
+
+# Test link products recorded
+TestLink::products <= TestFunctionary::public_key : record_test_products
+
+# Test link command recorded
+TestLink::command <= TestFunctionary::public_key : record_test_command
+
+# Test link step name must match layout
+TestLink::step_name <= Layout::steps : match_test_step
+
+# Test link signature must verify
+TestLink::signature <= TestFunctionary::public_key : verify_test_signature
+
+# === Bonds (within Package_Functionary domain) ===
+
+# Package functionary must be authorized by layout
+PackageFunctionary::public_key <= Layout::functionary_keys : authorize_package_key
+PackageFunctionary::authorized_step <= Layout::steps : define_package_step
+
+# Package link materials recorded
+PackageLink::materials <= PackageFunctionary::public_key : record_package_materials
+
+# Package link products recorded
+PackageLink::products <= PackageFunctionary::public_key : record_package_products
+
+# Package link command recorded
+PackageLink::command <= PackageFunctionary::public_key : record_package_command
+
+# Package link step name must match layout
+PackageLink::step_name <= Layout::steps : match_package_step
+
+# Package link signature must verify
+PackageLink::signature <= PackageFunctionary::public_key : verify_package_signature
+
+
+# === Bridges (cross-domain constraints) ===
+
+# Supply chain integrity: build materials must equal checkout products
+BuildLink::materials <= CheckoutLink::products : verify_checkout_to_build_chain
+
+# Supply chain integrity: test materials must equal build products
+TestLink::materials <= BuildLink::products : verify_build_to_test_chain
+
+# Supply chain integrity: package materials must equal test products
+PackageLink::materials <= TestLink::products : verify_test_to_package_chain
+
+# Source code commit must match checkout materials
+SourceCode::commit_hash <= CheckoutLink::materials : verify_source_materials
+
+# Source code repository constrains checkout link materials
+SourceCode::repository <= CheckoutLink::materials : extract_repository
+
+# Binary hash must match build products
+Binary::file_hash <= BuildLink::products : verify_binary_products
+
+# Binary compiler version constrains build link products
+Binary::compiler_version <= BuildLink::products : extract_compiler_version
+
+# Package hash must match test products
+Package::file_hash <= TestLink::products : verify_package_products
+
+# Package tests_passed constrains test link products
+Package::tests_passed <= TestLink::products : extract_tests_passed
+
+# Container image digest must match package products
+ContainerImage::digest <= PackageLink::products : verify_image_products
+
+# Container image registry constrains package link products
+ContainerImage::registry <= PackageLink::products : extract_registry
+
+# Container image tag constrains package link products
+ContainerImage::tag <= PackageLink::products : extract_tag

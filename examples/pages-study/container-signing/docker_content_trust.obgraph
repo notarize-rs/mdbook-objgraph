@@ -1,0 +1,214 @@
+# Docker Content Trust (TUF-based)
+# Legacy container signing using The Update Framework metadata roles
+#
+#@ title: Docker Content Trust
+#@ heading: Docker Content Trust (TUF-based)
+#@ badge: Deprecated
+#@ badge_type: deprecated
+#@ card_style: deprecated
+#@ meta: TUF-based • Legacy system
+#@ stats: {"nodes": 9, "domains": 3}
+#@ description: Four-layer TUF (The Update Framework) metadata hierarchy protecting against freeze attacks, mix-and-match attacks, and rollback attacks through root, targets, snapshot, and timestamp roles. ⚠️ Deprecation Notice: Azure blocks new DCT enablement after May 31, 2026. Complete removal March 31, 2028. Migrate to Notary v2 or Cosign.
+#
+# Trust Model:
+#   - TUF Root: Offline root key establishes trust hierarchy
+#   - TUF Roles: Delegated keys for targets, snapshot, timestamp
+#   - Metadata Chain: Four-layer metadata structure prevents various attacks
+#   - Artifact: Container image verified via digest in targets.json
+#
+# Status: DEPRECATED - Azure blocks new enablement after May 31, 2026
+#         Complete removal March 31, 2028. Migrate to Notary v2 or Cosign.
+#
+# References:
+#   - https://theupdateframework.github.io/specification/latest/
+#   - https://theupdateframework.io/docs/metadata/
+#   - https://learn.microsoft.com/en-us/azure/container-registry/container-registry-content-trust-deprecation
+
+domain "TUF Root" {
+  # Offline root key establishing trust hierarchy (kept air-gapped)
+  node RootKey "Root Key" @anchored {
+    public_key       @constrained
+    key_id           @constrained
+    algorithm        @constrained
+  }
+
+  # Root metadata defining all role keys
+  node RootJson "root.json" {
+    version          @critical
+    targets_keyid    @critical
+    snapshot_keyid   @critical
+    timestamp_keyid  @critical
+    signature        @critical
+  }
+}
+
+domain "TUF Targets" {
+  # Key authorized to sign targets.json (image mappings)
+  node TargetsKey "Targets Key" {
+    public_key       @critical
+    key_id           @critical
+    authorized       @critical
+  }
+
+  # Targets metadata mapping image tags to digests
+  node TargetsJson "targets.json" {
+    version          @critical
+    image_mappings   @critical
+    signature        @critical
+    content_hash     @critical
+  }
+}
+
+domain "TUF Snapshot" {
+  # Key authorized to sign snapshot.json (metadata consistency)
+  node SnapshotKey "Snapshot Key" {
+    public_key       @critical
+    key_id           @critical
+    authorized       @critical
+  }
+
+  # Snapshot metadata containing hashes of all other metadata
+  node SnapshotJson "snapshot.json" {
+    version          @critical
+    targets_hash     @critical
+    signature        @critical
+    content_hash     @critical
+  }
+}
+
+domain "TUF Timestamp" {
+  # Key authorized to sign timestamp.json (freshness)
+  node TimestampKey "Timestamp Key" {
+    public_key       @critical
+    key_id           @critical
+    authorized       @critical
+  }
+
+  # Timestamp metadata with hash of snapshot and current time
+  node TimestampJson "timestamp.json" {
+    version          @critical
+    snapshot_hash    @critical
+    timestamp        @critical
+    expiration       @critical
+    signature        @critical
+  }
+}
+
+domain "OCI Registry" {
+  # Container image being verified
+  node ContainerImage "Container Image" @selected {
+    digest           @critical
+    tag              @critical
+    registry         @critical
+  }
+}
+
+# === Anchors (hierarchical links) ===
+
+# Root key delegates to role keys
+TargetsKey <- RootKey : delegate_targets
+SnapshotKey <- RootKey : delegate_snapshot
+TimestampKey <- RootKey : delegate_timestamp
+
+# Role keys sign metadata files
+RootJson <- RootKey : sign_root
+TargetsJson <- TargetsKey : sign_targets
+SnapshotJson <- SnapshotKey : sign_snapshot
+TimestampJson <- TimestampKey : sign_timestamp
+
+# Container image is referenced in targets
+ContainerImage <- TargetsJson : image_reference
+
+# === Bonds (within TUF_Root_Authority domain) ===
+
+# Root.json version must be valid
+RootJson::version <= RootKey::key_id : validate_root_version
+
+# Root.json must specify targets key ID
+RootJson::targets_keyid <= RootKey::key_id : define_targets_keyid
+
+# Root.json must specify snapshot key ID
+RootJson::snapshot_keyid <= RootKey::key_id : define_snapshot_keyid
+
+# Root.json must specify timestamp key ID
+RootJson::timestamp_keyid <= RootKey::key_id : define_timestamp_keyid
+
+# Root signature must verify
+RootJson::signature <= RootKey::public_key : verify_root_signature
+
+# === Bonds (within TUF_Targets_Role domain) ===
+
+# Targets key must be authorized
+TargetsKey::authorized <= RootJson::targets_keyid : authorize_targets_key
+TargetsKey::key_id <= RootJson::targets_keyid : extract_targets_keyid
+
+# Targets.json version controlled
+TargetsJson::version <= TargetsKey::key_id : validate_targets_version
+
+# Targets.json image mappings extracted
+TargetsJson::image_mappings <= TargetsKey::key_id : extract_image_mappings
+
+# Targets.json content hash computed
+TargetsJson::content_hash <= TargetsKey::key_id : compute_targets_hash
+
+# Targets signature must verify
+TargetsJson::signature <= TargetsKey::public_key : verify_targets_signature
+
+# === Bonds (within TUF_Snapshot_Role domain) ===
+
+# Snapshot key must be authorized
+SnapshotKey::authorized <= RootJson::snapshot_keyid : authorize_snapshot_key
+SnapshotKey::key_id <= RootJson::snapshot_keyid : extract_snapshot_keyid
+
+# Snapshot.json version controlled
+SnapshotJson::version <= SnapshotKey::key_id : validate_snapshot_version
+
+# Snapshot.json content hash computed
+SnapshotJson::content_hash <= SnapshotKey::key_id : compute_snapshot_hash
+
+# Snapshot signature must verify
+SnapshotJson::signature <= SnapshotKey::public_key : verify_snapshot_signature
+
+# === Bonds (within TUF_Timestamp_Role domain) ===
+
+# Timestamp key must be authorized
+TimestampKey::authorized <= RootJson::timestamp_keyid : authorize_timestamp_key
+TimestampKey::key_id <= RootJson::timestamp_keyid : extract_timestamp_keyid
+
+# Timestamp.json version controlled
+TimestampJson::version <= TimestampKey::key_id : validate_timestamp_version
+
+# Timestamp.json timestamp recorded
+TimestampJson::timestamp <= TimestampKey::key_id : record_timestamp
+
+# Timestamp.json expiration set
+TimestampJson::expiration <= TimestampKey::key_id : set_expiration
+
+# Timestamp signature must verify
+TimestampJson::signature <= TimestampKey::public_key : verify_timestamp_signature
+
+# === Bridges (cross-domain constraints) ===
+
+# Targets key public key delegated from root
+TargetsKey::public_key <= RootKey::public_key : delegate_targets_key
+
+# Snapshot key public key delegated from root
+SnapshotKey::public_key <= RootKey::public_key : delegate_snapshot_key
+
+# Timestamp key public key delegated from root
+TimestampKey::public_key <= RootKey::public_key : delegate_timestamp_key
+
+# Snapshot must contain hash of targets (prevents mix-and-match attacks)
+SnapshotJson::targets_hash <= TargetsJson::content_hash : hash_targets_metadata
+
+# Timestamp must contain hash of snapshot (ensures freshness)
+TimestampJson::snapshot_hash <= SnapshotJson::content_hash : hash_snapshot_metadata
+
+# Container image registry constrained by timestamp freshness
+ContainerImage::registry <= TimestampJson::expiration : validate_registry_freshness
+
+# Container image digest must match targets mapping
+ContainerImage::digest <= TargetsJson::image_mappings : lookup_image_hash
+
+# Container image tag must match targets mapping
+ContainerImage::tag <= TargetsJson::image_mappings : lookup_image_tag

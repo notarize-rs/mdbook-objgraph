@@ -1,0 +1,246 @@
+# Firmware TPM Trust Model (fTPM)
+# Trust visualization for firmware TPM running in CPU Trusted Execution Environment
+# (AMD Platform Security Processor or Intel Platform Trust Technology) showing
+# trust chain from CPU manufacturer through TEE to BitLocker and Windows Hello.
+#
+#@ title: fTPM
+#@ heading: Firmware TPM Trust Model
+#@ badge: Firmware TEE
+#@ badge_type: hardware
+#@ card_style: hardware
+#@ meta: Firmware TPM • AMD PSP • Intel PTT • CPU TEE
+#@ stats: {"nodes": 11, "domains": 6}
+#@ description: Firmware-based TPM running in CPU Trusted Execution Environment (AMD PSP or Intel PTT). Demonstrates integrated security with shared CPU attack surface.
+#@ key_features: Lower cost, integrated in CPU, TEE isolation, vulnerable to CPU-level attacks (faulTPM)
+#@ best_for: Consumer devices, systems without discrete TPM chip, cost-sensitive deployments
+#
+# Trust Model:
+#   - CPU Hardware: CPU manufacturer provisions TEE (AMD PSP / Intel CSME)
+#   - TEE Domain: fTPM firmware runs in isolated execution environment
+#   - Platform Firmware: UEFI Secure Boot and measured boot
+#   - Cryptographic: Manufacturer CA certifies fTPM identity
+#   - BitLocker: Disk encryption sealed to platform state
+#   - Windows Hello: Biometric/PIN credential protection
+#
+# Key Difference from dTPM:
+#   fTPM shares the CPU die and relies on firmware isolation rather than
+#   physical separation. Vulnerable to CPU-level attacks (Spectre, Meltdown,
+#   faulTPM stack overflow). Lower cost, no additional hardware required.
+#
+# References:
+#   - https://ar5iv.labs.arxiv.org/html/2304.14717 (faulTPM vulnerability)
+#   - https://www.indurock.com/ftpm-vs-dtpm-firmware-tpm-vs-discrete-tpm-what-is-the-difference/
+#   - https://trustedcomputinggroup.org/resource/tpm-library-specification/
+#   - https://learn.microsoft.com/en-us/windows/security/hardware-security/tpm/how-windows-uses-the-tpm
+
+# === DOMAIN: CPU Hardware ===
+domain "CPU Hardware" {
+  # CPU manufacturer root - AMD or Intel
+  node CPUManufacturer "CPU Manufacturer Root" @anchored {
+    root_certificate      @constrained
+    tee_signing_key       @constrained
+    manufacturing_process @constrained
+  }
+
+  # Trusted Execution Environment (AMD PSP or Intel PTT)
+  node TEE "CPU Trusted Execution Environment" {
+    firmware_signature  @critical
+    memory_isolation    @critical
+    tee_processor       @critical
+  }
+}
+
+# === DOMAIN: fTPM Firmware ===
+domain "fTPM Firmware" {
+  # fTPM application running in TEE
+  node fTPM "Firmware TPM (fTPM)" {
+    endorsement_key     @critical
+    pcr_registers       @critical
+    storage_root_key    @critical
+    random_generator    @critical
+  }
+}
+
+# === DOMAIN: Cryptographic PKI ===
+domain "Cryptographic PKI" {
+  # Manufacturer CA for fTPM identity
+  node ManufacturerCA "TPM Manufacturer CA" @anchored {
+    root_certificate      @constrained
+    ek_signing_key        @constrained
+    ek_provisioning_key   @constrained
+  }
+
+  # EK certificate for fTPM
+  node EKCert "Endorsement Key Certificate" {
+    public_key          @constrained
+    ca_signature        @critical
+  }
+}
+
+# === DOMAIN: Platform Firmware ===
+domain "Platform Firmware" {
+  # UEFI firmware with Secure Boot
+  node UEFI "UEFI Firmware (CRTM)" @anchored {
+    platform_key        @constrained
+    secure_boot_db      @constrained
+    crtm_code           @constrained
+  }
+
+  # Bootloader verified by Secure Boot
+  node Bootloader "Windows Bootloader" {
+    bootloader_signature @critical
+    boot_configuration   @critical
+  }
+}
+
+# === DOMAIN: BitLocker Service ===
+domain "BitLocker Service" {
+  # BitLocker Volume Master Key
+  node VMK "Volume Master Key (VMK)" {
+    sealed_blob         @critical
+    pcr_policy          @critical
+  }
+
+  # BitLocker encrypted volume (terminal node)
+  node EncryptedVolume "BitLocker Encrypted Volume" @selected {
+    volume_encryption   @critical
+    boot_integrity      @critical
+  }
+}
+
+# === DOMAIN: Windows Hello Service ===
+domain "Windows Hello Service" {
+  # NGC container for user credentials
+  node NGC "NGC Container Key" {
+    container_key       @critical
+    key_wrapping        @critical
+  }
+
+  # User credential (terminal node)
+  node UserCredential "Windows Hello Credential" @selected {
+    private_key         @critical
+    pin_authorization   @critical
+  }
+}
+
+# ============================================================================
+# === LINKS (Anchors - trust flow right-to-left) ===
+# ============================================================================
+
+# CPU manufacturer provisions TEE firmware
+TEE <- CPUManufacturer : "Provision TEE firmware"
+
+# fTPM runs in TEE isolation
+fTPM <- TEE : "Execute fTPM in TEE"
+
+# Manufacturer CA issues and certifies fTPM's EK certificate
+EKCert <- ManufacturerCA : "Issue EK certificate"
+
+# Bootloader verified and measured by UEFI
+Bootloader <- UEFI : "Secure Boot verification"
+
+# VMK sealed by fTPM
+VMK <- fTPM : "Seal VMK to PCR policy"
+
+# Encrypted volume protected by VMK
+EncryptedVolume <- VMK : "Decrypt with VMK"
+
+# NGC keys wrapped by fTPM SRK
+NGC <- fTPM : "Wrap NGC keys with SRK"
+
+# User credential protected by NGC container
+UserCredential <- NGC : "Unwrap credential key"
+
+# ============================================================================
+# === BONDS (Within-chain constraints) ===
+# ============================================================================
+
+# TEE firmware must be signed by CPU manufacturer
+TEE::firmware_signature <= CPUManufacturer::tee_signing_key : "Verify TEE firmware signature"
+
+# TEE hardware capabilities certified by CPU manufacturing process
+TEE::memory_isolation <= CPUManufacturer::manufacturing_process : "Memory isolation built during CPU manufacturing"
+TEE::tee_processor <= CPUManufacturer::root_certificate : "TEE processor capability certified"
+
+# FIXED: fTPM's cryptographic capabilities provisioned by TEE (not external CA)
+# TEE initializes and provisions the fTPM during boot
+fTPM::storage_root_key <= TEE::tee_processor : "TEE provisions SRK during fTPM initialization"
+fTPM::random_generator <= TEE::tee_processor : "TEE provides hardware RNG to fTPM"
+fTPM::endorsement_key <= TEE::tee_processor : "TEE generates EK for fTPM"
+
+# PCR registers are intrinsic firmware capability initialized by RNG
+fTPM::pcr_registers <= fTPM::random_generator : "PCRs initialized by secure RNG"
+
+# EK certificate signed by manufacturer CA
+EKCert::ca_signature <= ManufacturerCA::ek_signing_key : "Sign EK certificate"
+
+# Bootloader signature verified against Secure Boot db
+Bootloader::bootloader_signature <= UEFI::secure_boot_db : "Verify bootloader signature"
+
+# Boot configuration measured by CRTM
+Bootloader::boot_configuration <= UEFI::crtm_code : "Boot configuration measured by CRTM"
+
+# VMK sealed blob bound to fTPM SRK
+VMK::sealed_blob <= fTPM::storage_root_key : "Seal VMK with SRK"
+
+# NGC container key derived from fTPM SRK
+NGC::container_key <= fTPM::storage_root_key : "Derive NGC container key under SRK"
+
+# NGC key wrapping uses fTPM SRK
+NGC::key_wrapping <= fTPM::storage_root_key : "Wrap NGC keys with SRK"
+
+# ============================================================================
+# === BRIDGES (Cross-domain constraints) ===
+# ============================================================================
+
+# BitLocker VMK unsealing requires matching PCR values (measured boot)
+VMK::pcr_policy <= fTPM::pcr_registers : "Unseal only if PCRs match"
+
+# ADDED: Connect Platform Firmware measured boot to fTPM PCRs
+fTPM::pcr_registers <= Bootloader::boot_configuration : "Extend PCRs with boot measurements"
+
+# ============================================================================
+# === TERMINAL CONSTRAINTS ===
+# ============================================================================
+
+# Encrypted volume requires boot integrity verification
+EncryptedVolume::boot_integrity <= fTPM::pcr_registers : "Verify platform state via PCRs"
+
+# Encrypted volume decryption requires unsealed VMK
+EncryptedVolume::volume_encryption <= VMK::sealed_blob : "Decrypt volume with VMK"
+
+# User credential requires PIN/biometric authorization
+UserCredential::pin_authorization <= fTPM::storage_root_key : "Authorize with TPM-verified PIN"
+
+# User credential private key protected by NGC wrapping
+UserCredential::private_key <= NGC::container_key : "Unwrap credential key"
+
+# ============================================================================
+# VULNERABILITY SURFACE (fTPM-specific)
+# ============================================================================
+#
+# fTPM Attack Surface:
+#   1. CPU-level exploits: Spectre, Meltdown can potentially bypass TEE isolation
+#   2. faulTPM vulnerability: Stack overflow in AMD PSP fTPM (CVE-2021-42299)
+#   3. Firmware dependencies: TEE bugs or firmware updates may impact fTPM
+#   4. Shared resources: fTPM shares CPU die, vulnerable to side channels
+#   5. Lower physical security: No tamper-evident enclosure like dTPM
+#
+# Trust Dependency:
+#   fTPM security relies on CPU manufacturer's TEE implementation correctness.
+#   Unlike dTPM, there is no physical isolation from the CPU attack surface.
+#
+# Mitigation:
+#   - Keep CPU firmware updated
+#   - Enable Secure Boot and measured boot
+#   - Combine with VBS Credential Guard for defense in depth
+#   - Consider dTPM for high-security environments
+#
+# KEY CHANGES FROM ORIGINAL:
+#   1. Removed ManufacturerCA -> fTPM constraints (cycle-causing)
+#   2. Added TEE -> fTPM provisioning constraints (correct trust flow)
+#   3. Changed EKCert::public_key from @critical to @constrained
+#   4. Removed backwards constraint EKCert::public_key <= fTPM::endorsement_key
+#   5. Added Bootloader -> fTPM PCR constraint for measured boot
+#
+# RESULT: Domain cycle eliminated, all nodes verify correctly

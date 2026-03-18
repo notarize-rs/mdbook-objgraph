@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "mdbook-obgraph"
 path = "src/bin/mdbook_obgraph.rs"
 
+[[bin]]
+name = "obgraph-render"
+path = "src/bin/obgraph-render.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"

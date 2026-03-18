@@ -1,0 +1,370 @@
+# AMD SEV-SNP Attestation
+# Hardware-based confidential computing attestation with dual certificate paths
+#
+#@ title: AMD SEV-SNP
+#@ heading: AMD SEV-SNP Attestation Trust Graph
+#@ badge: Hardware TEE
+#@ badge_type: hardware
+#@ card_style: hardware
+#@ meta: Confidential Computing • Hardware Root of Trust
+#@ stats: {"nodes": 12, "domains": 4}
+#@ description: Hardware-based confidential computing attestation with dual certificate paths (VCEK and VLEK). Trust rooted in AMD's PKI with chip-unique secrets and secure processor attestation.
+#@ key_features: Hardware root of trust, TCB versioning, dual certification paths, chip-unique identity, measurement-based attestation.
+#@ best_for: Confidential computing workloads, sensitive data processing, zero-trust cloud environments
+#
+# Trust Model:
+#   - AMD PKI: X.509 certificate hierarchy with two parallel paths:
+#       VCEK path: ARK -> ASK -> VCEK (chip-specific, standard attestation)
+#       VLEK path: ARK -> ASVK -> VLEK (CSP-anonymous, cloud provider attestation)
+#   - AMD Secure Processor: On-die hardware root of trust that derives signing keys,
+#       computes launch measurements, and signs attestation reports
+#   - Guest VM: The confidential workload being attested, with its launch measurement
+#       and guest-supplied report data
+#   - Verifier: The relying party that validates the certificate chain, report signature,
+#       and policy assertions (clock, nonce, expected measurement, minimum TCB)
+#
+# References:
+#   - AMD SEV-SNP Firmware ABI Specification (Publication 56860)
+#   - AMD VCEK Certificate and KDS Specification (Publication 57230)
+#   - AMD VLEK Certificate Definition (Publication 58369)
+#   - https://www.amd.com/content/dam/amd/en/documents/developer/lss-snp-attestation.pdf
+
+# ═══════════════════════════════════════════════════════════════
+# Domain: AMD PKI
+# X.509 certificate hierarchy for SEV-SNP endorsement keys.
+# Two parallel paths share the same ARK root but diverge at
+# the intermediate CA level (ASK for VCEK, ASVK for VLEK).
+# ═══════════════════════════════════════════════════════════════
+
+domain "AMD PKI" {
+  # Self-signed ECDSA P-384 root CA, one per product family (Milan, Genoa, Turin).
+  # Trust anchor: obtained from AMD KDS or pinned out-of-band.
+  node ARK "AMD Root Key" @anchored {
+    serial_number
+    issuer                           @critical
+    not_before                       @critical
+    not_after                        @critical
+    subject                          @constrained
+    subject_public_key               @constrained
+    extensions.basic_constraints     @constrained
+    extensions.key_usage             @constrained
+    extensions.subject_key_id        @constrained
+    extensions.authority_key_id      @critical
+  }
+
+  # ── VCEK Path (standard attestation) ──
+
+  # Intermediate CA signed by ARK; issues VCEK leaf certificates.
+  # One ASK per product family.
+  node ASK "AMD Signing Key" {
+    serial_number
+    issuer                           @critical
+    not_before                       @critical
+    not_after                        @critical
+    subject                          @constrained
+    subject_public_key               @constrained
+    extensions.basic_constraints     @constrained
+    extensions.key_usage             @constrained
+    extensions.subject_key_id        @constrained
+    extensions.authority_key_id      @critical
+  }
+
+  # Leaf certificate binding a chip-unique ECDSA P-384 key to a specific
+  # (chip_id, TCB) tuple. Custom OID extensions encode hw_id and TCB SPLs.
+  # The VCEK private key is derived on-chip from fused secrets + REPORTED_TCB.
+  node VCEK "VCEK" {
+    serial_number
+    issuer                           @critical
+    not_before                       @critical
+    not_after                        @critical
+    subject                          @constrained
+    subject_public_key               @constrained
+    extensions.key_usage             @constrained
+    extensions.authority_key_id      @critical
+    extensions.hw_id                 @constrained
+    extensions.tcb.bootloader        @constrained
+    extensions.tcb.tee               @constrained
+    extensions.tcb.snp               @constrained
+    extensions.tcb.microcode         @constrained
+  }
+
+  # ── VLEK Path (cloud provider attestation) ──
+
+  # Alternative intermediate CA signed by ARK; issues VLEK leaf certificates.
+  # Used by CSPs that want to hide per-chip identity.
+  node ASVK "AMD SEV-VLEK Key" {
+    serial_number
+    issuer                           @critical
+    not_before                       @critical
+    not_after                        @critical
+    subject                          @constrained
+    subject_public_key               @constrained
+    extensions.basic_constraints     @constrained
+    extensions.key_usage             @constrained
+    extensions.subject_key_id        @constrained
+    extensions.authority_key_id      @critical
+  }
+
+  # VLEK leaf certificate. Key is derived from a seed provisioned via "hashstick"
+  # loading rather than chip-fused secrets. Does not expose hw_id, providing
+  # CSP anonymity. SIGNING_KEY bit = 1 in the attestation report.
+  node VLEK "VLEK" {
+    serial_number
+    issuer                           @critical
+    not_before                       @critical
+    not_after                        @critical
+    subject                          @constrained
+    subject_public_key               @constrained
+    extensions.key_usage             @constrained
+    extensions.authority_key_id      @critical
+    extensions.tcb.bootloader        @constrained
+    extensions.tcb.tee               @constrained
+    extensions.tcb.snp               @constrained
+    extensions.tcb.microcode         @constrained
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Domain: AMD Secure Processor
+# ARM Cortex-A5 coprocessor embedded in every AMD EPYC processor.
+# Holds fused chip secrets, executes SEV-SNP firmware, manages
+# guest memory encryption, computes launch measurements, derives
+# signing keys, and generates attestation reports.
+# ═══════════════════════════════════════════════════════════════
+
+domain "AMD Secure Processor" {
+  # The on-die hardware root of trust. Fused chip-unique secrets
+  # can never be read by software and serve as the basis for VCEK
+  # key derivation. The AMD-SP runs its own firmware stack
+  # (bootloader, TEE OS, SNP module) tracked by TCB versioning.
+  node SP "AMD-SP" @anchored {
+    chip_unique_secret               @constrained
+    reported_tcb                     @constrained
+  }
+
+  # Attestation report: binary structure (Table 23, Publication 56860)
+  # signed by the AMD-SP using the VCEK or VLEK private key.
+  # This is the terminal artifact that the verifier validates.
+  node Report "Attestation Report" @selected {
+    version
+    guest_svn
+    policy.debug
+    policy.smt
+    policy.single_socket
+    vmpl                             @critical
+    signature_algo
+    report_data                      @critical
+    measurement                      @critical
+    host_data
+    chip_id                          @critical
+    signing_key
+    tcb.committed.bootloader         @critical
+    tcb.committed.tee                @critical
+    tcb.committed.snp                @critical
+    tcb.committed.microcode          @critical
+    tcb.current.bootloader           @critical
+    tcb.current.tee                  @critical
+    tcb.current.snp                  @critical
+    tcb.current.microcode            @critical
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Domain: Guest VM
+# The confidential workload being attested. Its launch measurement
+# is computed by the AMD-SP during SNP_LAUNCH_START/UPDATE/FINISH.
+# The verifier pre-computes the expected measurement from known-good
+# firmware images to validate the report.
+# ═══════════════════════════════════════════════════════════════
+
+domain "Guest VM" {
+  # The guest image whose integrity is measured. The measurement
+  # is a SHA-384 digest computed iteratively over page contents,
+  # GPAs, page types, and vCPU VMSAs during the launch sequence.
+  # The verifier pre-computes expected_measurement = SHA-384 over
+  # (firmware, kernel, initrd, VMSA) using the same algorithm as the
+  # AMD-SP's SNP_LAUNCH_UPDATE sequence.
+  node Guest "Guest Image" @anchored {
+    firmware                         @constrained
+    kernel                           @constrained
+    initrd                           @constrained
+    vmsa                             @constrained
+    expected_measurement             @constrained
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Domain: Verifier
+# The relying party that validates attestation. Provides trust
+# anchors for time, freshness (nonce), expected measurement,
+# and minimum acceptable TCB versions.
+# ═══════════════════════════════════════════════════════════════
+
+domain "Verifier" {
+  # Verifier's local clock for certificate validity checks.
+  node Clock "System Clock" @anchored {
+    current_time                     @constrained
+  }
+
+  # Cryptographically random challenge value for freshness.
+  # Sent to the guest for inclusion in REPORT_DATA.
+  node Challenge "Attestation Challenge" @anchored {
+    nonce                            @constrained
+  }
+
+  # Minimum acceptable TCB versions from AMD security bulletins
+  # and CVE databases. The verifier's appraisal policy input.
+  node MinTCB "Minimum TCB Policy" @anchored {
+    min_bootloader                   @constrained
+    min_tee                          @constrained
+    min_snp                          @constrained
+    min_microcode                    @constrained
+  }
+
+  # Expected guest policy flags.
+  node ExpectedPolicy "Expected Policy" @anchored {
+    vmpl                             @constrained
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Anchors (signature verification / hierarchical trust)
+# Trust flows right-to-left: child <- parent
+# ═══════════════════════════════════════════════════════════════
+
+# AMD PKI: VCEK certificate chain
+ASK <- ARK : ecdsa_p384
+VCEK <- ASK : ecdsa_p384
+
+# AMD PKI: VLEK certificate chain (alternative path)
+ASVK <- ARK : ecdsa_p384
+VLEK <- ASVK : ecdsa_p384
+
+# Attestation report signed by VCEK (SIGNING_KEY=0).
+# When SIGNING_KEY=1, the report is signed by VLEK instead;
+# the verifier selects which chain to validate accordingly.
+Report <- VCEK : ecdsa_p384
+
+# ═══════════════════════════════════════════════════════════════
+# Bonds: ARK self-signed checks
+# The ARK's issuer must equal its subject (self-signed) and
+# its authority_key_id must match its subject_key_id.
+# ═══════════════════════════════════════════════════════════════
+
+ARK::issuer <= ARK::subject : issuer_match
+ARK::extensions.authority_key_id <= ARK::extensions.subject_key_id
+ARK::not_before <= Clock::current_time : time_valid
+ARK::not_after <= Clock::current_time : time_valid
+
+# ═══════════════════════════════════════════════════════════════
+# Bonds: VCEK path — ASK certificate validation
+# ═══════════════════════════════════════════════════════════════
+
+ASK::issuer <= ARK::subject : issuer_match
+ASK::extensions.authority_key_id <= ARK::extensions.subject_key_id
+ASK::not_before <= Clock::current_time : time_valid
+ASK::not_after <= Clock::current_time : time_valid
+
+# ═══════════════════════════════════════════════════════════════
+# Bonds: VCEK path — VCEK certificate validation
+# ═══════════════════════════════════════════════════════════════
+
+VCEK::issuer <= ASK::subject : issuer_match
+VCEK::extensions.authority_key_id <= ASK::extensions.subject_key_id
+VCEK::not_before <= Clock::current_time : time_valid
+VCEK::not_after <= Clock::current_time : time_valid
+
+# ═══════════════════════════════════════════════════════════════
+# Bonds: VLEK path — ASVK certificate validation
+# ═══════════════════════════════════════════════════════════════
+
+ASVK::issuer <= ARK::subject : issuer_match
+ASVK::extensions.authority_key_id <= ARK::extensions.subject_key_id
+ASVK::not_before <= Clock::current_time : time_valid
+ASVK::not_after <= Clock::current_time : time_valid
+
+# ═══════════════════════════════════════════════════════════════
+# Bonds: VLEK path — VLEK certificate validation
+# ═══════════════════════════════════════════════════════════════
+
+VLEK::issuer <= ASVK::subject : issuer_match
+VLEK::extensions.authority_key_id <= ASVK::extensions.subject_key_id
+VLEK::not_before <= Clock::current_time : time_valid
+VLEK::not_after <= Clock::current_time : time_valid
+
+# ═══════════════════════════════════════════════════════════════
+# Bridges: Hardware <-> Report Identity
+# The AMD-SP's fused chip identity appears in the attestation
+# report as chip_id. This bridges the hardware domain to the
+# report, proving the report was generated by this specific chip.
+# ═══════════════════════════════════════════════════════════════
+
+Report::chip_id <= SP::chip_unique_secret : chip_identity
+
+# ═══════════════════════════════════════════════════════════════
+# Bridges: PKI <-> Hardware Identity
+# The VCEK certificate binds a public key to a specific chip
+# via the hw_id extension. The verifier confirms the report's
+# chip_id matches the VCEK's hw_id.
+# ═══════════════════════════════════════════════════════════════
+
+Report::chip_id <= VCEK::extensions.hw_id : identity_binding
+
+# ═══════════════════════════════════════════════════════════════
+# Bridges: PKI <-> Firmware TCB
+# The VCEK certificate encodes the TCB version for which the
+# key was derived. The report contains committed and current
+# TCB. Invariant: VCEK.tcb <= committed_tcb <= current_tcb
+# ═══════════════════════════════════════════════════════════════
+
+# committed_tcb >= VCEK-certified TCB (anti-rollback against cert)
+Report::tcb.committed.bootloader <= VCEK::extensions.tcb.bootloader : ge
+Report::tcb.committed.tee <= VCEK::extensions.tcb.tee : ge
+Report::tcb.committed.snp <= VCEK::extensions.tcb.snp : ge
+Report::tcb.committed.microcode <= VCEK::extensions.tcb.microcode : ge
+
+# current_tcb >= committed_tcb (running firmware is at least committed level)
+Report::tcb.current.bootloader <= Report::tcb.committed.bootloader : ge
+Report::tcb.current.tee <= Report::tcb.committed.tee : ge
+Report::tcb.current.snp <= Report::tcb.committed.snp : ge
+Report::tcb.current.microcode <= Report::tcb.committed.microcode : ge
+
+# ═══════════════════════════════════════════════════════════════
+# Bridges: Verifier Minimum TCB Policy
+# The verifier enforces minimum acceptable TCB versions based
+# on AMD security bulletins and known CVEs.
+# ═══════════════════════════════════════════════════════════════
+
+Report::tcb.committed.bootloader <= MinTCB::min_bootloader : ge
+Report::tcb.committed.tee <= MinTCB::min_tee : ge
+Report::tcb.committed.snp <= MinTCB::min_snp : ge
+Report::tcb.committed.microcode <= MinTCB::min_microcode : ge
+
+# ═══════════════════════════════════════════════════════════════
+# Bridges: Verifier Nonce <-> Report Freshness
+# The verifier generates a nonce, sends it to the guest, which
+# includes it in REPORT_DATA. The AMD-SP signs it into the
+# report. Prevents replay attacks.
+# ═══════════════════════════════════════════════════════════════
+
+Report::report_data <= Challenge::nonce : freshness_binding
+
+# ═══════════════════════════════════════════════════════════════
+# Bridges: Guest Measurement <-> Report Measurement
+# The expected launch digest is pre-computed from known-good
+# guest image components (firmware, kernel, initrd, VMSA) using
+# the same SHA-384 iterative page measurement algorithm that the
+# AMD-SP executes during SNP_LAUNCH_UPDATE. The verifier
+# compares this pre-computed digest against the MEASUREMENT
+# field in the signed attestation report.
+# ═══════════════════════════════════════════════════════════════
+
+Report::measurement <= Guest::expected_measurement : measurement_match
+
+# ═══════════════════════════════════════════════════════════════
+# Bridges: Verifier Expected Policy
+# The verifier checks that the report's VMPL matches expectations
+# (typically VMPL 0 for direct guest attestation).
+# ═══════════════════════════════════════════════════════════════
+
+Report::vmpl <= ExpectedPolicy::vmpl : policy_check
