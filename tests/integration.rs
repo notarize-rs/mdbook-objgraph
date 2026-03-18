@@ -299,3 +299,18 @@ fn sev_snp_realistic_full_pipeline() {
         "Output should contain dotted property names"
     );
 }
+
+const CYCLE_EXAMPLE: &str = include_str!("cycle.objgraph");
+
+#[test]
+fn cycle_detection_reports_error() {
+    let result = mdbook_obgraph::process(CYCLE_EXAMPLE);
+    assert!(result.is_err(), "Cycle example should fail with cycle detection error");
+    let err = result.unwrap_err();
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("cycle") || err_msg.contains("Cycle"),
+        "Error message should mention cycle: {}",
+        err_msg
+    );
+}

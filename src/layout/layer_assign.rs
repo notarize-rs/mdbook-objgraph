@@ -912,6 +912,57 @@ pub fn compound_network_simplex(graph: &Graph) -> Result<LayerAssignment, Obgrap
                 }
             }
         }
+
+        // Check for domain-level cycles: if not all meta-elements were sorted,
+        // there must be a cycle in the domain ordering constraints.
+        if sorted.len() != meta_elements.len() {
+            let sorted_set: HashSet<MetaElement> = sorted.iter().copied().collect();
+
+            // Identify elements actually in a cycle (can reach themselves)
+            // vs elements merely blocked by the cycle.
+            let unsorted: Vec<MetaElement> = meta_elements
+                .iter()
+                .filter(|me| !sorted_set.contains(me))
+                .copied()
+                .collect();
+            let unsorted_set: HashSet<MetaElement> = unsorted.iter().copied().collect();
+            let mut in_cycle: HashSet<MetaElement> = HashSet::new();
+            for &start in &unsorted {
+                let mut visited = HashSet::new();
+                let mut stack = vec![start];
+                while let Some(v) = stack.pop() {
+                    if let Some(neighbors) = adj.get(&v) {
+                        for &tgt in neighbors {
+                            if unsorted_set.contains(&tgt) && visited.insert(tgt) {
+                                if tgt == start {
+                                    in_cycle.insert(start);
+                                }
+                                stack.push(tgt);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let me_name = |me: &MetaElement| -> &str {
+                match me {
+                    MetaElement::Domain(did) => graph.domains.iter()
+                        .find(|d| d.id == *did)
+                        .map(|d| d.display_name.as_str())
+                        .unwrap_or("?"),
+                    MetaElement::FreeNode(nid) => graph.nodes[nid.index()].label(),
+                }
+            };
+            let edges: Vec<String> = meta_order
+                .iter()
+                .filter(|(src, tgt)| in_cycle.contains(src) && in_cycle.contains(tgt))
+                .map(|(src, tgt)| format!("{} -> {}", me_name(src), me_name(tgt)))
+                .collect();
+            return Err(ObgraphError::Layout(format!(
+                "domain-level cycle: {}", edges.join(", "),
+            )));
+        }
+
         sorted
     };
 
@@ -1367,6 +1418,146 @@ mod tests {
         // Both are roots with no edges -- both at layer 0.
         assert_eq!(result.node_layers[&NodeId(0)], 0);
         assert_eq!(result.node_layers[&NodeId(1)], 0);
+    }
+
+    // ----- Test 8: Domain-level cycle detection -----
+
+    #[test]
+    fn test_domain_level_cycle_detected() {
+        // Two domains D0 and D1 with cross-domain constraints forming a cycle:
+        //   D0::node_a -> D1::node_b (constraint)
+        //   D1::node_b -> D0::node_c (constraint)
+        //
+        // Anchor structure: a is root, b is root (both @anchored).
+        // c is anchored by a.
+        // The cross-domain constraints create a domain ordering cycle: D0 < D1 < D0.
+        let nodes = vec![
+            {
+                let mut n = make_node(0, "a", &[0], true);
+                n.domain = Some(DomainId(0));
+                n
+            },
+            {
+                let mut n = make_node(1, "b", &[1], true);
+                n.domain = Some(DomainId(1));
+                n
+            },
+            {
+                let mut n = make_node(2, "c", &[2], false);
+                n.domain = Some(DomainId(0));
+                n
+            },
+        ];
+        let props = vec![
+            make_prop(0, 0, "p0"),
+            make_prop(1, 1, "p1"),
+            make_prop(2, 2, "p2"),
+        ];
+        let edges = vec![
+            // Anchor: a -> c (within D0)
+            Edge::Anchor {
+                parent: NodeId(0),
+                child: NodeId(2),
+                operation: None,
+            },
+            // Cross-domain constraint: a::p0 -> b::p1 (D0 -> D1)
+            Edge::Constraint {
+                source_prop: PropId(0),
+                dest_prop: PropId(1),
+                operation: None,
+            },
+            // Cross-domain constraint: b::p1 -> c::p2 (D1 -> D0) — creates cycle
+            Edge::Constraint {
+                source_prop: PropId(1),
+                dest_prop: PropId(2),
+                operation: None,
+            },
+        ];
+        let domains = vec![
+            Domain {
+                id: DomainId(0),
+                display_name: "Domain 0".to_string(),
+                members: vec![NodeId(0), NodeId(2)],
+            },
+            Domain {
+                id: DomainId(1),
+                display_name: "Domain 1".to_string(),
+                members: vec![NodeId(1)],
+            },
+        ];
+        let graph = make_graph(nodes, props, edges, domains);
+
+        let result = compound_network_simplex(&graph);
+        assert!(result.is_err(), "domain-level cycle should be detected");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("domain-level cycle"),
+            "error should mention domain-level cycle, got: {}",
+            err_msg
+        );
+    }
+
+    // ----- Test 9: Valid cross-domain graph (no false positive) -----
+
+    #[test]
+    fn test_valid_cross_domain_no_false_positive() {
+        // Two domains with a unidirectional cross-domain constraint (no cycle).
+        //   D0: node_a (root) -> node_b (child)
+        //   D1: node_c (root)
+        //   Constraint: a::p0 -> c::p1 (D0 -> D1, one direction only)
+        let nodes = vec![
+            {
+                let mut n = make_node(0, "a", &[0], true);
+                n.domain = Some(DomainId(0));
+                n
+            },
+            {
+                let mut n = make_node(1, "b", &[], false);
+                n.domain = Some(DomainId(0));
+                n
+            },
+            {
+                let mut n = make_node(2, "c", &[1], true);
+                n.domain = Some(DomainId(1));
+                n
+            },
+        ];
+        let props = vec![
+            make_prop(0, 0, "p0"),
+            make_prop(1, 2, "p1"),
+        ];
+        let edges = vec![
+            Edge::Anchor {
+                parent: NodeId(0),
+                child: NodeId(1),
+                operation: None,
+            },
+            Edge::Constraint {
+                source_prop: PropId(0),
+                dest_prop: PropId(1),
+                operation: None,
+            },
+        ];
+        let domains = vec![
+            Domain {
+                id: DomainId(0),
+                display_name: "Domain 0".to_string(),
+                members: vec![NodeId(0), NodeId(1)],
+            },
+            Domain {
+                id: DomainId(1),
+                display_name: "Domain 1".to_string(),
+                members: vec![NodeId(2)],
+            },
+        ];
+        let graph = make_graph(nodes, props, edges, domains);
+
+        let result = compound_network_simplex(&graph);
+        assert!(
+            result.is_ok(),
+            "valid cross-domain graph should not be flagged as cyclic: {:?}",
+            result.err()
+        );
     }
 
 }
